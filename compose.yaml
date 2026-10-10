@@ -12,6 +12,11 @@ services:
       BI_DATABASE_URL: postgres://bi:bi@postgres:5432/bi
       BI_PUBLIC_ORIGIN: http://127.0.0.1:8080
       BI_DEV_USERS: '[{"id":"synthetic-analyst","display_name":"Analista sintético"},{"id":"synthetic-viewer","display_name":"Lector sintético"}]'
+      BI_LAKE_CATALOG: dbname=bi_lake_catalog host=postgres port=5432 user=bi password=bi
+      # Development stack: load the synthetic sales fixture (idempotent).
+      BI_DEV_FIXTURE_ROWS: "1000000"
+    volumes:
+      - lakedata:/var/lib/bi
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -37,3 +42,4 @@ services:
 
 volumes:
   pgdata:
+  lakedata:

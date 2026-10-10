@@ -62,29 +62,34 @@ pub async fn live() -> Response {
     path = "/health/ready",
     tag = "health",
     operation_id = "getReadiness",
-    summary = "Readiness: PostgreSQL accesible y migraciones aplicadas.",
+    summary = "Readiness: PostgreSQL accesible, migraciones aplicadas y, si está habilitado, el lago analítico listo.",
     responses(
         (status = 200, description = "Listo para servir", body = Health),
         (status = 503, description = "No listo; `checks` indica qué dependencia falla", body = Health)
     )
 )]
 pub async fn ready(State(state): State<AppState>) -> Response {
-    let postgres = HealthStatus::from(state.db.ping().await);
-    let migrations = HealthStatus::from(state.db.migrations_applied());
-    let ready = postgres == HealthStatus::Ok && migrations == HealthStatus::Ok;
-
+    let mut checks = vec![
+        HealthCheck {
+            name: "postgres".to_owned(),
+            status: HealthStatus::from(state.db.ping().await),
+        },
+        HealthCheck {
+            name: "migrations".to_owned(),
+            status: HealthStatus::from(state.db.migrations_applied()),
+        },
+    ];
+    // Queries need the analytical runtime (DuckDB + DuckLake) when enabled.
+    if state.analytics.enabled() {
+        checks.push(HealthCheck {
+            name: "lake".to_owned(),
+            status: HealthStatus::from(state.analytics.runtime().is_some()),
+        });
+    }
+    let ready = checks.iter().all(|check| check.status == HealthStatus::Ok);
     let health = Health {
         status: HealthStatus::from(ready),
-        checks: vec![
-            HealthCheck {
-                name: "postgres".to_owned(),
-                status: postgres,
-            },
-            HealthCheck {
-                name: "migrations".to_owned(),
-                status: migrations,
-            },
-        ],
+        checks,
     };
     let status = if ready {
         StatusCode::OK

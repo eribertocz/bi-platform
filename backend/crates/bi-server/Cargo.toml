@@ -13,6 +13,8 @@ postgres-tests = []
 
 [dependencies]
 axum.workspace = true
+bi-fixtures = { path = "../bi-fixtures" }
+bi-runtime = { path = "../bi-runtime" }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
