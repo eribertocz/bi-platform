@@ -1,0 +1,58 @@
+name: backend
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - "docs/api/openapi.json"
+      - ".github/workflows/backend.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "docs/api/openapi.json"
+      - ".github/workflows/backend.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: bi
+          POSTGRES_PASSWORD: bi
+          POSTGRES_DB: bi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bi -d bi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Tests (including PostgreSQL integration)
+        run: cargo test --locked --all-features
+        env:
+          DATABASE_URL: postgres://bi:bi@localhost:5432/bi

@@ -8,3 +8,14 @@ Plataforma BI nueva: monolito modular Rust (Axum, DuckDB, PostgreSQL) y frontend
 - Reglas de colaboración: [AGENTS.md](AGENTS.md).
 
 Estado: G0 — Fundaciones, en construcción.
+
+## Backend en desarrollo
+
+```sh
+podman compose up -d          # o: docker compose up -d  (PostgreSQL en 127.0.0.1:54320)
+cd backend
+cargo run -p bi-server        # API en http://127.0.0.1:8080 (/health/live, /health/ready)
+```
+
+Pruebas: `cargo test`; con PostgreSQL real: `DATABASE_URL=postgres://bi:bi@127.0.0.1:54320/bi cargo test --all-features`.
+Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de `compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG`.

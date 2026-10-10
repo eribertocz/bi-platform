@@ -1,0 +1,139 @@
+//! Runtime configuration, read from environment variables.
+
+use std::fmt;
+use std::net::SocketAddr;
+
+/// Database used when `BI_DATABASE_URL` is unset: the local development
+/// PostgreSQL from `compose.yaml`. Never a production credential.
+pub const DEV_DATABASE_URL: &str = "postgres://bi:bi@127.0.0.1:54320/bi";
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub bind_addr: SocketAddr,
+    pub database_url: String,
+    /// True when `BI_DATABASE_URL` was not set and the development default is used.
+    pub database_url_is_default: bool,
+    pub log_format: LogFormat,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ConfigError {
+    InvalidBindAddr(String),
+    InvalidLogFormat(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidBindAddr(value) => {
+                write!(
+                    f,
+                    "BI_BIND_ADDR must be a socket address like 127.0.0.1:8080, got {value:?}"
+                )
+            }
+            Self::InvalidLogFormat(value) => {
+                write!(
+                    f,
+                    "BI_LOG_FORMAT must be \"text\" or \"json\", got {value:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl Config {
+    /// Reads the configuration from the process environment.
+    ///
+    /// # Errors
+    /// Returns an error when a variable is set to an invalid value.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_lookup(|key| std::env::var(key).ok())
+    }
+
+    /// Reads the configuration through `lookup`, so it can be tested without
+    /// touching the process environment.
+    ///
+    /// # Errors
+    /// Returns an error when a variable is set to an invalid value.
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let bind_addr = lookup("BI_BIND_ADDR").unwrap_or_else(|| DEFAULT_BIND_ADDR.to_owned());
+        let bind_addr = bind_addr
+            .parse()
+            .map_err(|_| ConfigError::InvalidBindAddr(bind_addr))?;
+
+        let (database_url, database_url_is_default) = match lookup("BI_DATABASE_URL") {
+            Some(url) => (url, false),
+            None => (DEV_DATABASE_URL.to_owned(), true),
+        };
+
+        let log_format = match lookup("BI_LOG_FORMAT").as_deref() {
+            None | Some("text") => LogFormat::Text,
+            Some("json") => LogFormat::Json,
+            Some(other) => return Err(ConfigError::InvalidLogFormat(other.to_owned())),
+        };
+
+        Ok(Self {
+            bind_addr,
+            database_url,
+            database_url_is_default,
+            log_format,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn defaults_to_local_development_setup() {
+        let config = Config::from_lookup(lookup(&[])).unwrap();
+        assert_eq!(config.bind_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(config.database_url, DEV_DATABASE_URL);
+        assert!(config.database_url_is_default);
+        assert_eq!(config.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn reads_explicit_values() {
+        let config = Config::from_lookup(lookup(&[
+            ("BI_BIND_ADDR", "0.0.0.0:9000"),
+            ("BI_DATABASE_URL", "postgres://u:p@db:5432/x"),
+            ("BI_LOG_FORMAT", "json"),
+        ]))
+        .unwrap();
+        assert_eq!(config.bind_addr, "0.0.0.0:9000".parse().unwrap());
+        assert_eq!(config.database_url, "postgres://u:p@db:5432/x");
+        assert!(!config.database_url_is_default);
+        assert_eq!(config.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn rejects_invalid_values() {
+        assert_eq!(
+            Config::from_lookup(lookup(&[("BI_BIND_ADDR", "localhost")])).unwrap_err(),
+            ConfigError::InvalidBindAddr("localhost".to_owned())
+        );
+        assert_eq!(
+            Config::from_lookup(lookup(&[("BI_LOG_FORMAT", "xml")])).unwrap_err(),
+            ConfigError::InvalidLogFormat("xml".to_owned())
+        );
+    }
+}
