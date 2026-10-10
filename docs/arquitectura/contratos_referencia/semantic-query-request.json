@@ -1,0 +1,21 @@
+{
+  "model": {
+    "id": "billing.synthetic",
+    "revision": "r1"
+  },
+  "measures": [
+    "energy_total"
+  ],
+  "dimensions": [
+    "month"
+  ],
+  "filter": {
+    "op": "eq",
+    "field_id": "month",
+    "value": {
+      "type": "string",
+      "value": "2026-09"
+    }
+  },
+  "limit": 12
+}

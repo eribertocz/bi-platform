@@ -1,0 +1,39 @@
+{
+  "query_id": "query-example-001",
+  "model_revision": "r1",
+  "dataset_snapshots": [
+    {
+      "dataset_id": "billing.synthetic",
+      "snapshot_id": "snap-001"
+    }
+  ],
+  "columns": [
+    {
+      "id": "month",
+      "type": "string",
+      "nullable": false
+    },
+    {
+      "id": "energy_total",
+      "type": "decimal",
+      "precision": 18,
+      "scale": 2,
+      "unit": "kWh",
+      "nullable": false
+    }
+  ],
+  "rows": [
+    [
+      {
+        "type": "string",
+        "value": "2026-09"
+      },
+      {
+        "type": "decimal",
+        "value": "123456.70"
+      }
+    ]
+  ],
+  "row_count": 1,
+  "truncated": false
+}

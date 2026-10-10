@@ -1,0 +1,8 @@
+{
+  "type": "about:blank",
+  "title": "Forbidden",
+  "status": 403,
+  "detail": "Access to this measure is denied",
+  "code": "measure_forbidden",
+  "request_id": "req-test-001"
+}

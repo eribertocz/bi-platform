@@ -1,0 +1,23 @@
+# Rust
+target/
+
+# Node / SvelteKit
+node_modules/
+.svelte-kit/
+build/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Test and benchmark outputs
+test-results/
+playwright-report/
+*.log
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
