@@ -21,3 +21,6 @@ playwright-report/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local DuckLake data (DATA_PATH)
+data/

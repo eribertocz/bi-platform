@@ -54,10 +54,13 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Tests without development login (production defaults)
         run: cargo test --locked
-      - name: Tests (including PostgreSQL integration)
+      - name: DuckLake catalog database
+        run: psql postgres://bi:bi@localhost:5432/bi -c "CREATE DATABASE bi_lake_catalog"
+      - name: Tests (including PostgreSQL and DuckLake integration)
         run: cargo test --locked --all-features
         env:
           DATABASE_URL: postgres://bi:bi@localhost:5432/bi
+          BI_TEST_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
 
   bench:
     # Records a baseline (G0.13); no thresholds, shared runners are noisy.
