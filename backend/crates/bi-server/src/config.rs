@@ -4,6 +4,8 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use crate::auth::AuthConfig;
+
 /// Database used when `BI_DATABASE_URL` is unset: the local development
 /// PostgreSQL from `compose.yaml`. Never a production credential.
 pub const DEV_DATABASE_URL: &str = "postgres://bi:bi@127.0.0.1:54320/bi";
@@ -24,17 +26,23 @@ pub struct Config {
     pub log_format: LogFormat,
     /// Optional frontend build directory; unset means API-only development.
     pub static_dir: Option<PathBuf>,
+    pub auth: AuthConfig,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ConfigError {
     InvalidBindAddr(String),
     InvalidLogFormat(String),
+    InvalidAuthConfig,
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidAuthConfig => write!(
+                f,
+                "invalid authentication configuration: check BI_PUBLIC_ORIGIN, BI_SESSION_TTL_SECONDS and BI_DEV_USERS"
+            ),
             Self::InvalidBindAddr(value) => {
                 write!(
                     f,
@@ -90,6 +98,7 @@ impl Config {
             database_url_is_default,
             log_format,
             static_dir: lookup("BI_STATIC_DIR").map(PathBuf::from),
+            auth: AuthConfig::from_lookup(&lookup)?,
         })
     }
 }

@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import { page } from '$app/state';
   import { resolve } from '$app/paths';
+  import SessionGate from '#lib/SessionGate.svelte';
   import '../app.css';
 
   let { children }: { children: Snippet } = $props();
@@ -30,6 +31,8 @@
       </li>
     </ul>
   </nav>
-  <main id="contenido" tabindex="-1">{@render children()}</main>
+  <main id="contenido" tabindex="-1">
+    <SessionGate pathname={page.url.pathname}>{@render children()}</SessionGate>
+  </main>
 </div>
 <footer class="shell py-6 text-sm text-slate-600">bi-platform · Fundaciones</footer>

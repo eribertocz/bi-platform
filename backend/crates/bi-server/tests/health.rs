@@ -18,9 +18,7 @@ use tower::ServiceExt;
 /// An app whose pool points at a port where nothing listens.
 fn app_without_database() -> Router {
     let pool = db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap();
-    router(AppState {
-        db: Database::start(pool),
-    })
+    router(AppState::new(Database::start(pool)))
 }
 
 fn check(name: &str, status: HealthStatus) -> HealthCheck {

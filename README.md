@@ -29,7 +29,7 @@ las dependencias.
 ```sh
 podman compose up -d postgres # o: docker compose up -d postgres
 cd backend
-cargo run -p bi-server        # API en http://127.0.0.1:8080 (/health/live, /health/ready)
+cargo run -p bi-server        # API sin login de desarrollo; health sigue público
 ```
 
 En otra terminal: `cd frontend`, `npm ci` y `npm run dev`. Vite sirve
@@ -51,6 +51,23 @@ Requiere Node >=22.17 (CI usa 24.21.0). En `frontend/`: `npm ci` y
 `npm run dev`. Abre `http://127.0.0.1:5173`; el proxy envía `/health` y `/api`
 a la API Rust en `http://127.0.0.1:8080`. En `/estado` se consulta la API real;
 si no está disponible, se muestra el error y se puede reintentar.
+
+La pila Compose habilita el login de desarrollo y configura dos identidades
+sintéticas. Abre `/login` para entrar; `/estado` sigue siendo público. El resto
+de la UI requiere sesión y todo `/api/v1/**` la valida en PostgreSQL, salvo los
+dos endpoints de login de desarrollo. Logout revoca la sesión en el servidor.
+
+Para desarrollar con Vite, configura en el proceso Rust
+`BI_PUBLIC_ORIGIN=http://127.0.0.1:5173` y
+`BI_DEV_USERS=[{"id":"synthetic-analyst","display_name":"Analista sintético"}]`,
+y ejecuta `cargo run -p bi-server --features dev-auth`. En PowerShell, asigna
+estas variables con `$env:BI_PUBLIC_ORIGIN='http://127.0.0.1:5173'` y
+`$env:BI_DEV_USERS='[{"id":"synthetic-analyst","display_name":"Analista sintético"}]'`.
+La cookie es HttpOnly y SameSite=Strict; con origen HTTPS añade Secure. Solo
+se permite HTTP en loopback. `BI_SESSION_TTL_SECONDS` admite 60–86400 segundos
+(por defecto 3600). Las operaciones mutadoras exigen el Origin configurado.
+El build por defecto no admite login aunque exista `BI_DEV_USERS`; no añadas
+`dev-auth` al build de producción. Estas sesiones solo autorizan datos sintéticos.
 
 Verificación local (los mismos pasos de CI): `npm run check:api`,
 `npm run format:check`, `npm run check`, `npm run lint`, `npm test`,

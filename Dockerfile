@@ -6,7 +6,8 @@ RUN npm ci && npm run build
 FROM docker.io/library/rust:1.99.0-slim-trixie AS backend
 WORKDIR /app/backend
 COPY backend/ ./
-RUN cargo build --locked --release -j 2 -p bi-server
+ARG BI_CARGO_FEATURES=""
+RUN cargo build --locked --release -j 2 -p bi-server --features "$BI_CARGO_FEATURES"
 
 FROM docker.io/library/debian:trixie-slim
 WORKDIR /app

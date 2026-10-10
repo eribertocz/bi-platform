@@ -6,13 +6,17 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+# Synthetic identities only; absent from the default production build.
+dev-auth = []
 # Integration tests that need a real PostgreSQL reachable through DATABASE_URL.
 postgres-tests = []
 
 [dependencies]
 axum.workspace = true
+getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

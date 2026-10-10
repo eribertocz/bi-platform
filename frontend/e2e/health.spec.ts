@@ -33,7 +33,7 @@ test('Estado del sistema reflects real PostgreSQL availability and recovery', as
   await expect(ready.getByText('migrations', { exact: true })).toBeVisible();
 
   await page.getByRole('link', { name: 'Inicio', exact: true }).click();
-  await expect(page).toHaveURL('/');
+  await expect(page).toHaveURL('/login');
   await page.getByRole('link', { name: 'Estado del sistema', exact: true }).click();
   await expect(ready.getByText('OK (HTTP 200)', { exact: true })).toBeVisible();
 
