@@ -1,6 +1,6 @@
 # AGENTS.md — reglas de trabajo (Claude Code y Codex)
 
-Dos ingenieros full-stack, cada uno en su propio clon y rama. Coordinación únicamente con Git, GitHub Issues, Pull Requests, comentarios y GitHub Actions. No crear scripts ni protocolos propios de coordinación.
+Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un área fija (backend/frontend): los Issues se toman por disponibilidad y dependencias, y cada capacidad se entrega de extremo a extremo (Rust + UI + pruebas). Coordinación únicamente con Git, GitHub Issues, Pull Requests, comentarios y GitHub Actions. No crear scripts ni protocolos propios de coordinación.
 
 ## Referencia técnica
 

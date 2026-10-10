@@ -8,7 +8,9 @@
   "paths": {
     "/health/live": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Liveness: el proceso responde. No consulta dependencias.",
         "operationId": "getLiveness",
         "responses": {
@@ -16,7 +18,9 @@
             "description": "Proceso activo",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Health" }
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
               }
             }
           }
@@ -25,7 +29,9 @@
     },
     "/health/ready": {
       "get": {
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "summary": "Readiness: PostgreSQL accesible y migraciones aplicadas.",
         "operationId": "getReadiness",
         "responses": {
@@ -33,7 +39,9 @@
             "description": "Listo para servir",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Health" }
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
               }
             }
           },
@@ -41,7 +49,9 @@
             "description": "No listo; `checks` indica qué dependencia falla",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/Health" }
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
               }
             }
           }
@@ -53,28 +63,50 @@
     "schemas": {
       "Health": {
         "type": "object",
-        "required": ["status", "checks"],
+        "required": [
+          "status",
+          "checks"
+        ],
         "properties": {
-          "status": { "$ref": "#/components/schemas/HealthStatus" },
           "checks": {
             "type": "array",
-            "items": { "$ref": "#/components/schemas/HealthCheck" }
+            "items": {
+              "$ref": "#/components/schemas/HealthCheck"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
           }
         },
         "additionalProperties": false
       },
       "HealthCheck": {
         "type": "object",
-        "required": ["name", "status"],
+        "required": [
+          "name",
+          "status"
+        ],
         "properties": {
-          "name": { "type": "string", "examples": ["postgres", "migrations"] },
-          "status": { "$ref": "#/components/schemas/HealthStatus" }
+          "name": {
+            "type": "string",
+            "examples": [
+              "postgres",
+              "migrations"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          }
         },
         "additionalProperties": false
       },
       "HealthStatus": {
         "type": "string",
-        "enum": ["ok", "degraded", "unavailable"]
+        "enum": [
+          "ok",
+          "degraded",
+          "unavailable"
+        ]
       }
     }
   }
