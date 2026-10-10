@@ -1,0 +1,62 @@
+name: e2e
+
+on:
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'docs/api/openapi.json'
+      - 'compose.yaml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'docs/api/openapi.json'
+      - 'compose.yaml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/e2e.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  health:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Build and start the complete stack
+        run: docker compose up --build -d
+      - name: Browser health, PostgreSQL outage and recovery
+        run: npm run test:e2e
+        working-directory: frontend
+      - name: Container logs
+        if: always()
+        run: docker compose logs --no-color
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-results
+          path: frontend/test-results/
+          retention-days: 7
+      - name: Stop the stack
+        if: always()
+        run: docker compose down --volumes
