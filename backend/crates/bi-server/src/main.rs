@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use bi_server::config::Config;
 use bi_server::db::{self, Database};
-use bi_server::{AppState, openapi, router, serve, shutdown_signal, telemetry};
+use bi_server::{AppState, openapi, router_with_static, serve, shutdown_signal, telemetry};
 use sqlx::postgres::PgConnectOptions;
 use tokio::net::TcpListener;
 
@@ -74,7 +74,7 @@ async fn run() -> ExitCode {
     };
     tracing::info!(addr = %config.bind_addr, "listening");
 
-    let app = router(AppState { db: db.clone() });
+    let app = router_with_static(AppState { db: db.clone() }, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
     db.pool().close().await;
 

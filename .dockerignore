@@ -1,0 +1,11 @@
+.git
+**/target
+**/node_modules
+**/.svelte-kit
+**/build
+**/test-results
+**/playwright-report
+**/.env
+**/.env.*
+**/*.log
+docs/arquitectura

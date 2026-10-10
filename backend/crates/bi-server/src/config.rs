@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 /// Database used when `BI_DATABASE_URL` is unset: the local development
 /// PostgreSQL from `compose.yaml`. Never a production credential.
@@ -21,6 +22,8 @@ pub struct Config {
     /// True when `BI_DATABASE_URL` was not set and the development default is used.
     pub database_url_is_default: bool,
     pub log_format: LogFormat,
+    /// Optional frontend build directory; unset means API-only development.
+    pub static_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -86,6 +89,7 @@ impl Config {
             database_url,
             database_url_is_default,
             log_format,
+            static_dir: lookup("BI_STATIC_DIR").map(PathBuf::from),
         })
     }
 }
@@ -109,6 +113,7 @@ mod tests {
         assert_eq!(config.database_url, DEV_DATABASE_URL);
         assert!(config.database_url_is_default);
         assert_eq!(config.log_format, LogFormat::Text);
+        assert_eq!(config.static_dir, None);
     }
 
     #[test]
@@ -117,12 +122,14 @@ mod tests {
             ("BI_BIND_ADDR", "0.0.0.0:9000"),
             ("BI_DATABASE_URL", "postgres://u:p@db:5432/x"),
             ("BI_LOG_FORMAT", "json"),
+            ("BI_STATIC_DIR", "../frontend/build"),
         ]))
         .unwrap();
         assert_eq!(config.bind_addr, "0.0.0.0:9000".parse().unwrap());
         assert_eq!(config.database_url, "postgres://u:p@db:5432/x");
         assert!(!config.database_url_is_default);
         assert_eq!(config.log_format, LogFormat::Json);
+        assert_eq!(config.static_dir, Some(PathBuf::from("../frontend/build")));
     }
 
     #[test]

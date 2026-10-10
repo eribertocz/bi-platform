@@ -9,16 +9,41 @@ Plataforma BI nueva: monolito modular Rust (Axum, DuckDB, PostgreSQL) y frontend
 
 Estado: G0 — Fundaciones, en construcción.
 
-## Backend en desarrollo
+## Inicio local con un comando
+
+Con Podman activo y un proveedor Compose instalado (o Docker con Compose):
 
 ```sh
-podman compose up -d          # o: docker compose up -d  (PostgreSQL en 127.0.0.1:54320)
+podman compose up --build    # o: docker compose up --build
+```
+
+Abre `http://127.0.0.1:8080/estado`. El build multi-stage compila Rust y Svelte;
+Axum sirve la API y los archivos estáticos en el mismo origen. No requiere Rust
+ni Node en el host. PostgreSQL persiste en el volumen `pgdata` y se expone en
+`127.0.0.1:54320`; los puertos 8080 y 54320 deben estar libres. Para parar:
+`podman compose down` (conserva los datos). El primer build descarga y compila
+las dependencias.
+
+## Desarrollo
+
+```sh
+podman compose up -d postgres # o: docker compose up -d postgres
 cd backend
 cargo run -p bi-server        # API en http://127.0.0.1:8080 (/health/live, /health/ready)
 ```
 
-Pruebas: `cargo test`; con PostgreSQL real: `DATABASE_URL=postgres://bi:bi@127.0.0.1:54320/bi cargo test --all-features`.
-Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de `compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG`.
+En otra terminal: `cd frontend`, `npm ci` y `npm run dev`. Vite sirve
+`http://127.0.0.1:5173` y envía `/health` y `/api` a Rust en el puerto 8080.
+Si la pila completa estaba levantada, detén antes `app` para liberar ese puerto.
+
+Pruebas: en `backend/`, `cargo fmt --all --check`,
+`cargo clippy --locked --all-targets --all-features -- -D warnings` y
+`cargo test --locked`; con PostgreSQL real, configura
+`DATABASE_URL=postgres://bi:bi@127.0.0.1:54320/bi` y ejecuta
+`cargo test --locked --all-features` (PowerShell: `$env:DATABASE_URL='postgres://bi:bi@127.0.0.1:54320/bi'`).
+Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de
+`compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG` y `BI_STATIC_DIR`
+(directorio del build; sin esta variable, Rust sirve solo la API).
 
 ## Frontend
 
@@ -33,6 +58,12 @@ Verificación local (los mismos pasos de CI): `npm run check:api`,
 `npm run generate:api` y versiona los tipos generados.
 
 El build queda en `frontend/build/`, con fallback SPA `200.html`, sin servidor
-Node en producción. El servidor de archivos debe usar el fallback en rutas de
-navegación; `/health` y `/api` deben resolverse en Rust y nunca devolver el shell.
-La integración del servidor estático Rust se entrega en el gate G0.
+Node en producción. Axum usa el fallback para GET/HEAD de navegación que aceptan
+HTML; archivos ausentes, fetches, `/health` y `/api` no reciben el shell.
+
+Con la pila completa levantada, en `frontend/`: `npx playwright install chromium`
+y `npm run test:e2e`. Para Podman, configura `BI_COMPOSE_COMMAND=podman`
+(PowerShell: `$env:BI_COMPOSE_COMMAND='podman'`). El e2e detiene PostgreSQL,
+verifica «No listo» y lo arranca en un bloque `finally`; también comprueba la
+recuperación. Ejecuta estas pruebas sin otros procesos que dependan de esa base.
+CI ejecuta el mismo e2e con Docker Compose en Linux y conserva trazas al fallar.

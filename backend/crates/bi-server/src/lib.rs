@@ -4,9 +4,11 @@ pub mod config;
 pub mod db;
 pub mod health;
 pub mod openapi;
+mod static_files;
 pub mod telemetry;
 
 use std::future::Future;
+use std::path::PathBuf;
 
 use axum::Router;
 use axum::http::Request;
@@ -26,10 +28,21 @@ pub struct AppState {
 
 /// Builds the HTTP application: routes plus request-id and tracing layers.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    router_with_static(state, None)
+}
+
+/// Builds the same-origin application, optionally serving a frontend build.
+pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Router {
+    let app = Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        .with_state(state)
+        .with_state(state);
+    let app = if let Some(directory) = static_dir {
+        app.fallback(move |request| static_files::serve(directory.clone(), request))
+    } else {
+        app
+    };
+    app
         // Layers run bottom-up on requests: the id is set before the trace span
         // reads it, and copied to the response on the way out.
         .layer(PropagateRequestIdLayer::x_request_id())

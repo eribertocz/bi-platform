@@ -5,7 +5,16 @@ import ts from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
 export default ts.config(
-  { ignores: ['node_modules/**', '.svelte-kit/**', 'build/**', 'src/lib/api/generated.ts'] },
+  {
+    ignores: [
+      'node_modules/**',
+      '.svelte-kit/**',
+      'build/**',
+      'test-results/**',
+      'playwright-report/**',
+      'src/lib/api/generated.ts',
+    ],
+  },
   js.configs.recommended,
   ...ts.configs.recommended,
   ...svelte.configs['flat/recommended'],

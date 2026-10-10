@@ -2,3 +2,5 @@ node_modules
 .svelte-kit
 build
 package-lock.json
+test-results
+playwright-report
