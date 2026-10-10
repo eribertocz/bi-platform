@@ -80,7 +80,9 @@ pub struct Correctness {
     pub oracle_matches_parquet_roundtrip: bool,
 }
 
-/// Runs every phase `warmup + iterations` times, writing scratch files in `workdir`.
+/// Runs every phase `warmup + iterations` times. Scratch files live in a
+/// directory created exclusively for this run inside `workdir` and removed
+/// on return, so concurrent runs never share files.
 ///
 /// # Errors
 /// I/O or Parquet errors while writing or reading the scratch file.
@@ -90,7 +92,10 @@ pub struct Correctness {
 pub fn run(options: BenchOptions, workdir: &Path) -> Result<Report, Error> {
     assert!(options.iterations > 0, "at least one iteration");
     let spec = options.spec;
-    let parquet_path = workdir.join("bench-sales.parquet");
+    let scratch = tempfile::Builder::new()
+        .prefix("bi-bench-")
+        .tempdir_in(workdir)?;
+    let parquet_path = scratch.path().join("sales.parquet");
     let rss = RssSampler::start();
 
     let mut generate = Timings::default();
@@ -123,7 +128,7 @@ pub fn run(options: BenchOptions, workdir: &Path) -> Result<Report, Error> {
 
         correct &= Oracle::from_batches(spec, &read_back) == oracle;
     }
-    std::fs::remove_file(&parquet_path)?;
+    scratch.close()?;
     let rss_peak = rss.stop();
 
     Ok(Report {
@@ -201,11 +206,12 @@ fn percentile(sorted: &[Duration], percent: usize) -> Duration {
     sorted[rank.min(sorted.len()) - 1]
 }
 
-/// Samples this process's resident set size on a background thread.
+/// Samples this process's resident set size on a background thread, which
+/// is stopped and joined on every exit path (including early `?` returns).
 struct RssSampler {
     stop: Arc<AtomicBool>,
     peak: Arc<AtomicU64>,
-    handle: thread::JoinHandle<()>,
+    handle: Option<thread::JoinHandle<()>>,
 }
 
 impl RssSampler {
@@ -236,13 +242,29 @@ impl RssSampler {
                 }
             })
         };
-        Self { stop, peak, handle }
+        Self {
+            stop,
+            peak,
+            handle: Some(handle),
+        }
     }
 
-    fn stop(self) -> u64 {
-        self.stop.store(true, Ordering::Relaxed);
-        self.handle.join().ok();
+    fn stop(mut self) -> u64 {
+        self.join();
         self.peak.load(Ordering::Relaxed)
+    }
+
+    fn join(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle.join().ok();
+        }
+    }
+}
+
+impl Drop for RssSampler {
+    fn drop(&mut self) {
+        self.join();
     }
 }
 
