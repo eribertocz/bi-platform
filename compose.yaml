@@ -13,6 +13,9 @@ services:
       BI_PUBLIC_ORIGIN: http://127.0.0.1:8080
       BI_DEV_USERS: '[{"id":"synthetic-analyst","display_name":"Analista sintético"},{"id":"synthetic-viewer","display_name":"Lector sintético"}]'
       BI_LAKE_CATALOG: dbname=bi_lake_catalog host=postgres port=5432 user=bi password=bi
+      # The stack's own catalog: DuckLake binds a catalog to one DATA_PATH, so
+      # it must not share metadata with `cargo run` on the host (data/lake).
+      BI_LAKE_METADATA_SCHEMA: compose_stack
       # Development stack: load the synthetic sales fixture (idempotent).
       BI_DEV_FIXTURE_ROWS: "1000000"
     volumes:
