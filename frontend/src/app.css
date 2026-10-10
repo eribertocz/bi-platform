@@ -1,0 +1,106 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: system-ui, sans-serif;
+}
+
+body {
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: var(--font-sans);
+}
+a {
+  color: #1e40af;
+  text-underline-offset: 0.2em;
+}
+a:hover {
+  text-decoration: underline;
+}
+:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 4px;
+}
+.shell {
+  max-width: 75rem;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+}
+.brand {
+  color: #0f172a;
+  font-weight: 750;
+  font-size: 1.4rem;
+}
+.app-layout {
+  display: grid;
+  grid-template-columns: 14rem minmax(0, 1fr);
+  gap: 2rem;
+  padding-block: 2rem;
+  min-height: 75vh;
+}
+.nav-list {
+  display: grid;
+  gap: 0.5rem;
+}
+.nav-list a {
+  display: block;
+  padding: 0.75rem 1rem;
+  border-radius: 0.5rem;
+}
+.nav-list a[aria-current='page'] {
+  background: #dbeafe;
+  color: #1e3a8a;
+  font-weight: 650;
+}
+h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 1rem;
+}
+h2 {
+  font-size: 1.2rem;
+  font-weight: 650;
+}
+.panel {
+  background: white;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+}
+button {
+  border: 1px solid #1e40af;
+  background: #1e40af;
+  color: white;
+  border-radius: 0.5rem;
+  padding: 0.65rem 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -10rem;
+  background: white;
+  padding: 1rem;
+  z-index: 10;
+}
+.skip-link:focus {
+  top: 1rem;
+}
+@media (max-width: 48rem) {
+  .app-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.5rem;
+  }
+  .nav-list {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .shell {
+    padding-inline: 1rem;
+  }
+}
