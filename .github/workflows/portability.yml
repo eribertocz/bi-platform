@@ -1,0 +1,90 @@
+name: portability
+
+# Linux, Windows and macOS (G0.14) plus an experimental lane (G0.15).
+# Not on every PR: macOS minutes cost 10x and Windows 2x on a private repo.
+# Linux runs on every PR (backend/frontend workflows); Windows is the
+# agents' local platform.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  pull_request:
+    paths:
+      - ".github/workflows/portability.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portability-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux x86_64, Windows x86_64, macOS arm64.
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        # bash (-eo pipefail) on every OS: Windows PowerShell would only fail
+        # a multi-line step on its last command.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        working-directory: backend
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      # Includes the binary smoke test: starts bi-server without PostgreSQL,
+      # expects /health/live 200 and /health/ready 503.
+      - name: Backend build and tests
+        working-directory: backend
+        run: cargo test --locked
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Frontend tests and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+  experimental:
+    # Newest toolchain and dependencies; reports breakage early, never blocks.
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - name: Rust beta
+        run: rustup toolchain install beta --profile minimal --component clippy
+      - name: Latest semver-compatible Rust dependencies
+        run: cargo +beta update 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - run: cargo +beta clippy --all-targets -- -D warnings
+      - run: cargo +beta test
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+      - name: Outdated frontend packages (report only)
+        working-directory: frontend
+        run: |
+          npm ci
+          echo '### npm outdated' >> "$GITHUB_STEP_SUMMARY"
+          npm outdated >> "$GITHUB_STEP_SUMMARY" || true
