@@ -1,0 +1,100 @@
+{
+  "fixture": "sales",
+  "schema_version": 1,
+  "seed": "42",
+  "rows": "10000",
+  "columns": [
+    {
+      "name": "order_id",
+      "type": "BIGINT",
+      "nullable": false
+    },
+    {
+      "name": "ordered_at",
+      "type": "TIMESTAMP WITH TIME ZONE",
+      "nullable": false
+    },
+    {
+      "name": "region",
+      "type": "VARCHAR",
+      "nullable": true
+    },
+    {
+      "name": "quantity",
+      "type": "BIGINT",
+      "nullable": true
+    },
+    {
+      "name": "amount",
+      "type": "DECIMAL(18,2)",
+      "nullable": true
+    }
+  ],
+  "totals": {
+    "row_count": "10000",
+    "order_id": {
+      "count": "10000",
+      "null_count": "0",
+      "sum": "90071992547459925000",
+      "min": "9007199254740993",
+      "max": "9007199254750992"
+    },
+    "ordered_at": {
+      "min": "2026-01-01T00:04:04.842632Z",
+      "max": "2026-12-31T23:54:32.878850Z"
+    },
+    "region_null_count": "270",
+    "quantity": {
+      "count": "9788",
+      "null_count": "212",
+      "sum": "249355",
+      "min": "1",
+      "max": "50"
+    },
+    "amount": {
+      "count": "9792",
+      "null_count": "208",
+      "sum": "10000000479920845.47",
+      "min": "-99828.41",
+      "max": "9999999999999999.99"
+    }
+  },
+  "by_region": [
+    {
+      "region": "central",
+      "row_count": "1889",
+      "quantity_sum": "47231",
+      "amount_sum": "91678812.67"
+    },
+    {
+      "region": "east",
+      "row_count": "1958",
+      "quantity_sum": "48477",
+      "amount_sum": "10000000094409699.62"
+    },
+    {
+      "region": "north",
+      "row_count": "1974",
+      "quantity_sum": "48496",
+      "amount_sum": "95265986.18"
+    },
+    {
+      "region": "south",
+      "row_count": "1990",
+      "quantity_sum": "49507",
+      "amount_sum": "92702537.13"
+    },
+    {
+      "region": "west",
+      "row_count": "1919",
+      "quantity_sum": "48740",
+      "amount_sum": "93139870.25"
+    },
+    {
+      "region": null,
+      "row_count": "270",
+      "quantity_sum": "6904",
+      "amount_sum": "12723939.62"
+    }
+  ]
+}

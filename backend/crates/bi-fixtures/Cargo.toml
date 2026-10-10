@@ -1,0 +1,18 @@
+[package]
+name = "bi-fixtures"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+chrono.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+
+[lints]
+workspace = true
