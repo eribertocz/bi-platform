@@ -45,16 +45,18 @@ function isResult(body: unknown): body is QueryResult {
     (row) =>
       Array.isArray(row) &&
       row.length === columns.length &&
-      row.every((v, i) =>
-        v === null
-          ? columns[i]!.nullable
+      row.every((v, i) => {
+        const column = columns[i];
+        if (!column) return false;
+        return v === null
+          ? column.nullable
           : typeof v === 'string' &&
-            (columns[i]!.type === 'integer'
-              ? /^-?\d+$/.test(v)
-              : columns[i]!.type === 'decimal'
-                ? /^-?\d+(\.\d+)?$/.test(v)
-                : true),
-      ),
+              (column.type === 'integer'
+                ? /^-?\d+$/.test(v)
+                : column.type === 'decimal'
+                  ? /^-?\d+(\.\d+)?$/.test(v)
+                  : true);
+      }),
   );
 }
 export async function runQuery(

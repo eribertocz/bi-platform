@@ -17,14 +17,23 @@ it('preserves exact strings and forwards cancellation and cookies', async () => 
     method: 'POST',
   });
 });
-it.each([422, 429, 500, 503, 504, 401])(
-  'keeps Problem including code and request_id for HTTP %s',
-  async (status) => {
+it.each([
+  [401, 'session_required'],
+  [403, 'origin_forbidden'],
+  [422, 'invalid_query'],
+  [422, 'result_too_large'],
+  [429, 'too_many_queries'],
+  [500, 'query_failed'],
+  [503, 'analytics_unavailable'],
+  [504, 'query_timeout'],
+] as const)(
+  'keeps Problem including code and request_id for HTTP %s (%s)',
+  async (status, code) => {
     const problem = {
       type: 'about:blank',
       title: 'Error',
       status,
-      code: 'query_failed',
+      code,
       request_id: 'request-test',
       detail: 'Intenta de nuevo',
     };

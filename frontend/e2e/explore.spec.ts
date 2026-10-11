@@ -23,6 +23,7 @@ const display = (value: string | null) => {
 test('real 1M-row stack: exact totals, region filter, NULL and lazy chart navigation', async ({
   page,
   request,
+  baseURL,
 }) => {
   test.setTimeout(150_000);
   expect(oracle.seed).toBe('42');
@@ -36,13 +37,17 @@ test('real 1M-row stack: exact totals, region filter, NULL and lazy chart naviga
   page.on('request', (r) => {
     if (r.url().endsWith('.js')) assets.push(r.url());
   });
-  // Support the stacked #13 branch and the final authenticated contract from #12.
   const me = await request.get('/api/v1/session');
-  if (me.status() === 401) {
-    await page.goto('/login');
-    await page.getByRole('button', { name: 'Entrar' }).click();
-    await expect(page).toHaveURL('/');
-  } else await page.goto('/');
+  expect(me.status()).toBe(401);
+  const anonymousQuery = await request.post('/api/v1/queries', {
+    data: { dataset: 'sales', measures: ['row_count'] },
+    headers: { Origin: baseURL! },
+  });
+  expect(anonymousQuery.status()).toBe(401);
+  expect((await anonymousQuery.json()).code).toBe('session_required');
+  await page.goto('/login');
+  await page.getByRole('button', { name: 'Entrar', exact: true }).click();
+  await expect(page).toHaveURL('/');
   await page.getByRole('link', { name: 'Estado del sistema', exact: true }).click();
   await expect(
     page.getByRole('heading', { name: 'Estado del sistema', exact: true }),
@@ -106,13 +111,18 @@ test('real 1M-row stack: exact totals, region filter, NULL and lazy chart naviga
   await expect(page.getByTestId('kpi-amount')).toHaveText('Sin dato');
   await expect(page.getByRole('status')).toHaveText('No hay ventas para este filtro.');
   await expect(page.getByRole('table')).toHaveCount(0);
-  if (me.status() === 401) {
-    const logout = await page.request.post('/api/v1/logout', {
-      headers: { Origin: new URL(page.url()).origin },
-    });
-    expect(logout.status()).toBe(204);
-    await page.getByRole('button', { name: 'Actualizar resultados' }).click();
-    await expect(page).toHaveURL('/login');
-  }
+  const cookie = (await page.context().cookies()).find((item) => item.name === 'bi_session');
+  expect(cookie).toBeDefined();
+  // A separate client revokes the session while the browser keeps its cookie.
+  const logout = await request.post('/api/v1/logout', {
+    headers: { Cookie: `bi_session=${cookie!.value}`, Origin: new URL(page.url()).origin },
+  });
+  expect(logout.status()).toBe(204);
+  const expired = page.waitForResponse(
+    (response) => response.url().endsWith('/api/v1/queries') && response.status() === 401,
+  );
+  await page.getByRole('button', { name: 'Actualizar resultados' }).click();
+  expect((await (await expired).json()).code).toBe('session_required');
+  await expect(page).toHaveURL('/login');
   expect(errors).toEqual([]);
 });

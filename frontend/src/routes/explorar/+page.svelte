@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { resolve } from '$app/paths';
   import { QueryError, runQuery } from '#lib/api/query.ts';
   import {
     exploreData,
@@ -31,9 +32,7 @@
         if (controller.signal.aborted) return;
         if (error instanceof QueryError && error.problem.status === 401) {
           controller.abort();
-          // Login is supplied by dependency #12, absent from the stacked #13 route types.
-          // eslint-disable-next-line svelte/no-navigation-without-resolve
-          void goto('/login');
+          void goto(resolve('/login'));
           return;
         }
         view = {
