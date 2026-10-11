@@ -7,6 +7,7 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 - Arquitectura: `LEER_PRIMERO.md`, `docs/arquitectura/INDICE_17_MODULOS.md`, `docs/arquitectura/DECISIONES_TECNICAS_RC2.md`, `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`; consultar el m처dulo pertinente a cada tarea.
 - **Decisiones vigentes: `docs/decisiones/` (ADR). Prevalecen sobre `docs/arquitectura/` donde la contradigan.** Toda desviaci처n de la base se registra como ADR; las de producto, con la aprobaci처n del propietario.
 - `docs/arquitectura/` es la base hist처rica original: no se modifica (hashes en `INVENTARIO.md`).
+- Producto: `docs/producto/` (blueprint del propietario y c처mo se incorpora: capacidades, fronteras de seguridad, siguientes entregas).
 - Contrato HTTP vigente: `docs/api/openapi.json`. Los archivos de `contratos_referencia/` son solo muestras.
 
 ## Flujo
