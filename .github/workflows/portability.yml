@@ -122,8 +122,12 @@ jobs:
           workspaces: backend
       - name: DuckLake catalog database
         run: psql postgres://bi:bi@localhost:5432/bi -c "CREATE DATABASE bi_lake_catalog"
-      - run: cargo clippy --locked --release -p bi-engines -- -D warnings
-      - name: Benchmark (1M rows; exits non-zero if any result differs from the oracle)
+      - run: cargo clippy --locked --release -p bi-engines --all-targets --all-features -- -D warnings
+      - name: Exit status (the gate below fails on inexact or failed publication)
+        run: cargo test --locked --release -p bi-engines --features postgres-tests
+        env:
+          BI_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
+      - name: Benchmark (1M rows; exits non-zero if a result or the publication differs from the oracle, or the publication fails)
         run: cargo run --locked --release -p bi-engines -- --rows 1000000 --iterations 5 --out engines-report.json
         env:
           BI_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi

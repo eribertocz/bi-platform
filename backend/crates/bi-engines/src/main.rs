@@ -27,6 +27,8 @@ const USAGE: &str =
   Compares DuckDB SQL and Polars LazyFrame on the synthetic sales fixture.
   The publication step needs the DuckLake catalog configured by BI_LAKE_*
   (default: the development PostgreSQL); --no-publish skips it.
+  Exits non-zero if an engine result or the published table differs from
+  the oracle, or if the publication fails; the report is written anyway.
   defaults: --rows 1000000 --seed 42 --iterations 10";
 
 #[derive(Debug, Serialize)]
@@ -41,7 +43,7 @@ struct Report {
     iterations: usize,
     results: Vec<EngineResult>,
     findings: Vec<String>,
-    publication: serde_json::Value,
+    publication: Publication,
     rss_peak_bytes_sampled: String,
     limitations: Vec<&'static str>,
 }
@@ -63,6 +65,40 @@ struct EngineResult {
     cold_total_ms: f64,
     /// Warm runs, per phase.
     phases: Vec<Phase>,
+}
+
+/// What happened to the Polars → DuckLake publication.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum Publication {
+    /// Only with `--no-publish`: the boundary is never skipped silently.
+    Skipped,
+    Published(publish::Report),
+    /// Kept in the report for diagnosis; the run fails.
+    Failed {
+        error: String,
+    },
+}
+
+/// Why the run fails: an engine result or the published table differs from
+/// the oracle, or the publication failed. Empty when the run succeeds.
+fn failures(results: &[EngineResult], publication: &Publication) -> Vec<String> {
+    let mut failures: Vec<String> = results
+        .iter()
+        .filter(|result| !result.exact)
+        .map(|result| format!("{} {} differs from the oracle", result.engine, result.query))
+        .collect();
+    match publication {
+        Publication::Skipped => {}
+        Publication::Published(report) if report.exact => {}
+        Publication::Published(_) => {
+            failures.push("the table published into DuckLake differs from the oracle".into());
+        }
+        Publication::Failed { error } => {
+            failures.push(format!("the publication into DuckLake failed: {error}"));
+        }
+    }
+    failures
 }
 
 struct Args {
@@ -225,11 +261,13 @@ fn run(args: &Args) -> Result<Report, bi_fixtures::Error> {
 
     let publication = if args.publish {
         match publication(&parquet, spec, args.iterations, &oracle, scratch.path()) {
-            Ok(report) => serde_json::to_value(report)?,
-            Err(error) => serde_json::json!({ "skipped": error.to_string() }),
+            Ok(report) => Publication::Published(report),
+            Err(error) => Publication::Failed {
+                error: error.to_string(),
+            },
         }
     } else {
-        serde_json::json!({ "skipped": "--no-publish" })
+        Publication::Skipped
     };
 
     Ok(Report {
@@ -290,7 +328,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let exact = report.results.iter().all(|r| r.exact);
+    let failures = failures(&report.results, &report.publication);
     let json = serde_json::to_string_pretty(&report).expect("report serializes") + "\n";
     let written = if let Some(path) = out {
         std::fs::write(&path, json)
@@ -302,10 +340,98 @@ fn main() -> ExitCode {
         eprintln!("error: {error}");
         return ExitCode::FAILURE;
     }
-    if exact {
-        ExitCode::SUCCESS
-    } else {
-        eprintln!("error: an engine result differs from the oracle");
-        ExitCode::FAILURE
+    if failures.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    for failure in failures {
+        eprintln!("error: {failure}");
+    }
+    ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn result(exact: bool) -> EngineResult {
+        EngineResult {
+            engine: "polars_lazy",
+            query: "totals",
+            exact,
+            cold_total_ms: 1.0,
+            phases: Vec::new(),
+        }
+    }
+
+    fn published(exact: bool) -> Publication {
+        Publication::Published(publish::Report {
+            description: "test",
+            rows: 2,
+            staging_parquet_bytes: "1".into(),
+            phases: Vec::new(),
+            exact,
+        })
+    }
+
+    #[test]
+    fn exact_results_and_an_exact_publication_succeed() {
+        assert_eq!(
+            failures(&[result(true)], &published(true)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_explicitly_skipped_publication_succeeds() {
+        assert_eq!(
+            failures(&[result(true)], &Publication::Skipped),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn an_inexact_publication_fails() {
+        assert_eq!(
+            failures(&[result(true)], &published(false)),
+            ["the table published into DuckLake differs from the oracle"]
+        );
+    }
+
+    #[test]
+    fn a_failed_publication_fails_with_its_error() {
+        let failed = Publication::Failed {
+            error: "catalog unreachable".into(),
+        };
+        assert_eq!(
+            failures(&[result(true)], &failed),
+            ["the publication into DuckLake failed: catalog unreachable"]
+        );
+    }
+
+    #[test]
+    fn an_inexact_engine_result_fails_even_when_the_publication_is_exact() {
+        assert_eq!(
+            failures(&[result(true), result(false)], &published(true)),
+            ["polars_lazy totals differs from the oracle"]
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_publication_status() {
+        let failed = Publication::Failed {
+            error: "catalog unreachable".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            serde_json::json!({ "status": "failed", "error": "catalog unreachable" })
+        );
+        assert_eq!(
+            serde_json::to_value(Publication::Skipped).unwrap(),
+            serde_json::json!({ "status": "skipped" })
+        );
+        assert_eq!(
+            serde_json::to_value(published(true)).unwrap()["status"],
+            "published"
+        );
     }
 }

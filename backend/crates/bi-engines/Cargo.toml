@@ -7,6 +7,10 @@ publish.workspace = true
 
 # Compares DuckDB SQL and Polars LazyFrame (G1). Not a default workspace
 # member: Polars is large and only this benchmark needs it.
+[features]
+# Tests that publish into a DuckLake catalog on PostgreSQL (BI_LAKE_CATALOG).
+postgres-tests = []
+
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
