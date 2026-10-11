@@ -214,6 +214,9 @@ fn semantic_message(message: &str) -> String {
     format!("{explanation} ({code})")
 }
 
+/// Authorization: action `models.read`, resource the configured project's
+/// `metrics` metadata. The synthetic G2 deployment requires a valid session;
+/// resource policies follow in the G2 security work (ADR 0010 and #64 scope).
 #[utoipa::path(get, path = "/api/v1/models", tag = "models", operation_id = "listModels",
     summary = "Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real.",
     security(("sessionCookie" = [])),

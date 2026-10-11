@@ -20,22 +20,61 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   await page.getByRole('link', { name: 'Modelos', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Modelos', exact: true })).toBeVisible();
   await expect(page.getByRole('list', { name: 'Modelos del proyecto' })).toContainText('Válido');
-  await page.getByRole('button', { name: 'Ventas', exact: true }).click();
+  await page.getByRole('button', { name: 'Actualizar modelos' }).focus();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Origen inexistente', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  const ventas = page.getByRole('button', { name: 'Ventas', exact: true });
+  await expect(ventas).toBeFocused();
+  expect(await ventas.evaluate((element) => getComputedStyle(element).outlineStyle)).not.toBe(
+    'none',
+  );
+  await page.keyboard.press('Enter');
   const detail = page.getByRole('region', { name: 'Ventas', exact: true });
   await expect(detail).toContainText('importe_total');
   await expect(detail).toContainText('DECIMAL(18,2)');
   await expect(detail).toContainText('sales.region');
   await expect(detail).toContainText('Admite valores sin dato (NULL)');
-  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-  await page.getByRole('button', { name: 'Origen inexistente', exact: true }).click();
+  const fingerprint = detail.getByText('Huella de esta definición', { exact: true });
+  await fingerprint.focus();
+  await page.keyboard.press('Enter');
+  expect(await detail.ariaSnapshot()).toContain('heading "Métricas" [level=3]');
+  expect(await detail.ariaSnapshot()).toContain('DECIMAL(18,2)');
+  expect(await detail.ariaSnapshot()).toContain('heading "Dimensiones" [level=3]');
+  await expect(detail).toHaveAttribute('aria-live', 'polite');
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page.keyboard.press('Shift+Tab');
+  await expect(ventas).toBeFocused();
+  await page.keyboard.press('Shift+Tab');
+  await expect(page.getByRole('button', { name: 'Origen inexistente', exact: true })).toBeFocused();
+  await page.keyboard.press('Enter');
   const invalid = page.getByRole('region', { name: 'Origen inexistente', exact: true });
   await expect(invalid).toContainText('El origen no existe');
   await expect(invalid).toContainText('metrics/origen-inexistente.yaml');
-  await invalid.getByText('Ubicación y código del diagnóstico', { exact: true }).click();
+  await page.keyboard.press('Tab');
+  await expect(ventas).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(
+    invalid.getByText('Ubicación y código del diagnóstico', { exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press('Enter');
   await expect(invalid).toContainText('/datasets/0/source');
   await expect(invalid).toContainText('unknown_source');
   await expect(invalid.getByRole('heading', { name: 'Métricas', exact: true })).toHaveCount(0);
-  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  expect(await invalid.ariaSnapshot()).toContain('El origen no existe');
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
   await page.getByRole('button', { name: 'Actualizar modelos' }).click();
   await expect(invalid).toContainText('El origen no existe');
   await page.reload();
@@ -53,7 +92,13 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
     await expect(broken).toContainText('Línea');
     await expect(broken).toContainText('columna');
     await expect(broken.getByRole('heading', { name: 'Métricas', exact: true })).toHaveCount(0);
-    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
   } finally {
     writeFileSync(file, original);
   }
