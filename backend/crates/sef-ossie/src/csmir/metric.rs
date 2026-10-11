@@ -165,30 +165,35 @@ fn dataset_measures(converter: &mut Converter<'_>) {
                 extension,
                 ast: None,
             };
-            let created = crate::expression::parse(&measure.expression)
-                .map_err(|diagnostic| Failure::new(diagnostic.code, diagnostic.message))
-                .and_then(|ast| match strip(&ast) {
-                    Expr::Function(function)
-                        if is_aggregate(function)
-                            && function.over.is_none()
-                            && function_name(function) != "AVG" =>
-                    {
-                        Builder {
-                            converter: &mut *converter,
-                            metric: &state,
-                            names: &names,
-                            by_name: &by_name,
-                            by_id: &mut by_id,
-                            synthesized: 0,
+            // The full language check (as for metrics) rejects what a measure
+            // cannot carry — `FILTER`, parameters, clauses — instead of
+            // dropping it; only then is the tree read.
+            let created =
+                crate::expression::analyze(&measure.expression, crate::expression::Context::Metric)
+                    .and_then(|_| crate::expression::parse(&measure.expression))
+                    .map_err(|diagnostic| Failure::new(diagnostic.code, diagnostic.message))
+                    .and_then(|ast| match strip(&ast) {
+                        Expr::Function(function)
+                            if is_aggregate(function)
+                                && function.over.is_none()
+                                && function_name(function) != "AVG" =>
+                        {
+                            Builder {
+                                converter: &mut *converter,
+                                metric: &state,
+                                names: &names,
+                                by_name: &by_name,
+                                by_id: &mut by_id,
+                                synthesized: 0,
+                            }
+                            .measure(&state.segment, function, measure.aggregation.as_ref())
+                            .map(|_| ())
                         }
-                        .measure(&state.segment, function, measure.aggregation.as_ref())
-                        .map(|_| ())
-                    }
-                    _ => Err(Failure::new(
-                        Code::NotRepresentable,
-                        "Una medida de dataset es un solo agregado (SUM, COUNT, MIN o MAX).",
-                    )),
-                });
+                        _ => Err(Failure::new(
+                            Code::NotRepresentable,
+                            "Una medida de dataset es un solo agregado (SUM, COUNT, MIN o MAX).",
+                        )),
+                    });
             if let Err(failure) = created {
                 converter.fail(&path, failure);
             } else if converter.measures.last().map(|created| &created.dataset)
@@ -798,6 +803,14 @@ impl Builder<'_, '_> {
     /// (SQL's default with `ORDER BY`); at the window's grain each row is a
     /// distinct ordering value, so `ROWS` and `RANGE` agree.
     fn window(&mut self, function: &Function) -> Result<Info, Failure> {
+        // A distinct running sum is not a cumulative sum: CSMIR has no form
+        // for it, so it is rejected rather than computed without DISTINCT.
+        if let FunctionArguments::List(list) = &function.args
+            && matches!(list.duplicate_treatment, Some(DuplicateTreatment::Distinct))
+        {
+            return Err(not_representable("SUM(DISTINCT …) en una ventana"));
+        }
+        self.window_declarations()?;
         let base = match (
             function_name(function).as_str(),
             arguments(function)?.as_slice(),
@@ -871,6 +884,32 @@ impl Builder<'_, '_> {
             allocation_bridge: None,
         });
         Ok(info)
+    }
+
+    /// A window metric's contract is its own (an ordered window over its
+    /// base metric): any other declaration in its extension would be lost,
+    /// so it is rejected and belongs on the base metric. Only `unit` applies.
+    fn window_declarations(&self) -> Result<(), Failure> {
+        let declared = &self.metric.extension;
+        let lost = [
+            ("dataset", declared.dataset.is_some()),
+            ("grain", declared.grain.is_some()),
+            ("rounding", declared.rounding.is_some()),
+            ("zero_division", declared.zero_division.is_some()),
+            ("aggregation", declared.aggregation.is_some()),
+            ("time_behavior", declared.time_behavior.is_some()),
+            ("allocation_bridge", declared.allocation_bridge.is_some()),
+        ];
+        match lost.iter().find(|(_, present)| *present) {
+            Some((property, _)) => Err(Failure::new(
+                Code::NotRepresentable,
+                format!(
+                    "Una métrica de ventana tiene su propio contrato (ventana ordenada sobre su                      métrica base): declara `{property}` en la métrica base."
+                ),
+            )
+            .at(format!("{}/custom_extensions", self.metric.path))),
+            None => Ok(()),
+        }
     }
 
     /// The ordering and partitioning dimensions of a cumulative window,
