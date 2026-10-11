@@ -11,7 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostic::{Code, Diagnostic};
-use crate::document::{Expression, SPEC_VERSION, SemanticModel};
+use crate::document::{Dialect, Expression, SPEC_VERSION, SemanticModel};
+use crate::expression::{Context, analyze};
 
 /// Every error and warning of `model`, errors first in document order.
 #[must_use]
@@ -58,7 +59,12 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
                 &field.name,
                 "el nombre del campo",
             );
-            expression(&mut found, &format!("{path}/expression"), &field.expression);
+            expression(
+                &mut found,
+                &format!("{path}/expression"),
+                &field.expression,
+                Context::Field,
+            );
         }
         duplicates(
             &mut found,
@@ -85,6 +91,7 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
             &mut found,
             &format!("{path}/expression"),
             &metric.expression,
+            Context::Metric,
         );
     }
     duplicates(
@@ -194,13 +201,23 @@ fn identifier(found: &mut Vec<Diagnostic>, path: &str, value: &str, what: &str) 
     }
 }
 
-fn expression(found: &mut Vec<Diagnostic>, path: &str, expression: &Expression) {
+/// Only `OSSIE_SQL_2026` defines portable semantics. Other dialects are
+/// opaque here and will be analyzed by their adapter when compiled.
+fn expression(found: &mut Vec<Diagnostic>, path: &str, expression: &Expression, context: Context) {
     if expression.dialects.is_empty() {
         found.push(Diagnostic::error(
             Code::EmptyList,
             format!("{path}/dialects"),
             "La expresión necesita al menos un dialecto.",
         ));
+    }
+    for (k, candidate) in expression.dialects.iter().enumerate() {
+        if candidate.dialect == Dialect::OssieSql2026
+            && let Err(mut diagnostic) = analyze(&candidate.expression, context)
+        {
+            diagnostic.path = format!("{path}/dialects/{k}/expression");
+            found.push(diagnostic);
+        }
     }
 }
 

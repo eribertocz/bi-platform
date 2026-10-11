@@ -7,6 +7,7 @@
 
 pub mod diagnostic;
 pub mod document;
+pub mod expression;
 pub mod load;
 pub mod validate;
 

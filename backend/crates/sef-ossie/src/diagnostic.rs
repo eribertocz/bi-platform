@@ -39,6 +39,16 @@ pub enum Code {
     ColumnArity,
     /// `to_columns` covers none of the declared keys of the `to` dataset.
     KeyNotCovered,
+    /// A portable expression does not parse as exactly one expression.
+    ExpressionSyntax,
+    /// A construct outside `OSSIE_SQL_2026` (subquery, vendor syntax…).
+    UnsupportedConstruct,
+    /// A function that is neither REQUIRED nor RECOMMENDED.
+    UnknownFunction,
+    /// An aggregate or window in a field, which is a row-level value.
+    AggregateInField,
+    /// An aggregate inside another aggregate.
+    NestedAggregate,
 }
 
 impl Code {
@@ -56,6 +66,11 @@ impl Code {
             Self::UnknownDataset => "unknown_dataset",
             Self::ColumnArity => "column_arity",
             Self::KeyNotCovered => "key_not_covered",
+            Self::ExpressionSyntax => "expression_syntax",
+            Self::UnsupportedConstruct => "unsupported_construct",
+            Self::UnknownFunction => "unknown_function",
+            Self::AggregateInField => "aggregate_in_field",
+            Self::NestedAggregate => "nested_aggregate",
         }
     }
 }

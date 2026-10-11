@@ -73,21 +73,47 @@ fn extensions() -> impl Strategy<Value = Vec<CustomExtension>> {
     )
 }
 
-fn expression() -> impl Strategy<Value = Expression> {
-    let dialect = prop::sample::select(vec![
-        Dialect::OssieSql2026,
-        Dialect::AnsiSql,
-        Dialect::Snowflake,
-        Dialect::Dax,
-    ]);
-    prop::collection::vec(
-        (dialect, text()).prop_map(|(dialect, expression)| DialectExpression {
-            dialect,
-            expression,
-        }),
-        1..3,
-    )
-    .prop_map(|dialects| Expression { dialects })
+/// Portable dialects get valid `OSSIE_SQL_2026` for their context; vendor
+/// dialects are opaque to Ossie, so any text goes.
+fn expression(metric: bool) -> impl Strategy<Value = Expression> {
+    let portable: Vec<&'static str> = if metric {
+        vec![
+            "SUM(orders.amount)",
+            "COUNT(DISTINCT customers.id)",
+            "SUM(amount) / COUNT(*)",
+            "MAX(price) - MIN(price)",
+            "AVG(\"Unit Price\")",
+            "SUM(CASE WHEN status = 'done' THEN amount ELSE 0 END)",
+        ]
+    } else {
+        vec![
+            "order_id",
+            "LOWER(email)",
+            "amount * 2",
+            "CASE WHEN x > 0 THEN 'a' ELSE 'b' END",
+            "CAST(x AS DECIMAL(18, 2))",
+            "DATE_TRUNC('month', ordered_at)",
+        ]
+    };
+    let one = prop_oneof![
+        (
+            prop::sample::select(vec![Dialect::OssieSql2026, Dialect::AnsiSql]),
+            prop::sample::select(portable),
+        )
+            .prop_map(|(dialect, expression)| DialectExpression {
+                dialect,
+                expression: expression.to_owned(),
+            }),
+        (
+            prop::sample::select(vec![Dialect::Snowflake, Dialect::Dax]),
+            text()
+        )
+            .prop_map(|(dialect, expression)| DialectExpression {
+                dialect,
+                expression
+            }),
+    ];
+    prop::collection::vec(one, 1..3).prop_map(|dialects| Expression { dialects })
 }
 
 fn datatype() -> impl Strategy<Value = Option<DataType>> {
@@ -107,7 +133,7 @@ fn datatype() -> impl Strategy<Value = Option<DataType>> {
 
 fn field(name: String) -> impl Strategy<Value = Field> {
     (
-        expression(),
+        expression(false),
         prop::option::of(prop::option::of(any::<bool>()).prop_map(|is_time| Dimension { is_time })),
         optional_text(),
         optional_text(),
@@ -184,7 +210,7 @@ fn model() -> impl Strategy<Value = SemanticModel> {
                     .into_iter()
                     .map(|metric| {
                         (
-                            expression(),
+                            expression(true),
                             optional_text(),
                             datatype(),
                             ai_context(),
