@@ -16,7 +16,7 @@ use tower::ServiceExt;
 use tower_http::request_id::{MakeRequestUuid, SetRequestIdLayer};
 
 /// The query handler alone. Session enforcement for `/api/v1/**` belongs to
-/// the full router (see `auth.rs`).
+/// the full router: see `protection` below and `auth.rs`.
 fn app(analytics: Analytics, query_timeout: Duration) -> Router {
     let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
     Router::new()
@@ -274,6 +274,10 @@ mod lake {
 
 /// An in-memory `lake` with the sales schema, filled by `rows` (SQL VALUES).
 async fn memory_lake_app(rows: &'static str) -> Router {
+    app(memory_lake(rows).await, Duration::from_secs(10))
+}
+
+async fn memory_lake(rows: &'static str) -> Analytics {
     let runtime = bi_runtime::Bootstrap::open(bi_runtime::RuntimeConfig::in_memory(1))
         .unwrap()
         .finish()
@@ -289,7 +293,7 @@ async fn memory_lake_app(rows: &'static str) -> Router {
         })
         .await
         .unwrap();
-    app(Analytics::ready(runtime), Duration::from_secs(10))
+    Analytics::ready(runtime)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -360,4 +364,87 @@ async fn results_within_budget_stay_exact_and_report_their_phases() {
             [null, "1", null, "-0.01"]
         ])
     );
+}
+
+/// The query endpoint behind the real router: a session and, for this POST,
+/// the configured Origin are required before any query reaches the engine.
+#[cfg(all(feature = "postgres-tests", feature = "dev-auth"))]
+mod protection {
+    use bi_server::auth::AuthConfig;
+    use bi_server::router;
+    use sqlx::PgPool;
+
+    use super::*;
+
+    const ORIGIN: &str = "http://127.0.0.1:8080";
+    const QUERY: &str = r#"{"dataset":"sales","measures":["row_count"]}"#;
+
+    async fn send(
+        app: &Router,
+        path: &str,
+        cookie: Option<&str>,
+        origin: Option<&str>,
+        body: &str,
+    ) -> axum::response::Response {
+        let mut request = Request::post(path).header("content-type", "application/json");
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        app.clone()
+            .oneshot(request.body(Body::from(body.to_owned())).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn queries_require_a_session_and_the_configured_origin(pool: PgPool) {
+        let db = Database::start(pool);
+        assert!(db.wait_until_migrated().await);
+        let auth = AuthConfig::from_lookup(&|key| match key {
+            "BI_DEV_USERS" => Some(r#"[{"id":"analyst","display_name":"Analista"}]"#.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let app = router(AppState {
+            db,
+            auth,
+            analytics: memory_lake("(1, '2026-01-01T00:00:00Z', 'north', 1, 1.00)").await,
+            query_timeout: Duration::from_secs(10),
+        });
+
+        let anonymous = send(&app, "/api/v1/queries", None, Some(ORIGIN), QUERY).await;
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let login = send(
+            &app,
+            "/api/v1/dev/login",
+            None,
+            Some(ORIGIN),
+            r#"{"user_id":"analyst"}"#,
+        )
+        .await;
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        // A cross-site POST carries the cookie but not our Origin.
+        for origin in [None, Some("https://evil.example")] {
+            let response = send(&app, "/api/v1/queries", Some(&cookie), origin, QUERY).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin:?}");
+        }
+
+        let allowed = send(&app, "/api/v1/queries", Some(&cookie), Some(ORIGIN), QUERY).await;
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let bytes = allowed.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["rows"], json!([["1"]]));
+    }
 }

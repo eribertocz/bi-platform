@@ -48,9 +48,12 @@ pub struct QueryResult {
     operation_id = "runQuery",
     summary = "Consulta agregada tipada sobre un dataset permitido; sin SQL del cliente.",
     request_body = QueryRequest,
+    security(("sessionCookie" = [])),
     responses(
         (status = 200, description = "Resultado tipado y exacto; fases en la cabecera `Server-Timing` (plan, queue, execute, serialize; ms)", body = QueryResult),
         (status = 400, description = "JSON inválido o campos desconocidos", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "Sin sesión válida (`session_required`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Origin ausente o distinto al configurado (`origin_forbidden`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Cola de consultas llena; reintentar", body = Problem, content_type = "application/problem+json"),
         (status = 500, description = "Fallo interno al ejecutar", body = Problem, content_type = "application/problem+json"),

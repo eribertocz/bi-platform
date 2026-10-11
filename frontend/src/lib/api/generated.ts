@@ -429,7 +429,7 @@ export interface operations {
       };
     };
     responses: {
-      /** @description Resultado tipado y exacto */
+      /** @description Resultado tipado y exacto; fases en la cabecera `Server-Timing` (plan, queue, execute, serialize; ms) */
       200: {
         headers: {
           [name: string]: unknown;
@@ -447,7 +447,25 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Consulta fuera del catálogo o de los límites */
+      /** @description Sin sesión válida (`session_required`) */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Origin ausente o distinto al configurado (`origin_forbidden`) */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`) */
       422: {
         headers: {
           [name: string]: unknown;
