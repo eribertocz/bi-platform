@@ -51,6 +51,31 @@ pub enum Code {
     AggregateInField,
     /// An aggregate inside another aggregate.
     NestedAggregate,
+    /// A `custom_extensions` entry of ours that is malformed, repeated, of
+    /// another version, or incoherent with the object it extends.
+    InvalidExtension,
+    /// The catalog does not know a dataset's `source`.
+    UnknownSource,
+    /// A field, key or relationship names a column the source lacks, or a
+    /// field that is not a column.
+    UnknownColumn,
+    /// An expression or declaration names something the model lacks.
+    UnknownReference,
+    /// A name that matches several columns or fields.
+    AmbiguousReference,
+    /// `datatype` contradicts the type the source or expression has.
+    DatatypeMismatch,
+    /// Operand or result types that CSMIR does not combine implicitly.
+    TypeMismatch,
+    /// Valid `OSSIE_SQL_2026` the engine cannot yet compute exactly.
+    NotRepresentable,
+    /// A metric combining inputs of different grains without declaring its own.
+    GrainRequired,
+    /// Metrics that depend on themselves.
+    ReferenceCycle,
+    /// CSMIR rejected the converted model (types, units, grains…); the
+    /// message carries CSMIR's own code.
+    SemanticContract,
 }
 
 impl Code {
@@ -74,6 +99,17 @@ impl Code {
             Self::UnknownFunction => "unknown_function",
             Self::AggregateInField => "aggregate_in_field",
             Self::NestedAggregate => "nested_aggregate",
+            Self::InvalidExtension => "invalid_extension",
+            Self::UnknownSource => "unknown_source",
+            Self::UnknownColumn => "unknown_column",
+            Self::UnknownReference => "unknown_reference",
+            Self::AmbiguousReference => "ambiguous_reference",
+            Self::DatatypeMismatch => "datatype_mismatch",
+            Self::TypeMismatch => "type_mismatch",
+            Self::NotRepresentable => "not_representable",
+            Self::GrainRequired => "grain_required",
+            Self::ReferenceCycle => "reference_cycle",
+            Self::SemanticContract => "semantic_contract",
         }
     }
 }

@@ -2844,6 +2844,7 @@ version = "0.1.0"
 dependencies = [
  "jsonschema",
  "proptest",
+ "sef-model-ir",
  "serde",
  "serde-saphyr",
  "serde_json",
