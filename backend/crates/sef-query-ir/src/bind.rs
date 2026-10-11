@@ -607,14 +607,6 @@ fn integer(text: &str, signed: bool, bits: u16) -> Result<Literal, String> {
     }
     let digits = if integer.is_empty() { "0" } else { integer };
     let out_of_range = || format!("{text} no cabe en un entero de {bits} bits.");
-    // A CSMIR literal holds 64 bits (`Literal::SignedInteger(i64)`,
-    // `UnsignedInteger(u64)`): a value that fits a wider destination but not
-    // 64 bits is refused, never narrowed.
-    let wider = || {
-        format!(
-            "{text} cabe en su destino de {bits} bits, pero un literal de CSMIR tiene 64 bits:              ese valor no se puede usar como filtro."
-        )
-    };
     if signed {
         let value: i128 = format!("{}{digits}", if negative { "-" } else { "" })
             .parse()
@@ -625,9 +617,7 @@ fn integer(text: &str, signed: bool, bits: u16) -> Result<Literal, String> {
                 return Err(out_of_range());
             }
         }
-        i64::try_from(value)
-            .map(Literal::SignedInteger)
-            .map_err(|_| wider())
+        Ok(Literal::SignedInteger(value))
     } else {
         if negative && digits.bytes().any(|b| b != b'0') {
             return Err(out_of_range());
@@ -636,9 +626,7 @@ fn integer(text: &str, signed: bool, bits: u16) -> Result<Literal, String> {
         if bits < 128 && value >> bits != 0 {
             return Err(out_of_range());
         }
-        u64::try_from(value)
-            .map(Literal::UnsignedInteger)
-            .map_err(|_| wider())
+        Ok(Literal::UnsignedInteger(value))
     }
 }
 
@@ -710,9 +698,8 @@ mod tests {
         [8_u16, 16, 32, 64, 128].into_iter()
     }
 
-    /// Every width and sign accepts exactly its range: the extremes bind,
-    /// one step beyond is out of range. Above 64 bits a value that fits its
-    /// destination is refused explicitly, because a CSMIR literal has 64.
+    /// Every width and sign accepts exactly its range, 128 bits included:
+    /// the extremes bind to the same value, one step beyond is refused.
     #[test]
     fn integers_bind_exactly_the_declared_range() {
         for bits in widths() {
@@ -721,60 +708,51 @@ mod tests {
             } else {
                 (-(1_i128 << (bits - 1)), (1_i128 << (bits - 1)) - 1)
             };
-            for (text, fits_64) in [
-                (min.to_string(), i64::try_from(min).is_ok()),
-                (max.to_string(), i64::try_from(max).is_ok()),
-            ] {
-                match integer(&text, true, bits) {
-                    Ok(Literal::SignedInteger(value)) => {
-                        assert!(fits_64, "INT{bits} {text}");
-                        assert_eq!(value.to_string(), text);
-                    }
-                    Err(message) => {
-                        assert!(
-                            !fits_64 && message.contains("cabe en su destino"),
-                            "{message}"
-                        );
-                    }
-                    other => panic!("{other:?}"),
-                }
-            }
-            if bits < 128 {
-                for outside in [min - 1, max + 1] {
-                    let message = integer(&outside.to_string(), true, bits).expect_err("outside");
-                    assert!(
-                        message.contains("no cabe"),
-                        "INT{bits} {outside}: {message}"
-                    );
-                }
+            for value in [min, -1, 0, max] {
+                assert_eq!(
+                    integer(&value.to_string(), true, bits),
+                    Ok(Literal::SignedInteger(value)),
+                    "INT{bits} {value}"
+                );
             }
             let umax = if bits == 128 {
                 u128::MAX
             } else {
                 (1_u128 << bits) - 1
             };
-            match integer(&umax.to_string(), false, bits) {
-                Ok(Literal::UnsignedInteger(value)) => assert_eq!(u128::from(value), umax),
-                Err(message) => assert!(
-                    bits == 128 && message.contains("cabe en su destino"),
-                    "{message}"
-                ),
-                other => panic!("{other:?}"),
+            for value in [0, umax] {
+                assert_eq!(
+                    integer(&value.to_string(), false, bits),
+                    Ok(Literal::UnsignedInteger(value)),
+                    "UINT{bits} {value}"
+                );
             }
             if bits < 128 {
-                let message = integer(&(umax + 1).to_string(), false, bits).expect_err("outside");
-                assert!(message.contains("no cabe"), "UINT{bits}: {message}");
+                for outside in [min - 1, max + 1] {
+                    assert!(
+                        integer(&outside.to_string(), true, bits).is_err(),
+                        "INT{bits} {outside}"
+                    );
+                }
+                assert!(
+                    integer(&(umax + 1).to_string(), false, bits).is_err(),
+                    "UINT{bits}"
+                );
             }
             assert!(integer("-1", false, bits).is_err(), "UINT{bits} -1");
         }
-        // The reviewer's values: they fit 128 bits, so the refusal says why.
-        for (text, signed) in [
-            ("9223372036854775808", true),
-            ("18446744073709551616", false),
-        ] {
-            let message = integer(text, signed, 128).expect_err("wider than a literal");
-            assert!(message.contains("64 bits"), "{message}");
-        }
+        // The reviewer's values fit their 128-bit destinations exactly.
+        assert_eq!(
+            integer("9223372036854775808", true, 128),
+            Ok(Literal::SignedInteger(1_i128 << 63))
+        );
+        assert_eq!(
+            integer("18446744073709551616", false, 128),
+            Ok(Literal::UnsignedInteger(1_u128 << 64))
+        );
+        // One beyond each 128-bit extreme does not parse into the range.
+        assert!(integer("170141183460469231731687563168715884728", true, 128).is_err());
+        assert!(integer("-170141183460469231731687563168715884729", true, 128).is_err());
         assert!(integer("340282366920938463463374607431768211456", false, 128).is_err());
     }
 

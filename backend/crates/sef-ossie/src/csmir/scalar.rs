@@ -857,7 +857,7 @@ fn number(text: &str, like: Option<&ValueType>, exact: bool) -> Result<ScalarExp
             let value = format!("{sign}{integer}")
                 .parse::<i64>()
                 .map_err(|_| type_mismatch(format!("{text} no cabe en un entero de 64 bits.")))?;
-            let scalar = literal(Literal::SignedInteger(value));
+            let scalar = literal(Literal::SignedInteger(value.into()));
             Ok(match like {
                 Some(target) if *target != scalar.value_type => cast(scalar, target.clone()),
                 _ => scalar,
