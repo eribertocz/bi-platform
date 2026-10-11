@@ -7,6 +7,17 @@ const result = {
   row_count: 1,
   truncated: false,
 };
+it.each([502, 200])('reports HTTP %s without exposing a non-JSON parser error', async (status) => {
+  const request = vi.fn<typeof fetch>().mockResolvedValue(
+    new Response('<html>Bad gateway</html>', {
+      status,
+      headers: { 'Content-Type': 'text/html' },
+    }),
+  );
+  await expect(runQuery(query, new AbortController().signal, request)).rejects.toThrow(
+    `La API respondió HTTP ${status} sin JSON válido.`,
+  );
+});
 it('preserves exact strings and forwards cancellation and cookies', async () => {
   const request = vi.fn<typeof fetch>().mockResolvedValue(Response.json(result));
   const signal = new AbortController().signal;

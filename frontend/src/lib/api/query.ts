@@ -75,7 +75,10 @@ export async function runQuery(
     },
     body: JSON.stringify(query),
   });
-  const body: unknown = await response.json();
+  const body: unknown = await response.json().catch((error: unknown) => {
+    if (signal.aborted) throw error;
+    throw new Error(`La API respondió HTTP ${response.status} sin JSON válido.`);
+  });
   if (!response.ok) {
     if (
       response.headers.get('content-type')?.includes('application/problem+json') &&

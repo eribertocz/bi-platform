@@ -11,12 +11,13 @@
   } from '#lib/features/explore/data.ts';
   import RegionChart from '#lib/features/explore/RegionChart.svelte';
   let region = $state('all');
+  let regions = $state<(string | null)[]>([]);
   let attempt = $state(0);
   let view = $state<
     { kind: 'loading' } | { kind: 'ready'; data: ExploreData } | { kind: 'error'; error: Error }
   >({ kind: 'loading' });
   $effect(() => {
-    const selected = region;
+    const selected: string | null | undefined = region === 'all' ? undefined : JSON.parse(region);
     void attempt;
     const controller = new AbortController();
     view = { kind: 'loading' };
@@ -25,8 +26,11 @@
       runQuery(salesQuery(selected, true), controller.signal),
     ])
       .then(([totals, grouped]) => {
-        if (!controller.signal.aborted)
-          view = { kind: 'ready', data: exploreData(totals, grouped) };
+        if (!controller.signal.aborted) {
+          const data = exploreData(totals, grouped);
+          if (selected === undefined) regions = data.rows.map((row) => row.region);
+          view = { kind: 'ready', data };
+        }
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -54,10 +58,9 @@
   <label for="region" class="font-semibold">Región</label>
   <select id="region" bind:value={region} class="rounded border border-slate-400 bg-white p-2">
     <option value="all">Todas las regiones</option>
-    {#each ['central', 'east', 'north', 'south', 'west'] as value (value)}<option {value}
-        >{value}</option
+    {#each regions as value (value)}<option value={JSON.stringify(value)}
+        >{regionLabel(value)}</option
       >{/each}
-    <option value="null">Sin región</option>
   </select>
   <button onclick={() => attempt++}>Actualizar resultados</button>
 </div>

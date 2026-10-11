@@ -16,7 +16,12 @@ it('converts only bounded relative geometry and keeps missing values distinct fr
   expect(relativeAmounts([{ region: null, count: '0', amount: '0.00' }])).toEqual([0]);
 });
 it('asks the server for totals and grouping with the same region/null filter', () => {
-  expect(salesQuery('null', true).filters).toEqual([{ field: 'region', op: 'in', values: [null] }]);
+  expect(salesQuery(null, true).filters).toEqual([{ field: 'region', op: 'in', values: [null] }]);
+  expect(salesQuery(undefined, true).filters).toEqual([]);
+  for (const region of ['all', 'null'])
+    expect(salesQuery(region, true).filters).toEqual([
+      { field: 'region', op: 'in', values: [region] },
+    ]);
   expect(salesQuery('north', false).dimensions).toEqual([]);
   expect(salesQuery('north', false).filters).toEqual(salesQuery('north', true).filters);
 });

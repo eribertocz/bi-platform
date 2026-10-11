@@ -9,7 +9,7 @@ vi.mock('$app/navigation', () => ({ goto }));
 vi.mock('../../lib/features/explore/echarts', () => ({ mountChart }));
 function result(
   query: QueryRequest,
-  region = 'east',
+  region: string | null = 'east',
   count = '9007199254740993',
   amount: string | null = '10000009275125921.28',
 ) {
@@ -25,6 +25,47 @@ function result(
     truncated: false,
   });
 }
+it.each([['pacific'], ['pacific', null, 'all', 'null']])(
+  'derives options from unfiltered data %j and keeps them when filtering',
+  async (...regions: (string | null)[]) => {
+    const queries: QueryRequest[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>(async (_, init) => {
+        const query: QueryRequest = JSON.parse(init!.body as string);
+        queries.push(query);
+        const response = await result(query).json();
+        if (query.dimensions?.length) {
+          const selected = query.filters?.length ? query.filters[0]!.values : regions;
+          response.rows = selected!.map((region) => [region, '1', '12.34']);
+          response.row_count = response.rows.length;
+        }
+        return Response.json(response);
+      }),
+    );
+    render(Page);
+    await screen.findByRole('table');
+    const labels = ['Todas las regiones', ...regions.map((region) => region ?? 'Sin región')];
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(labels);
+    for (const region of regions) {
+      await fireEvent.change(screen.getByLabelText('Región'), {
+        target: { value: JSON.stringify(region) },
+      });
+      await waitFor(() =>
+        expect(screen.getAllByRole('rowheader').map((cell) => cell.textContent)).toEqual([
+          region ?? 'Sin región',
+        ]),
+      );
+      expect(queries.slice(-2).every((query) => query.filters?.[0]?.values[0] === region)).toBe(
+        true,
+      );
+      expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(labels);
+    }
+    await fireEvent.change(screen.getByLabelText('Región'), { target: { value: 'all' } });
+    await screen.findByRole('table');
+    expect(queries.slice(-2).every((query) => query.filters?.length === 0)).toBe(true);
+  },
+);
 it('discards obsolete responses even when the transport ignores abort, and disposes the chart', async () => {
   const pending: { finish: (r: Response) => void; signal: AbortSignal; query: QueryRequest }[] = [];
   vi.stubGlobal(
@@ -43,14 +84,14 @@ it('discards obsolete responses even when the transport ignores abort, and dispo
   const rendered = render(Page);
   expect(screen.getByRole('status').textContent).toContain('Consultando');
   await waitFor(() => expect(pending).toHaveLength(2));
-  await fireEvent.change(screen.getByLabelText('Región'), { target: { value: 'north' } });
+  await fireEvent.click(screen.getByRole('button', { name: 'Actualizar resultados' }));
   await waitFor(() => expect(pending).toHaveLength(4));
   expect(pending.slice(0, 2).every((p) => p.signal.aborted)).toBe(true);
   pending.slice(2).forEach((p) => p.finish(result(p.query, 'north', '123', '55.01')));
   await waitFor(() => expect(screen.getByTestId('kpi-count').textContent).toBe('123'));
   pending.slice(0, 2).forEach((p) => p.finish(result(p.query)));
   await waitFor(() => expect(screen.getByTestId('kpi-amount').textContent).toBe('55,01'));
-  expect(screen.queryByText('east')).toBeTruthy(); // Filter option remains, obsolete row does not.
+  expect(screen.queryByText('east')).toBeNull(); // Obsolete data cannot populate the options either.
   expect(screen.getAllByRole('row')).toHaveLength(2);
   await waitFor(() => expect(mountChart).toHaveBeenCalledOnce());
   rendered.unmount();

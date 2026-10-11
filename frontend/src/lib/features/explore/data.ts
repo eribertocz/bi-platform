@@ -1,15 +1,12 @@
 import type { QueryResult, QueryRequest } from '#lib/api/query.ts';
 export type RegionRow = { region: string | null; count: string; amount: string | null };
 export type ExploreData = { count: string; amount: string | null; rows: RegionRow[] };
-export function salesQuery(region: string, grouped: boolean): QueryRequest {
+export function salesQuery(region: string | null | undefined, grouped: boolean): QueryRequest {
   return {
     dataset: 'sales',
     dimensions: grouped ? ['region'] : [],
     measures: ['row_count', 'amount_sum'],
-    filters:
-      region === 'all'
-        ? []
-        : [{ field: 'region', op: 'in', values: [region === 'null' ? null : region] }],
+    filters: region === undefined ? [] : [{ field: 'region', op: 'in', values: [region] }],
     limit: 100,
   };
 }

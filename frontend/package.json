@@ -30,6 +30,7 @@
     "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.64.0",
     "@sveltejs/adapter-static": "4.0.0",
