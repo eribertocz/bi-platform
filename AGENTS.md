@@ -15,8 +15,8 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 2. Cada tarea es un Issue con criterios de aceptación y dependencias, dentro del milestone del gate. Para tomarlo: etiqueta `agent:claude` o `agent:codex` y comentario breve.
 3. Rama desde `main` actualizado: `claude/<n>-descripcion` o `codex/<n>-descripcion`. Nunca push directo ni force-push a `main`.
 4. Un PR pequeño por Issue, con `Closes #n`, qué cambia, cómo se probó y riesgos abiertos.
-5. Revisión cruzada obligatoria: el otro agente revisa el código y lo prueba. Ambos usamos la misma cuenta GitHub, por eso no existe "Approve": se aprueba con `gh pr review --comment` escribiendo **Aprobado**, o se piden cambios concretos.
-6. Merge (squash) por el autor solo con CI verde y aprobación del otro agente; después se borra la rama.
+5. Revisión cruzada solo donde un fallo es caro: seguridad y sesiones, exactitud de los datos (también su presentación en la UI), motor y concurrencia, y contrato de la API. El autor indica en el PR si la necesita. Es una sola ronda; al verificar correcciones solo se mira lo pedido. Lo demás (estilos, textos, documentación, CI, pruebas y cambios pequeños) se integra con CI en verde, sin revisión. Ambos usamos la misma cuenta GitHub, por eso no existe "Approve": se aprueba con `gh pr review --comment` escribiendo **Aprobado**, o se piden cambios concretos.
+6. Merge (squash) por el autor con CI en verde y, si requiere revisión, con la aprobación del otro agente; después se borra la rama.
 7. Todo comentario en GitHub empieza con **[Claude]** o **[Codex]**.
 8. Commits con la identidad del agente configurada en su clon, nunca la del propietario.
 9. Decisiones técnicas rutinarias: las toman los agentes. Decisiones fundamentales de producto: se consultan al propietario (@eribertocz) en el Issue.
@@ -25,9 +25,22 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 
 - Software funcionando y pruebas reales; nada simulado que aparente funcionalidad.
 - Antes de abrir o actualizar un PR deben pasar localmente formato, lint, tipos, pruebas y build del área tocada (los mismos comandos que ejecuta CI).
-- Rust: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`. Sin llamadas bloqueantes (DuckDB/Polars/FFI) dentro de executores async.
+- Rust: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`. Sin llamadas bloqueantes (DuckDB/FFI) dentro de executores async.
 - Tipos exactos: `DECIMAL` e `INT64` no se redondean en JS; se preservan `TIMESTAMPTZ` y `NULL`.
 - Seguridad: autorización en el servidor; nunca secretos en Git, logs ni comentarios.
 - Dependencia nueva: una línea en el PR con problema, paquete y licencia, alternativa y motivo.
 - Rendimiento: en rutas críticas, medir antes y después (`docs/arquitectura/PERFORMANCE_DESDE_G0.md`).
 - Documentación nueva solo cuando algo no se pueda expresar en código, contrato o pruebas.
+
+### Nivel exigido (como para Apple, Google o Microsoft)
+
+Cada PR, de cualquiera de los dos, cumple esto o explica por qué no aplica:
+- Diseño justificado: problema, alternativas consideradas y motivo de la elección, contrastado con el módulo correspondiente.
+- Pruebas en todos los niveles que toque: unitarias, integración con PostgreSQL/DuckLake reales, e2e en navegador; exactitud contra el oráculo cuando hay datos.
+- Pruebas basadas en propiedades (`proptest`/`fast-check`) para parsers, compiladores de consultas y código de seguridad.
+- Piezas de seguridad: modelo de amenazas breve en el PR (qué se protege, de quién y cómo se prueba).
+- Observabilidad desde el diseño: `tracing` estructurado con `request_id` y métricas preparadas para OpenTelemetry (M15).
+- Contratos estables: un cambio incompatible de la API se versiona; nunca se rompe un cliente sin aviso.
+- UI: accesibilidad verificada (axe) y tamaño de bundle medido por pantalla.
+- Causas raíz, nunca parches que oculten síntomas; sin `TODO` ni código muerto al integrar.
+- Revisión (cuando aplica): el revisor lee el cambio y ejecuta las pruebas afectadas para comprobar el comportamiento. No reconstruye imágenes ni repite lo que CI ya ejecuta.
