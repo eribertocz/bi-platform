@@ -181,6 +181,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn handles_return_validation_errors_and_preserve_encoded_tokens() {
+        assert!(matches!(handle(&[]), Err(CatalogError::InvalidHandle)));
+        assert!(matches!(
+            handle(&["Sales", "región/total"]),
+            Ok(value) if value.as_str() == "n53616c6573/n72656769c3b36e2f746f74616c"
+        ));
+    }
+
+    #[test]
     fn case_folded_catalog_collisions_never_choose_a_relation() {
         let rows = vec![
             ("pg".into(), "public".into(), "Sales".into()),
