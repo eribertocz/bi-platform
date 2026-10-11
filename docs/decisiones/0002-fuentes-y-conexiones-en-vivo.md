@@ -6,7 +6,7 @@
 El propietario quiere apuntar a formatos modernos y bases de datos, no a "todo tipo de formatos". Rill demuestra el valor de las conexiones en vivo: consulta un DuckLake o un DuckDB sin copiar datos (conector DuckLake desde la v0.86; DuckDB externo solo para desarrollo).
 
 ## Decisión
-**Almacén oficial:** DuckLake (catálogo PostgreSQL y Parquet en `DATA_PATH`). Es la única fuente de verdad de los datos que la plataforma administra. Un `.duckdb` nunca es almacén principal; solo puede servir como caché desechable y medida (M05).
+**Almacén oficial:** DuckLake, con catálogo y datos locales o remotos según elija el usuario (0004). Es la única fuente de verdad de los datos que la plataforma importa y transforma. Un `.duckdb` nunca es almacén principal; solo puede servir como caché desechable y medida (M05).
 
 **Fuentes y modos** (cada conjunto de datos elige *en vivo* o *importar*):
 
@@ -21,7 +21,7 @@ El propietario quiere apuntar a formatos modernos y bases de datos, no a "todo t
 
 **Regla práctica:** si los datos solo se analizan en su origen, conexión en vivo. Si hay que cruzarlos con otras fuentes, importación, porque una consulta en vivo la resuelve un solo motor.
 
-**Dónde se declara:** cada conexión es un archivo de `connectors/`. Cada modelo semántico (`metrics/*.yaml`) indica su `connector`, y si no lo hace usa el del proyecto (`project.yaml`), que por defecto es nuestro DuckLake. Los dashboards solo ven métricas: no saben ni necesitan saber dónde se calculan. Rill usa el mismo patrón: `olap_connector` por defecto y `connector` por metrics view.
+**Dónde se declara:** cada conexión es un archivo de `connectors/`. Cada modelo semántico (`metrics/*.yaml`) indica su `connector`, y si no lo hace usa el del proyecto (`project.yaml`), que el usuario elige explícitamente al crearlo (0004). No hay conexión implícita. Los dashboards solo ven métricas: no saben ni necesitan saber dónde se calculan. Rill usa el mismo patrón: `olap_connector` por defecto y `connector` por metrics view.
 
 **Qué motor calcula:**
 - En una conexión en vivo a PostgreSQL, a un `.duckdb` o a un DuckLake externo, el que lee es **nuestro DuckDB** (`ATTACH`), aunque los datos sean del cliente.

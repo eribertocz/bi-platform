@@ -9,5 +9,6 @@ Cada registro contiene: contexto, decisión, alternativas descartadas, consecuen
 | [0001](0001-un-solo-motor-duckdb.md) | Núcleo con un solo motor analítico: DuckDB | Aprobada 2026-10-11 | Enmienda I.2 de `DECISIONES_TECNICAS_RC2.md` (Polars de primera clase) |
 | [0002](0002-fuentes-y-conexiones-en-vivo.md) | Fuentes modernas, conexiones en vivo y ClickHouse como segunda fuente | Aprobada 2026-10-11 | Amplía M01 §2.5 y M13 §6.1 |
 | [0003](0003-proyecto-como-archivos.md) | Definiciones como archivos de un proyecto en Git (estilo Rill) | Aprobada 2026-10-11 | Concreta M10 §0.1–0.3 |
+| [0004](0004-conexion-elegida-al-crear-el-proyecto.md) | Conexión elegida al crear el proyecto; DuckLake con catálogo y datos locales o remotos | Aprobada 2026-10-11 | Lago único por variables de entorno (G1); matiza el catálogo solo PostgreSQL |
 
 Plantilla: copiar un registro existente y numerar con el siguiente número libre.
