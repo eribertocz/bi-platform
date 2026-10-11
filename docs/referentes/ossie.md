@@ -41,8 +41,57 @@ Van en `custom_extensions`, con un `vendor_name` propio. Mientras el producto no
 - **Ossie define la declaración, no la consulta** (`expression_language.md`, "Model Declaration vs. Querying"). La API de consultas semánticas es nuestra (M04/M05) y sigue el contrato tipado de G1.
 - **Temas abiertos en su hoja de ruta:** grano o entidad como concepto propio, filtros semánticos, cardinalidad explícita y métricas acumuladas. Los cubrimos con extensiones mientras tanto, diseñadas para converger con lo que publique el estándar.
 
-## Primeros pasos en G2
-1. Cargador de `metrics/*.yaml` validado contra `ossie-schema.json` (commit fijado), con errores por archivo y línea.
-2. Analizador de `OSSIE_SQL_2026`: subconjunto REQUIRED que usan las métricas, con pruebas de propiedades como el compilador de G1.
-3. Compilador semántico → **capa de dialectos** → DuckDB, con el mismo contrato exacto y las mismas protecciones (valores enlazados, presupuesto, plazo) que `/api/v1/queries`.
-4. Pruebas de ida y vuelta con los ejemplos de `examples/` de Ossie y con el convertidor de dbt o Cube.
+## Estudio a fondo (2026-10-11, mismo commit)
+Leídos: `core-spec/spec.md`, `core-spec/expression_language.md`, `ontology/ontology.md`, `validation/validate.py`, `converters/README.md`, `converters/cube/README.md` y `ROADMAP.md`.
+
+### Detalles normativos que el adaptador debe cumplir
+- **Documento:** `version`, `name` y `datasets` no vacío son obligatorios; no se admiten propiedades adicionales. Un documento contiene un solo modelo; la forma antigua `semantic_model: [...]` se rechaza y se migra a archivos separados, **nunca** quedándose en silencio con el primer modelo.
+- **YAML:** las claves duplicadas se rechazan. Un YAML normal se queda con la última en silencio, y eso cambiaría una métrica sin aviso.
+- **Identificadores:** los no entrecomillados no distinguen mayúsculas y se normalizan a mayúsculas; los entrecomillados (`"…"`) son exactos. `"ID"` coincide con `id`, pero `"id"` no. Las referencias multiparte (`dataset.campo`) siguen el SQL estándar. Máximo 128 caracteres.
+- **`OSSIE_SQL_2026`** se basa en ANSI SQL:2003 Core y es el dialecto por defecto.
+  - **Admite:** operadores, `BETWEEN`, `IN` (solo listas), `LIKE`/`ILIKE`, `IS [NOT] NULL`, `IS [NOT] DISTINCT FROM`, `CASE`, agregados, ventanas y funciones escalares REQUIRED de fecha, texto, matemáticas, condicionales y `CAST`; además `TRY_CAST`, regex y aproximados, que son RECOMMENDED.
+  - **No admite:** `SELECT`, `FROM`, `JOIN`, `GROUP BY` (lo decide el grano), `WHERE` (filtros aparte), subconsultas (solo `EXISTS_IN()`), CTEs, operaciones de conjuntos ni DDL/DML.
+- **Descomponibilidad de los agregados** (base de las pre-agregaciones y del *fanout*):
+  - distributivos: `SUM`, `COUNT`, `MIN`, `MAX`;
+  - algebraicos: `AVG`, `STDDEV`, `VARIANCE`;
+  - holísticos: `MEDIAN`, percentiles, `COUNT DISTINCT`;
+  - de bocetos: `APPROX_*`, aproximados por definición, que **nunca** sustituyen a un exacto sin que la métrica lo declare.
+- **Relaciones:** siempre **muchos → uno** (`from` es el lado "muchos" y `to` el "uno"), con claves compuestas ordenadas. No hay cardinalidad explícita ni muchos-a-muchos: un puente es un dataset más, que SEF trata con asignación (CASE-011). Varias relaciones entre el mismo par son posibles, y SEF **rechaza** la ambigüedad (CASE-016).
+- **Validación oficial** (`validate.py`), que replicamos en Rust: esquema JSON (Draft 2020-12); nombres únicos de datasets, campos, métricas y relaciones; referencias de relación válidas; misma aridad en `from_columns` y `to_columns`; y sintaxis SQL.
+
+### El *fanout* no es cosa del estándar, es cosa del motor
+El convertidor de Cube lo explica: una expresión de Ossie es **SQL estático**, y `SUM(orders.amount)` no sabe si una unión duplicará filas. La corrección la tiene que poner el **motor**: Cube con su reescritura por claves primarias, nosotros con el motor de corrección de SEF.
+
+Lista útil del convertidor: **agregados idempotentes ante duplicación** (seguros con *fanout*): `MIN`, `MAX`, `APPROX_COUNT_DISTINCT`, `BOOL_OR`/`BOOL_AND`, `BIT_OR`/`BIT_AND` y **cualquier agregado sobre `DISTINCT`**. Es una lista de permitidos, nunca de prohibidos: el conjunto de funciones está abierto, y una lista de prohibidos declara seguro en silencio `STDDEV` o `MEDIAN`. La seguridad se juzga **por agregado y por dataset sobre la expresión completamente expandida**, no por el tipo declarado de la métrica.
+
+### La capa de ontología (futuro, IA)
+`ontology.md` define conceptos (`EntityType`/`ValueType`), relaciones con roles y multiplicidades (`ManyToOne`, `OneToOne`), identificadores preferentes (`identify_by`), derivaciones y documentos de **mapeo** que enlazan un modelo semántico con una ontología. Encaja con el asistente IA (M16, G5): no entra en G2, pero CSMIR no debe impedirlo.
+
+### Oportunidad estratégica
+La hoja de ruta de Ossie, en "Future Efforts", pide un **lenguaje de consulta semántica estándar y un motor de referencia**:
+- compilador Ossie → SQL;
+- manejo canónico de uniones, agregaciones y filtros;
+- **una batería de conformidad entre implementaciones**.
+
+Es lo que es SEF, con su corpus de 21 casos. Con Ossie nativo y el corpus como conformidad, bi-platform puede posicionarse como **implementación de referencia** e incluso aportar el corpus al proyecto Apache. Decisión de producto pendiente del propietario: si y cuándo publicarlo.
+
+### Convergencia de nuestras extensiones con su hoja de ruta
+| Su trabajo abierto | Nuestra extensión hoy | Regla |
+|---|---|---|
+| Métricas derivadas y acumuladas; grano y entidades explícitos | Tipos de medida y grano de CSMIR | Mismos nombres que proponga el estándar al publicarse; migración por ADR |
+| Filtros semánticos reutilizables | AST de filtros (Atlas BI A1) | Igual |
+| `is_time` → `dimension_type`, jerarquías, calendarios | Semántica de tiempo (Rill R3) | Igual |
+| Identificadores estables; métricas certificadas | `StableId` y huellas de CSMIR; certificación (M10) | Igual |
+
+## Primeros pasos en G2 (Issue #48)
+1. **Carga:** YAML o JSON con rechazo de claves duplicadas, a estructuras tipadas que reflejan `ossie-schema.json` con `deny_unknown_fields`. Paridad comprobada con los casos de `validation/tests` y los ejemplos `tpcds` y `flights`. Errores por archivo, línea y ruta.
+2. **Validación** equivalente a `validate.py`: nombres únicos, referencias, aridad y expresiones.
+3. **Expresiones `OSSIE_SQL_2026`:** se analizan con un parser SQL probado (no uno propio) y se recorre el AST para:
+   - aceptar solo las construcciones permitidas;
+   - normalizar identificadores;
+   - resolver referencias a campos y métricas;
+   - clasificar cada agregado (distributivo, algebraico, holístico, idempotente ante duplicación).
+
+   Propiedades con proptest.
+4. **Ossie → CSMIR:** relaciones muchos-a-uno con cardinalidad *declarada sin verificar*, métricas descompuestas en medidas primitivas y nuestras extensiones (`vendor_name: bi-platform`) para tiempo, unidades, políticas, formatos y conexión.
+5. **CSMIR → Ossie** para exportar, con **lista explícita de pérdidas**. Prueba de ida y vuelta sobre los modelos del corpus: la misma huella de CSMIR.
