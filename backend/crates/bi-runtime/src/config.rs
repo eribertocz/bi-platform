@@ -40,7 +40,8 @@ pub struct LakeConfig {
 impl fmt::Debug for LakeConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LakeConfig")
-            .field("catalog", &redact(&self.catalog))
+            // Never printed, not even partially: it holds the password.
+            .field("catalog", &"<redacted>")
             .field("metadata_schema", &self.metadata_schema)
             .field("data_path", &self.data_path)
             .finish()
@@ -165,22 +166,6 @@ fn is_memory_size(value: &str) -> bool {
             .contains(&unit.trim().to_ascii_uppercase().as_str())
 }
 
-/// Hides the value of `password=` in a libpq connection string.
-#[must_use]
-pub fn redact(conninfo: &str) -> String {
-    conninfo
-        .split_whitespace()
-        .map(|part| {
-            if part.to_ascii_lowercase().starts_with("password=") {
-                "password=***"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,14 +216,14 @@ mod tests {
     }
 
     #[test]
-    fn redacts_passwords_in_debug_output() {
+    fn debug_output_never_shows_the_catalog() {
         let lake = LakeConfig {
-            catalog: "dbname=x host=h password=s3cret user=u".to_owned(),
+            catalog: "dbname=x host=h password='s3cret with spaces' user=u".to_owned(),
             metadata_schema: None,
             data_path: PathBuf::from("lake"),
         };
         let debug = format!("{lake:?}");
         assert!(!debug.contains("s3cret"), "{debug}");
-        assert!(debug.contains("password=***"));
+        assert!(!debug.contains("dbname"), "{debug}");
     }
 }

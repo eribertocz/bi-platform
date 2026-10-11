@@ -5,7 +5,8 @@ use std::path::Path;
 
 use duckdb::Connection;
 
-use crate::config::{is_identifier, redact};
+use crate::config::is_identifier;
+use crate::secret::scrub;
 use crate::{LAKE, Runtime, RuntimeConfig, RuntimeError, sql_string};
 
 /// Statements applied before any query connection exists. After them, no
@@ -88,16 +89,12 @@ impl Bootstrap {
             };
             let target = sql_string(&format!("ducklake:postgres:{}", lake.catalog));
             conn.execute_batch(&format!("ATTACH {target} AS {LAKE} ({options})"))
-                .map_err(|error| {
-                    // Engine messages may echo the connection string.
-                    let message = error
-                        .to_string()
-                        .replace(&lake.catalog, &redact(&lake.catalog));
-                    RuntimeError::Lake(message)
-                })?;
+                // Engine messages may repeat the connection string or the
+                // password itself, in any of the forms libpq accepts.
+                .map_err(|error| RuntimeError::Lake(scrub(&error.to_string(), &lake.catalog)))?;
             tracing::info!(
-                catalog = %redact(&lake.catalog),
                 data_path = %lake.data_path.display(),
+                metadata_schema = lake.metadata_schema.as_deref().unwrap_or("default"),
                 "lake attached"
             );
             attached_data_path = Some(normalized);

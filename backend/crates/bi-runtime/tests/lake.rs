@@ -168,14 +168,29 @@ async fn locked_down_connections_read_the_lake_but_nothing_else() {
 
 #[test]
 fn an_unreachable_catalog_is_reported_without_credentials() {
-    let data = tempfile::tempdir().unwrap();
-    let mut config = lake_config(data.path());
-    if let Some(lake) = &mut config.lake {
-        lake.catalog =
-            "dbname=bi_lake_catalog host=127.0.0.1 port=1 user=bi password=s3cret".to_owned();
+    for (catalog, secret) in [
+        (
+            "dbname=bi_lake_catalog host=127.0.0.1 port=1 user=bi password=s3cret",
+            "s3cret",
+        ),
+        (
+            "dbname=bi_lake_catalog host=127.0.0.1 port=1 user=bi password='s3cret with spaces'",
+            "with spaces",
+        ),
+        (
+            "postgresql://bi:p%40ss%20word@127.0.0.1:1/bi_lake_catalog",
+            "p%40ss",
+        ),
+    ] {
+        let data = tempfile::tempdir().unwrap();
+        let mut config = lake_config(data.path());
+        if let Some(lake) = &mut config.lake {
+            catalog.clone_into(&mut lake.catalog);
+        }
+        let Err(RuntimeError::Lake(message)) = Bootstrap::open(config) else {
+            panic!("attaching an unreachable catalog must fail: {catalog}");
+        };
+        assert!(!message.contains(secret), "{message}");
+        assert!(!message.contains("p@ss word"), "{message}");
     }
-    let Err(RuntimeError::Lake(message)) = Bootstrap::open(config) else {
-        panic!("attaching an unreachable catalog must fail");
-    };
-    assert!(!message.contains("s3cret"), "{message}");
 }

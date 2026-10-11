@@ -1,11 +1,11 @@
 //! Bounded pool of query connections (M13 §13). Each connection is owned by a
 //! dedicated thread; async callers wait on a channel, so DuckDB never runs on
-//! a Tokio executor. Dropping the future of a running query interrupts it.
+//! a Tokio executor. Dropping the future of a running query interrupts it,
+//! and dropping the pool never waits for native work.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::thread::JoinHandle;
 
 use duckdb::{Connection, InterruptHandle};
 use tokio::sync::oneshot;
@@ -22,16 +22,15 @@ pub struct Runtime {
 
 struct Shared {
     sender: Mutex<Option<SyncSender<Job>>>,
-    threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        // Closing the channel ends each worker after its current job.
+        // Closing the channel ends each worker after its current job. The
+        // workers are detached: waiting for them here would block the caller,
+        // often a Tokio executor, on native work. The last worker to exit
+        // releases the database on its own thread.
         lock(&self.sender).take();
-        for thread in lock(&self.threads).drain(..) {
-            thread.join().ok();
-        }
     }
 }
 
@@ -76,9 +75,14 @@ impl Drop for CancelOnDrop {
     }
 }
 
+type Replacement = Box<dyn FnMut() -> duckdb::Result<Connection> + Send>;
+
 struct Worker {
     conn: Connection,
-    root: Arc<Mutex<Connection>>,
+    /// Produces a fresh connection to the same database.
+    replace: Replacement,
+    /// Set when the connection is uncertain and could not be replaced.
+    retired: bool,
 }
 
 impl Worker {
@@ -111,17 +115,21 @@ impl Worker {
         }
     }
 
-    /// Never reuse a connection whose state is uncertain (M13 §13.3).
+    /// Never reuse a connection whose state is uncertain (M13 §13.3): if no
+    /// replacement can be made, the worker retires instead.
     fn replace_connection(&mut self) {
-        match lock(&self.root).try_clone() {
+        match (self.replace)() {
             Ok(conn) => self.conn = conn,
-            Err(error) => tracing::error!(%error, "cannot replace query connection"),
+            Err(error) => {
+                tracing::error!(%error, "cannot replace an uncertain query connection; retiring worker");
+                self.retired = true;
+            }
         }
     }
 }
 
 fn worker_loop(mut worker: Worker, jobs: &Mutex<Receiver<Job>>) {
-    loop {
+    while !worker.retired {
         let job = lock(jobs).recv();
         match job {
             Ok(job) => job(&mut worker),
@@ -138,26 +146,33 @@ impl Runtime {
     /// Starts `config.workers` threads with connections cloned from `root`,
     /// which must already be locked down.
     pub(crate) fn start(root: Connection, config: &RuntimeConfig) -> Result<Self, RuntimeError> {
-        let (sender, receiver) = sync_channel::<Job>(config.queue_capacity);
-        let receiver = Arc::new(Mutex::new(receiver));
         let root = Arc::new(Mutex::new(root));
-        let mut threads = Vec::new();
-        for index in 0..config.workers.max(1) {
-            let worker = Worker {
-                conn: lock(&root).try_clone()?,
-                root: Arc::clone(&root),
-            };
+        let mut workers = Vec::new();
+        for _ in 0..config.workers.max(1) {
+            let conn = lock(&root).try_clone()?;
+            let root = Arc::clone(&root);
+            workers.push(Worker {
+                conn,
+                replace: Box::new(move || lock(&root).try_clone()),
+                retired: false,
+            });
+        }
+        Self::spawn(workers, config.queue_capacity)
+    }
+
+    fn spawn(workers: Vec<Worker>, queue_capacity: usize) -> Result<Self, RuntimeError> {
+        let (sender, receiver) = sync_channel::<Job>(queue_capacity);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for (index, worker) in workers.into_iter().enumerate() {
             let receiver = Arc::clone(&receiver);
-            threads.push(
-                std::thread::Builder::new()
-                    .name(format!("bi-duckdb-{index}"))
-                    .spawn(move || worker_loop(worker, &receiver))?,
-            );
+            // Detached on purpose; see `Shared::drop`.
+            std::thread::Builder::new()
+                .name(format!("bi-duckdb-{index}"))
+                .spawn(move || worker_loop(worker, &receiver))?;
         }
         Ok(Self {
             shared: Arc::new(Shared {
                 sender: Mutex::new(Some(sender)),
-                threads: Mutex::new(threads),
             }),
         })
     }
@@ -194,5 +209,34 @@ impl Runtime {
         let outcome = result.await.map_err(|_| RuntimeError::Unavailable);
         guard.0 = None;
         outcome?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_that_cannot_replace_an_uncertain_connection_retires() {
+        let worker = Worker {
+            conn: Connection::open_in_memory().unwrap(),
+            replace: Box::new(|| Err(duckdb::Error::QueryReturnedNoRows)),
+            retired: false,
+        };
+        let runtime = Runtime::spawn(vec![worker], 4).unwrap();
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        executor.block_on(async {
+            let panicked = runtime
+                .run(|_conn| -> duckdb::Result<()> { panic!("leaves the connection uncertain") })
+                .await;
+            assert!(matches!(panicked, Err(RuntimeError::Panicked)));
+            // The only worker retired: nothing runs on its old connection.
+            let next = runtime
+                .run(|conn| conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)))
+                .await;
+            assert!(matches!(next, Err(RuntimeError::Unavailable)), "{next:?}");
+        });
     }
 }

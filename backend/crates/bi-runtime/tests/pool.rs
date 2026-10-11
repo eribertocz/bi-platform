@@ -174,3 +174,43 @@ async fn query_connections_are_locked_down() {
     }
     assert!(!scratch.path().join("x.csv").exists());
 }
+
+#[test]
+fn dropping_the_last_runtime_never_blocks_the_executor() {
+    // A single-threaded executor: any blocking wait would stall everything.
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        let runtime = runtime(1, 4);
+        let (started, has_started) = std::sync::mpsc::channel();
+        let job = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .run(move |_conn| {
+                        started.send(()).ok();
+                        // Native work that an interrupt cannot stop.
+                        std::thread::sleep(Duration::from_millis(500));
+                        Ok(())
+                    })
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || has_started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+
+        let started = Instant::now();
+        drop(runtime);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "dropping the runtime blocked for {:?}",
+            started.elapsed()
+        );
+    });
+}

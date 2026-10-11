@@ -36,8 +36,7 @@ fn parse(args: &[String]) -> Result<FixtureSpec, String> {
     Ok(spec)
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let spec = match parse(&args) {
         Ok(spec) => spec,
@@ -46,7 +45,7 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(spec).await {
+    match run(spec) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -55,12 +54,17 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(spec: FixtureSpec) -> Result<(), Box<dyn std::error::Error>> {
+/// Bootstraps and loads on this thread (native, blocking work); only the
+/// verification query runs on a Tokio executor.
+fn run(spec: FixtureSpec) -> Result<(), Box<dyn std::error::Error>> {
     let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok())?;
     let bootstrap = Bootstrap::open(config)?;
     let outcome = fixtures::load_sales(&bootstrap, spec)?;
     let runtime = bootstrap.finish()?;
-    let actual = sales_oracle(&runtime, spec).await?;
+    let actual = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(sales_oracle(&runtime, spec))?;
     let expected = bi_fixtures::oracle::Oracle::from_rows(spec, bi_fixtures::sales::rows(spec));
     if actual.totals != expected.totals || actual.by_region != expected.by_region {
         return Err("lake contents do not match the oracle".into());

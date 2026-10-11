@@ -11,6 +11,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod fixtures;
 pub mod pool;
+pub mod secret;
 
 use std::fmt;
 
