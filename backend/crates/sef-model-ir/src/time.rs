@@ -117,3 +117,40 @@ pub struct OrderTerm {
     pub direction: SortDirection,
     pub nulls: NullPlacement,
 }
+
+/// Days since 1970-01-01 of an ISO `YYYY-MM-DD` date in the proleptic
+/// Gregorian calendar; `None` for anything else (wrong shape, month 13,
+/// February 29 of a common year…).
+#[must_use]
+pub fn iso_date_days(text: &str) -> Option<i32> {
+    let mut parts = text.splitn(3, '-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return None;
+    }
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if !(digits(year) && digits(month) && digits(day)) {
+        return None;
+    }
+    let (year, month, day): (i64, i64, i64) =
+        (year.parse().ok()?, month.parse().ok()?, day.parse().ok()?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if !(1..=days_in_month).contains(&day) {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    i32::try_from(era * 146_097 + doe - 719_468).ok()
+}
