@@ -226,7 +226,7 @@ fn time_conversion_requests_bucket_with_their_zone() {
         assert!(
             matches!(atoms.as_slice(), [RequestedAtom::TimeBucket(time)]
                 if time.grain == grain
-                    && time.timezone.as_ref().map(|zone| zone.as_str()) == Some(zone)),
+                    && time.timezone.as_ref().map(sef_model_ir::time::IanaZoneId::as_str) == Some(zone)),
             "CASE-{case:03}: {atoms:?}"
         );
     }
