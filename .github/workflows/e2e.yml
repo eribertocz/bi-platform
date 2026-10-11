@@ -31,8 +31,9 @@ concurrency:
 jobs:
   health:
     runs-on: ubuntu-24.04
-    # The image compiles the bundled DuckDB engine (C++).
-    timeout-minutes: 50
+    # The image links the official prebuilt DuckDB; only our Rust crates and
+    # their dependencies compile (about 6 minutes locally, was over 20).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

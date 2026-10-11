@@ -6,6 +6,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+default = ["bundled-duckdb"]
+# DuckDB compiled from source; the container image disables it and links the
+# official prebuilt libduckdb instead (see Dockerfile).
+bundled-duckdb = ["bi-runtime/bundled"]
 # Synthetic identities only; absent from the default production build.
 dev-auth = []
 # Integration tests that need a real PostgreSQL reachable through DATABASE_URL.
@@ -14,7 +18,7 @@ postgres-tests = []
 [dependencies]
 axum.workspace = true
 bi-fixtures = { path = "../bi-fixtures" }
-bi-runtime = { path = "../bi-runtime" }
+bi-runtime = { path = "../bi-runtime", default-features = false }
 getrandom.workspace = true
 serde.workspace = true
 serde_json.workspace = true

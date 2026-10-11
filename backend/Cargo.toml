@@ -12,7 +12,9 @@ arrow-array = "58"
 arrow-schema = "58"
 axum = "0.8.9"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
-duckdb = { version = "=1.10506.0", features = ["bundled", "parquet"] }
+# Engine source or prebuilt library is chosen by the `bundled` feature of
+# bi-runtime; the version must match the libduckdb the image downloads.
+duckdb = { version = "=1.10506.0" }
 getrandom = "0.4.3"
 http-body-util = "0.1"
 parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
