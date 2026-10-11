@@ -5,7 +5,28 @@
 - Su stack es distinto: TypeScript, Cube, SQLMesh vía Python y Garage S3.
 - Sus documentos están en `E:\bi-platform\docs\` (numerados 00–22).
 
-**Estado de cada punto:** *propuesto*. Pasa a *aceptado* con la aprobación del propietario y se planifica en su gate.
+**Nivel objetivo (decisión del propietario, 2026-10-11):** visualización, ELT, motor semántico y el resto de capacidades deben llegar **casi al mismo nivel que Atlas BI, pero con implementación propia**. Cada punto de esta ficha queda **aceptado** como nivel mínimo y se planifica en su gate.
+
+**Documento de Atlas BI que marca el nivel de cada módulo** (leerlo antes de diseñar esa capacidad):
+
+| Atlas BI (`E:\bi-platform\docs\`) | Módulo nuestro | Notas |
+|---|---|---|
+| 01 motor y almacenamiento | M13, M03 | DuckDB + DuckLake: igual que nosotros |
+| 02 transformación | M02 | Nuestro ELT propio estilo SQLMesh (ADR 0005) |
+| 03 ingesta | M01 | Fuentes de ADR 0002 |
+| 04 semántico | M04 | Nuestro motor es SEF (ADR 0006); Atlas BI usaba Cube |
+| 05 cerebro IA | M16 | |
+| 06 API gateway | M12 | |
+| 07 orquestación | M14 | Verbos de trabajos (A7) |
+| 08 frontend, 20 producto UI/UX | M17 | Perfiles de usuario (A6) |
+| 09 auth y gobernanza, 12 metadata | M11, M10 | |
+| 10 colaboración en tiempo real | sin módulo propio aún | Valorar en G4–G6 |
+| 14 interacción y estado | M06 | Filtros AST, drill, deshacer (A1) |
+| 17 cálculos de autoservicio | M06, M04 | SQL sobre métricas (A2) |
+| 18 ciudadanos de primera clase | lista de comprobación G2–G4 | (A4) |
+| 19 operabilidad en ejecución | M15, M13 | |
+| 21 estándares de ingeniería | AGENTS.md | Contratos versionados (A10) |
+| 22 motor de visualización | M09 | VisualSpec y puerto de renderizado (A5) |
 
 | # | Qué resolvió Atlas BI | Qué tomamos | Gate / módulo |
 |---|---|---|---|
