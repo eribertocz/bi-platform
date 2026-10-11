@@ -35,6 +35,18 @@ El propietario prefiere cómo SQLMesh declara los modelos: SQL con una cabecera 
    - **recarga en caliente** al guardar.
 8. **Interoperabilidad (más adelante):** importadores de proyectos SQLMesh y dbt (`manifest.json`) para facilitar la migración (M10).
 
+## Alcance ligero, sin sobreingeniería (requisito del propietario)
+**Primera entrega en G3, lo imprescindible:**
+- cabecera `MODEL` con `name`, `kind`, `engine`, `output`, `cron` y `audits`;
+- tipos `VIEW`, `FULL` e `INCREMENTAL_BY_TIME_RANGE`;
+- DAG;
+- **plan** (qué cambia y a qué afecta) y ejecución con auditorías;
+- motor DuckDB con destino DuckLake.
+
+**Solo cuando un caso real lo justifique, cada uno con su propio Issue:** destinos ClickHouse y PostgreSQL, cálculo en ClickHouse, `INCREMENTAL_BY_UNIQUE_KEY`, entornos de desarrollo sin recalcular, linaje por columna e importadores de dbt y SQLMesh. Si una pieza de la sección anterior no cabe en la primera entrega, queda para entonces.
+
+**Al implementar, se revisa el código fuente de SQLMesh** (tag fijado, `[CÓDIGO]`, siguiendo `docs/referentes/README.md`): cómo analiza la cabecera `MODEL`, cómo construye el DAG, cómo calcula el plan y clasifica los cambios, cómo gestiona los intervalos de los incrementales y cómo ejecuta las auditorías. Se toman sus soluciones probadas en versión mínima, y el PR deja constancia de qué se tomó y qué se dejó fuera.
+
 ## Alternativas descartadas
 - **Embeber dbt o SQLMesh:** exige un runtime Python en el despliegue y su propio estado y programador. Además, las plantillas Jinja de dbt se interpolan dentro del SQL. dbt Fusion (Rust) no es software libre en su totalidad.
 - **Conexión única por modelo (calcular y guardar en el mismo sitio):** impide el patrón más útil: transformar con DuckDB y servir desde ClickHouse.
