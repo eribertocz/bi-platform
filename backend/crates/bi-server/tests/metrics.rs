@@ -27,6 +27,15 @@ use tower::ServiceExt;
 
 const QUERY: &str = r#"{"dataset":"sales","measures":["row_count"]}"#;
 
+fn install_tls_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+    });
+}
+
 fn app(analytics: Analytics, metrics: QueryMetrics, timeout: Duration) -> Router {
     let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
     Router::new()
@@ -455,6 +464,7 @@ async fn oversized_results_and_engine_errors_keep_phase_and_rejection_semantics(
 #[tokio::test(flavor = "multi_thread")]
 async fn real_otlp_http_export_decodes_metrics_at_a_local_receiver() {
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    install_tls_provider();
     let (deliver, mut requests) = tokio::sync::mpsc::channel(4);
     let receiver = Router::new().route(
         "/v1/metrics",
@@ -545,6 +555,7 @@ async fn real_otlp_http_export_decodes_metrics_at_a_local_receiver() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_export_is_isolated_from_queries() {
+    install_tls_provider();
     let exporting = Arc::new(tokio::sync::Notify::new());
     let receiver = Router::new().route(
         "/v1/metrics",
@@ -603,6 +614,7 @@ async fn failed_export_is_isolated_from_queries() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_exporter_configuration_can_fall_back_to_noop() {
+    install_tls_provider();
     assert!(
         tokio::task::spawn_blocking(|| metrics::otlp("http://[invalid", &Analytics::disabled()))
             .await

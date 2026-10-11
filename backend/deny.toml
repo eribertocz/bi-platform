@@ -37,6 +37,10 @@ confidence-threshold = 0.93
 ignore = true
 
 [bans]
+deny = [
+    { crate = "aws-lc-rs", reason = "rustls uses ring exclusively; a second provider adds native compilation and ambiguous TLS initialization (#55)." },
+    { crate = "aws-lc-sys", reason = "AWS-LC C/assembly must not return through transitive TLS features; ring is the selected rustls provider (#55)." },
+]
 # Duplicate versions come from upstream crates (sqlx, arrow, ureq…); they
 # cost build time, not safety, so they are not a policy failure.
 multiple-versions = "allow"

@@ -14,6 +14,7 @@ const USAGE: &str =
        bi-server openapi [PATH]  write the OpenAPI document to PATH or stdout";
 
 fn main() -> ExitCode {
+    install_tls_provider();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args
         .iter()
@@ -38,6 +39,14 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn install_tls_provider() {
+    // reqwest's rustls-no-provider requires this before constructing any client.
+    // The binary owns process-wide TLS policy; library modules do not install it.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("TLS provider must be installed once at application startup");
 }
 
 #[tokio::main]
@@ -114,5 +123,17 @@ async fn run() -> ExitCode {
             tracing::error!(%error, "server error");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn startup_installs_ring_before_constructing_http_clients() {
+        super::install_tls_provider();
+        let installed = rustls::crypto::CryptoProvider::get_default().unwrap();
+        let ring = rustls::crypto::ring::default_provider();
+        assert!(std::ptr::eq(installed.secure_random, ring.secure_random));
+        reqwest::blocking::Client::builder().build().unwrap();
     }
 }

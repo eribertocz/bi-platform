@@ -320,6 +320,7 @@ impl PushMetricExporter for SafeExporter {
 
 /// Builds OTLP/HTTP protobuf metrics with background collection/export.
 /// Call on a blocking thread; shutdown the returned provider there too.
+/// The application must install its rustls crypto provider before calling this.
 /// The endpoint is an OTLP base URL, e.g. `http://localhost:4318`.
 ///
 /// # Errors

@@ -23,6 +23,8 @@ getrandom.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -37,6 +39,7 @@ utoipa.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 opentelemetry-proto.workspace = true
 prost.workspace = true
+rcgen.workspace = true
 sysinfo.workspace = true
 http-body-util.workspace = true
 proptest.workspace = true
