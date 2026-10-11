@@ -75,6 +75,17 @@ La hoja de ruta de Ossie, en "Future Efforts", pide un **lenguaje de consulta se
 
 Es lo que es SEF, con su corpus de 21 casos. Con Ossie nativo y el corpus como conformidad, bi-platform puede posicionarse como **implementación de referencia** e incluso aportar el corpus al proyecto Apache. Decisión de producto pendiente del propietario: si y cuándo publicarlo.
 
+### Otras implementaciones (verificadas el 2026-10-11)
+| Implementación | Qué hace | Verificación |
+|---|---|---|
+| **`iqea-ai/duckdb-ossie`** (C++, MIT, commit `f8cf057`) | Extensión comunitaria de DuckDB: `ossie_load`, `ossie_query`, `ossie_compile`, MCP. | `[CÓDIGO]` leído (`src/compile/compile.cpp`, `src/model/graph.cpp`). **Correcta rechazando:** solo une por aristas que no duplican filas desde el dataset del grano; rechaza caminos ambiguos, métricas de **varios granos** en una consulta ("not supported yet") y agregados sin columna (`COUNT(*)` sin calificar). **Deduce la cardinalidad de las claves declaradas**, lo que adoptamos. SEF va más allá: alinea varios hechos, asigna en puentes y trata las semiaditivas. |
+| dbt Core ≥ 1.12 | Lee documentos Ossie de `osi/`. | `[DOCS]`; solo versiones **0.1.0/0.1.1**, no 0.2.0.dev0. |
+| Lightdash | Importación y exportación Ossie anunciadas. | `[DOCS]` |
+| `Dactopus/dactopus-ossie-clickhouse` (Python, Apache-2.0) | Modelo Ossie sobre ClickHouse. | Existe; útil al llegar ClickHouse (ADR 0002). |
+| "Dosi" de Datus (motor Rust) | Citado por un resumen de IA. | **No verificado:** no aparece en GitHub ni en la web; la organización Datus solo publica herramientas en Python. |
+
+**Debate abierto sobre cómo consultar** ([datalakehousehub](https://datalakehousehub.com/blog/ossie-semantic-query-interface-agents)): un modelo de consulta restringido frente a SQL normal con un agregado `MEASURE()`. El grupo de trabajo converge hacia un diseño **por capas que mantiene ambos**. Lo mismo haremos: SQIR (#44) como consulta estructurada, y después SQL sobre métricas con `MEASURE()`, como Cube, Rill `metrics_sql` y Atlas BI A2.
+
 ### Convergencia de nuestras extensiones con su hoja de ruta
 | Su trabajo abierto | Nuestra extensión hoy | Regla |
 |---|---|---|
