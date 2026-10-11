@@ -2,12 +2,21 @@
 //! No serialization derive, struct layout, or Debug spelling defines canonical bytes.
 
 use crate::canonical::{Canonical, CanonicalValue as C};
-use crate::expressions::*;
+use crate::expressions::{
+    AggregateFunction, AggregateNullSemantics, BooleanOp, ComparisonOp, MetricExpr, MetricExprKind,
+    ScalarExpr, ScalarExprKind, UnaryOp,
+};
 use crate::grain::{Grain, GrainAtom};
 use crate::identity::{ObjectIdentity, SemanticVersion, SourceHandle, StableId};
 use crate::model::{canonical_record, canonical_unit_enum};
-use crate::time::*;
-use crate::types::*;
+use crate::time::{
+    CalendarProfile, IanaZoneId, LocalTimeResolution, NullPlacement, OrderTerm, SortDirection,
+    TimeBucket, TimeGrain, TimeRole, TimeSemantics, TimestampSemantics,
+};
+use crate::types::{
+    ArithmeticOp, DecimalType, DecimalValue, FiniteFloat, Literal, NullProfile, NumericContract,
+    RoundingMode, StringProfile, StructField, ValueType, ZeroDivisionPolicy,
+};
 use crate::units::Unit;
 
 impl Canonical for StableId {
@@ -292,6 +301,16 @@ canonical_unit_enum!(BooleanOp, "boolean-op", And => "and", Or => "or");
 canonical_unit_enum!(AggregateFunction, "aggregate-function", Sum => "sum", CountRows => "count-rows", CountNonNull => "count-non-null", CountDistinct => "count-distinct", Min => "min", Max => "max");
 canonical_unit_enum!(AggregateNullSemantics, "aggregate-null-semantics", IgnoreNullsNullIfEmpty => "ignore-nulls-null-if-empty", CountNonNull => "count-non-null", CountRows => "count-rows");
 canonical_record!(ScalarExpr, "scalar-expression", kind, value_type, unit);
+fn canonical_case_branch((condition, value): &(ScalarExpr, ScalarExpr)) -> C {
+    C::record(
+        "case-branch",
+        [
+            ("condition", condition.canonical_value()),
+            ("value", value.canonical_value()),
+        ],
+    )
+}
+
 impl Canonical for ScalarExprKind {
     fn canonical_value(&self) -> C {
         match self {
@@ -352,20 +371,7 @@ impl Canonical for ScalarExprKind {
                 [
                     (
                         "branches",
-                        C::Sequence(
-                            branches
-                                .iter()
-                                .map(|(condition, value)| {
-                                    C::record(
-                                        "case-branch",
-                                        [
-                                            ("condition", condition.canonical_value()),
-                                            ("value", value.canonical_value()),
-                                        ],
-                                    )
-                                })
-                                .collect(),
-                        ),
+                        C::Sequence(branches.iter().map(canonical_case_branch).collect()),
                     ),
                     ("otherwise", otherwise.canonical_value()),
                 ],

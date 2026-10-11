@@ -5,6 +5,79 @@ use std::time::{Duration, Instant};
 
 use bi_runtime::{Bootstrap, Runtime, RuntimeConfig, RuntimeError};
 
+#[tokio::test(flavor = "multi_thread")]
+async fn load_tracks_admission_cancellation_and_native_completion() {
+    let runtime = runtime(1, 1);
+    assert_eq!(
+        runtime.load(),
+        bi_runtime::PoolLoad {
+            queued: 0,
+            running: 0,
+            workers: 1,
+            queue_capacity: 1
+        }
+    );
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .run(move |_| {
+                    started.send(()).ok();
+                    wait.recv().ok();
+                    Ok(())
+                })
+                .await
+        }
+    });
+    ready.await.unwrap();
+    assert_eq!(runtime.load().running, 1);
+    let queued = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { scalar(&runtime, "SELECT 1").await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtime.load().queued != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        scalar(&runtime, "SELECT 2").await,
+        Err(RuntimeError::Busy)
+    ));
+    assert_eq!(runtime.load().queued, 1, "failed admission is rolled back");
+    queued.abort();
+    queued.await.unwrap_err();
+    assert_eq!(
+        runtime.load().queued,
+        1,
+        "cancelled slot is still in the channel"
+    );
+    running.abort();
+    running.await.unwrap_err();
+    assert_eq!(
+        runtime.load().running,
+        1,
+        "native work continues after caller cancellation"
+    );
+    drop(release);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runtime.load().queued == 0 && runtime.load().running == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(scalar(&runtime, "SELECT 3").await.unwrap(), 3);
+    assert_eq!(runtime.load().workers, 1);
+}
+
 /// Runs for hours unless interrupted.
 const ENDLESS: &str = "SELECT sum(a.range * b.range) FROM range(10000000) a, range(10000000) b";
 

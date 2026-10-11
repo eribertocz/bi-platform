@@ -20,12 +20,14 @@ impl Grain {
     pub fn new(atoms: impl IntoIterator<Item = GrainAtom>) -> Self {
         Self(atoms.into_iter().collect())
     }
+    #[must_use]
     pub fn global() -> Self {
         Self::default()
     }
     pub fn atoms(&self) -> impl ExactSizeIterator<Item = &GrainAtom> {
         self.0.iter()
     }
+    #[must_use]
     pub fn is_global(&self) -> bool {
         self.0.is_empty()
     }

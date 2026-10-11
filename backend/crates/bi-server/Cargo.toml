@@ -20,6 +20,9 @@ axum.workspace = true
 bi-fixtures = { path = "../bi-fixtures" }
 bi-runtime = { path = "../bi-runtime", default-features = false }
 getrandom.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -31,6 +34,10 @@ tracing-subscriber.workspace = true
 utoipa.workspace = true
 
 [dev-dependencies]
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+opentelemetry-proto.workspace = true
+prost.workspace = true
+sysinfo.workspace = true
 http-body-util.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

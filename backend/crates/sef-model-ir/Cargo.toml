@@ -15,14 +15,15 @@ semver = "=1.0.27"
 sha2 = "=0.10.9"
 
 [dev-dependencies]
-proptest = "1.12.0"
+proptest.workspace = true
 
-# SEF's original lint policy, kept while the code is imported unchanged.
-# Aligning it with the workspace's pedantic set is a separate change.
+# The workspace set plus SEF's: no unwrap, expect or panic in library code.
 [lints.rust]
 unsafe_code = "forbid"
 
 [lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

@@ -12,13 +12,21 @@ use sef_model_ir::types::{DecimalType, DecimalValue};
 use sha2::{Digest, Sha256};
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    bytes
+        .iter()
+        .flat_map(|byte| {
+            [
+                char::from(DIGITS[usize::from(byte >> 4)]),
+                char::from(DIGITS[usize::from(byte & 0xf)]),
+            ]
+        })
+        .collect()
 }
 
-#[test]
-fn typed_value_golden_bytes_and_independent_sha256() -> Result<(), CanonicalError> {
-    // Bytes were derived from RFC 8949, digests independently with .NET SHA256.
-    let vectors = [
+// Bytes were derived from RFC 8949, digests independently with .NET SHA256.
+fn typed_value_vectors() -> [(C, &'static str, &'static str); 15] {
+    [
         (
             C::Null,
             "8100",
@@ -97,6 +105,11 @@ fn typed_value_golden_bytes_and_independent_sha256() -> Result<(), CanonicalErro
             "830a6b63736d69722e456d707479a0",
             "dc570052840e7123aa6def574579e13061a78fafed865b1b8fda8565255a05e3",
         ),
+    ]
+}
+
+fn numeric_value_vectors() -> [(C, &'static str, &'static str); 5] {
+    [
         (
             C::Float(1.5),
             "8204f93e00",
@@ -129,8 +142,15 @@ fn typed_value_golden_bytes_and_independent_sha256() -> Result<(), CanonicalErro
             "830a6d63736d69722e446563696d616ca3657363616c6582030269707265636973696f6e8203046b636f656666696369656e7482066431323334",
             "a37b7f3e31290afc81791bf9fb5c75cc614865a40956e25d1d293372a87f6b15",
         ),
-    ];
-    for (value, expected_bytes, expected_hash) in vectors {
+    ]
+}
+
+#[test]
+fn typed_value_golden_bytes_and_independent_sha256() -> Result<(), CanonicalError> {
+    for (value, expected_bytes, expected_hash) in typed_value_vectors()
+        .into_iter()
+        .chain(numeric_value_vectors())
+    {
         let bytes = value.encode()?;
         assert_eq!(hex(&bytes), expected_bytes, "{value:?}");
         assert_eq!(hex(&Sha256::digest(bytes)), expected_hash);
@@ -282,7 +302,7 @@ fn explicit_domain_tags_accept_the_csmir_catalog() -> Result<(), CanonicalError>
         "csmir.Decimal",
     ] {
         let value = C::record(tag, Vec::<(String, C)>::new());
-        assert!(!value.encode()?.is_empty());
+        assert_ne!(value.encode()?, [] as [u8; 0]);
     }
     Ok(())
 }
@@ -318,7 +338,7 @@ fn exact_decimal_projection_matches_the_frozen_golden() -> Result<(), Box<dyn st
     let maximum = "9".repeat(76);
     let wide = DecimalValue::new(&maximum, DecimalType::new(76, 0)?)?;
     assert_eq!(wide.coefficient(), maximum);
-    assert!(!wide.canonical_value().encode()?.is_empty());
+    assert_ne!(wide.canonical_value().encode()?, [] as [u8; 0]);
     Ok(())
 }
 
@@ -431,7 +451,7 @@ proptest! {
     #[test]
     fn integer_types_and_domains_do_not_alias(value in 0_i64..i64::MAX) {
         let signed = C::Signed(value);
-        let unsigned = C::Unsigned(value as u64);
+        let unsigned = C::Unsigned(value.cast_unsigned());
         prop_assert_ne!(signed.encode(), unsigned.encode());
         prop_assert_ne!(fingerprint(Domain::Csmir, &signed), fingerprint(Domain::Sqir, &signed));
         prop_assert_ne!(fingerprint(Domain::Sqir, &signed), fingerprint(Domain::Seir, &signed));

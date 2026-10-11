@@ -10,6 +10,10 @@ pub struct DecimalType {
 }
 
 impl DecimalType {
+    /// # Errors
+    ///
+    /// Returns `IncompatibleTypes` unless precision is 1..=76 and scale is
+    /// no greater than precision.
     pub fn new(precision: u8, scale: u8) -> Result<Self, Diagnostic> {
         if !(1..=76).contains(&precision) || scale > precision {
             return Err(type_error(
@@ -18,9 +22,11 @@ impl DecimalType {
         }
         Ok(Self { precision, scale })
     }
+    #[must_use]
     pub const fn precision(self) -> u8 {
         self.precision
     }
+    #[must_use]
     pub const fn scale(self) -> u8 {
         self.scale
     }
@@ -34,6 +40,11 @@ pub struct DecimalValue {
 
 impl DecimalValue {
     /// The exact value is coefficient * 10^(-scale). No binary float is involved.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IncompatibleTypes` for a malformed integer coefficient, or
+    /// `NumericOverflow` if its significant digits exceed the declared precision.
     pub fn new(
         coefficient: impl Into<String>,
         decimal_type: DecimalType,
@@ -69,15 +80,19 @@ impl DecimalValue {
             decimal_type,
         })
     }
+    #[must_use]
     pub fn coefficient(&self) -> &str {
         &self.coefficient
     }
+    #[must_use]
     pub const fn decimal_type(&self) -> DecimalType {
         self.decimal_type
     }
+    #[must_use]
     pub fn is_negative(&self) -> bool {
         self.coefficient.starts_with('-')
     }
+    #[must_use]
     pub fn is_zero(&self) -> bool {
         self.coefficient == "0"
     }
@@ -122,6 +137,10 @@ pub enum ValueType {
 }
 
 impl ValueType {
+    /// # Errors
+    ///
+    /// Returns `IncompatibleTypes` for unsupported widths, invalid struct or
+    /// opaque names, or type nesting deeper than 64 levels.
     pub fn validate(&self) -> Result<(), Diagnostic> {
         self.validate_depth(0)
     }
@@ -160,6 +179,7 @@ impl ValueType {
             _ => Ok(()),
         }
     }
+    #[must_use]
     pub fn is_numeric(&self) -> bool {
         matches!(
             self,
@@ -172,12 +192,16 @@ impl ValueType {
 pub struct FiniteFloat(u64);
 
 impl FiniteFloat {
+    /// # Errors
+    ///
+    /// Returns `IncompatibleTypes` for NaN or infinite values.
     pub fn new(value: f64) -> Result<Self, Diagnostic> {
         if !value.is_finite() {
             return Err(type_error("Certified floating values must be finite"));
         }
         Ok(Self(value.to_bits()))
     }
+    #[must_use]
     pub fn value(self) -> f64 {
         f64::from_bits(self.0)
     }
@@ -210,6 +234,7 @@ pub enum Literal {
 }
 
 impl Literal {
+    #[must_use]
     pub fn value_type(&self) -> ValueType {
         match self {
             Self::Null(t) => t.clone(),
@@ -237,6 +262,10 @@ impl Literal {
             Self::Uuid(_) => ValueType::Uuid,
         }
     }
+    /// # Errors
+    ///
+    /// Returns an error if the literal type is invalid or a time literal falls
+    /// outside a civil day.
     pub fn validate(&self) -> Result<(), Diagnostic> {
         self.value_type().validate()?;
         if matches!(self, Self::Time {nanoseconds_since_midnight} if *nanoseconds_since_midnight >= 86_400_000_000_000)
@@ -265,6 +294,7 @@ pub enum TruthValue {
 }
 
 impl TruthValue {
+    #[must_use]
     pub fn and(self, rhs: Self) -> Self {
         match (self, rhs) {
             (Self::False, _) | (_, Self::False) => Self::False,
@@ -272,6 +302,7 @@ impl TruthValue {
             _ => Self::Unknown,
         }
     }
+    #[must_use]
     pub fn or(self, rhs: Self) -> Self {
         match (self, rhs) {
             (Self::True, _) | (_, Self::True) => Self::True,
@@ -322,6 +353,10 @@ pub struct NumericContract {
     pub explicit_narrowing: bool,
 }
 
+/// # Errors
+///
+/// Returns `IncompatibleTypes` for division, which requires an explicit
+/// target decimal type.
 pub fn derived_decimal(
     op: ArithmeticOp,
     left: DecimalType,
@@ -345,6 +380,11 @@ pub fn derived_decimal(
     }
 }
 
+/// # Errors
+///
+/// Returns a type-validation error, `IncompatibleTypes` for incompatible
+/// operands or missing numeric policies, or `NumericOverflow` when the
+/// derived precision exceeds 76 without an explicit narrowing contract.
 pub fn validate_arithmetic(
     op: ArithmeticOp,
     left: &ValueType,

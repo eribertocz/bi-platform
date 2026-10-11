@@ -9,9 +9,13 @@ use crate::expressions::{
 };
 use crate::grain::{Grain, GrainAtom};
 use crate::identity::{StableId, valid_segment};
-use crate::model::*;
+use crate::model::{
+    AggregationClass, AggregationContract, ConformanceContract, ConversionRule, Dimension,
+    EntityKey, Field, Measure, Metric, ModelDefinition, SemanticDataset, TemporalTies,
+    UnitConversion, WindowBehavior,
+};
 use crate::policy::{ContextSlot, PolicyScope};
-use crate::relationships::*;
+use crate::relationships::{Bridge, Cardinality, Relationship};
 use crate::time::{CalendarProfile, TimeBucket, TimeRole};
 use crate::types::{ArithmeticOp, NumericContract, ValueType, validate_arithmetic};
 use crate::units::Unit;
@@ -98,6 +102,11 @@ impl<'a> Validator<'a> {
     }
 
     fn run(&mut self) {
+        self.validate_identities();
+        self.validate_definitions();
+    }
+
+    fn validate_identities(&mut self) {
         let mut ids = BTreeSet::new();
         let mut objects = vec![&self.model.metadata];
         macro_rules! collect_metadata {
@@ -133,6 +142,9 @@ impl<'a> Validator<'a> {
                 );
             }
         }
+    }
+
+    fn validate_definitions(&mut self) {
         for entity in &self.model.entities {
             if entity.keys.is_empty() {
                 self.error(
@@ -184,6 +196,13 @@ impl<'a> Validator<'a> {
             self.validate_metric(metric);
         }
         self.validate_metric_cycles();
+        self.validate_policies();
+        for calendar in &self.model.calendars {
+            self.calendar(&calendar.profile, calendar.metadata.id());
+        }
+    }
+
+    fn validate_policies(&mut self) {
         for policy in &self.model.policies {
             let owner = policy.metadata.id();
             let local = match &policy.scope {
@@ -219,9 +238,6 @@ impl<'a> Validator<'a> {
                 0,
             );
             self.boolean(&policy.predicate, owner);
-        }
-        for calendar in &self.model.calendars {
-            self.calendar(&calendar.profile, calendar.metadata.id());
         }
     }
 
@@ -309,9 +325,9 @@ impl<'a> Validator<'a> {
     fn same(
         &mut self,
         actual: &ValueType,
-        unit: &Option<Unit>,
+        unit: Option<&Unit>,
         expected: &ValueType,
-        expected_unit: &Option<Unit>,
+        expected_unit: Option<&Unit>,
         owner: &StableId,
     ) {
         if actual != expected {
@@ -460,9 +476,9 @@ impl<'a> Validator<'a> {
             self.scalar(&binding.expression, owner, Some(&binding.dataset), None, 0);
             self.same(
                 &binding.expression.value_type,
-                &binding.expression.unit,
+                binding.expression.unit.as_ref(),
                 &dimension.value_type,
-                &dimension.unit,
+                dimension.unit.as_ref(),
                 owner,
             );
             match &binding.conformance {
@@ -471,9 +487,9 @@ impl<'a> Validator<'a> {
                     self.scalar(normalization, owner, Some(&binding.dataset), None, 0);
                     self.same(
                         &normalization.value_type,
-                        &normalization.unit,
+                        normalization.unit.as_ref(),
                         &dimension.value_type,
-                        &dimension.unit,
+                        dimension.unit.as_ref(),
                         owner,
                     );
                 }
@@ -488,9 +504,9 @@ impl<'a> Validator<'a> {
                     if let Some(field) = self.field(canonical_value) {
                         self.same(
                             &field.value_type,
-                            &field.unit,
+                            field.unit.as_ref(),
                             &dimension.value_type,
-                            &dimension.unit,
+                            dimension.unit.as_ref(),
                             owner,
                         );
                         if mapping.is_some_and(|r| {
@@ -578,9 +594,9 @@ impl<'a> Validator<'a> {
         if let Some(decomposition) = &measure.aggregation_contract.decomposition {
             self.same(
                 &decomposition.recomposition.value_type,
-                &decomposition.recomposition.unit,
+                decomposition.recomposition.unit.as_ref(),
                 &measure.value_type,
-                &measure.unit,
+                measure.unit.as_ref(),
                 owner,
             );
         }
@@ -602,6 +618,11 @@ impl<'a> Validator<'a> {
             self.scalar(filter, owner, Some(&measure.dataset), None, 0);
             self.boolean(filter, owner);
         }
+        self.validate_measure_aggregation(measure);
+    }
+
+    fn validate_measure_aggregation(&mut self, measure: &Measure) {
+        let owner = measure.metadata.id();
         match measure.aggregation {
             AggregateFunction::CountRows => {
                 if measure.scalar_expression.is_some()
@@ -647,9 +668,9 @@ impl<'a> Validator<'a> {
                 if let Some(expr) = &measure.scalar_expression {
                     self.same(
                         &expr.value_type,
-                        &expr.unit,
+                        expr.unit.as_ref(),
                         &measure.value_type,
-                        &measure.unit,
+                        measure.unit.as_ref(),
                         owner,
                     );
                     if measure.aggregation == AggregateFunction::Sum && !numeric(&expr.value_type) {
@@ -719,27 +740,7 @@ impl<'a> Validator<'a> {
                 "Relationship key pairs must not repeat fields",
             );
         }
-        for pair in &relationship.key_pairs {
-            match (self.field(&pair.from_field), self.field(&pair.to_field)) {
-                (Some(left), Some(right))
-                    if left.dataset == relationship.from_dataset
-                        && right.dataset == relationship.to_dataset =>
-                {
-                    if left.value_type != right.value_type || left.unit != right.unit {
-                        self.error(
-                            ErrorCode::InvalidRelationshipContract,
-                            owner,
-                            "Relationship keys have incompatible types or units",
-                        );
-                    }
-                }
-                _ => self.error(
-                    ErrorCode::InvalidRelationshipContract,
-                    owner,
-                    "Relationship field does not belong to the declared endpoint",
-                ),
-            }
-        }
+        self.validate_relationship_pairs(relationship);
         if let (Some(from), Some(to)) = (from, to) {
             let compatible_domain = from.key_bindings.iter().any(|left| {
                 left.fields.iter().collect::<BTreeSet<_>>() == from_fields
@@ -789,6 +790,36 @@ impl<'a> Validator<'a> {
                 }
             }
         }
+        self.validate_relationship_time(relationship);
+    }
+
+    fn validate_relationship_pairs(&mut self, relationship: &Relationship) {
+        let owner = relationship.metadata.id();
+        for pair in &relationship.key_pairs {
+            match (self.field(&pair.from_field), self.field(&pair.to_field)) {
+                (Some(left), Some(right))
+                    if left.dataset == relationship.from_dataset
+                        && right.dataset == relationship.to_dataset =>
+                {
+                    if left.value_type != right.value_type || left.unit != right.unit {
+                        self.error(
+                            ErrorCode::InvalidRelationshipContract,
+                            owner,
+                            "Relationship keys have incompatible types or units",
+                        );
+                    }
+                }
+                _ => self.error(
+                    ErrorCode::InvalidRelationshipContract,
+                    owner,
+                    "Relationship field does not belong to the declared endpoint",
+                ),
+            }
+        }
+    }
+
+    fn validate_relationship_time(&mut self, relationship: &Relationship) {
+        let owner = relationship.metadata.id();
         if let Some(temporal) = &relationship.temporal_constraint {
             let event = self.field(&temporal.event_time);
             let start = self.field(&temporal.valid_from);
@@ -964,17 +995,17 @@ impl<'a> Validator<'a> {
         if let Some(decomposition) = &metric.aggregation_contract.decomposition {
             self.same(
                 &decomposition.recomposition.value_type,
-                &decomposition.recomposition.unit,
+                decomposition.recomposition.unit.as_ref(),
                 &metric.value_type,
-                &metric.unit,
+                metric.unit.as_ref(),
                 owner,
             );
         }
         self.same(
             &metric.expression.value_type,
-            &metric.expression.unit,
+            metric.expression.unit.as_ref(),
             &metric.value_type,
-            &metric.unit,
+            metric.unit.as_ref(),
             owner,
         );
         let mut refs: BTreeSet<_> = metric
@@ -1035,6 +1066,23 @@ impl<'a> Validator<'a> {
             self.boolean(filter, owner);
         }
         self.policy_refs(&metric.policy_refs, owner, None);
+        self.validate_metric_time(metric);
+        if let Some(bridge_id) = &metric.allocation_bridge
+            && !self
+                .model
+                .bridges
+                .iter()
+                .any(|b| b.metadata.id() == bridge_id && b.allocation.is_some())
+        {
+            self.error(
+                ErrorCode::InvalidAllocationContract,
+                owner,
+                "Allocated metric requires an explicit bridge allocation",
+            );
+        }
+    }
+    fn validate_metric_time(&mut self, metric: &Metric) {
+        let owner = metric.metadata.id();
         if let Some(temporal) = &metric.time_behavior {
             self.atom(&temporal.axis, owner);
             self.grain(&temporal.selection_scope, owner);
@@ -1079,20 +1127,8 @@ impl<'a> Validator<'a> {
                 }
             }
         }
-        if let Some(bridge_id) = &metric.allocation_bridge
-            && !self
-                .model
-                .bridges
-                .iter()
-                .any(|b| b.metadata.id() == bridge_id && b.allocation.is_some())
-        {
-            self.error(
-                ErrorCode::InvalidAllocationContract,
-                owner,
-                "Allocated metric requires an explicit bridge allocation",
-            );
-        }
     }
+
     fn order(&mut self, terms: &[crate::time::OrderTerm], owner: &StableId) {
         let mut refs = BTreeSet::new();
         for term in terms {
@@ -1187,6 +1223,10 @@ impl<'a> Validator<'a> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the exhaustive scalar-expression validation table together so every variant and its recursive checks can be audited in one place."
+    )]
     fn scalar(
         &mut self,
         expr: &ScalarExpr,
@@ -1223,9 +1263,9 @@ impl<'a> Validator<'a> {
                 Some(field) => {
                     self.same(
                         &expr.value_type,
-                        &expr.unit,
+                        expr.unit.as_ref(),
                         &field.value_type,
-                        &field.unit,
+                        field.unit.as_ref(),
                         owner,
                     );
                     if dataset.is_some_and(|id| id != &field.dataset) {
@@ -1240,7 +1280,13 @@ impl<'a> Validator<'a> {
             },
             ScalarExprKind::DimensionRef(id) => match self.dimension(id) {
                 Some(d) => {
-                    self.same(&expr.value_type, &expr.unit, &d.value_type, &d.unit, owner);
+                    self.same(
+                        &expr.value_type,
+                        expr.unit.as_ref(),
+                        &d.value_type,
+                        d.unit.as_ref(),
+                        owner,
+                    );
                     if dataset.is_some_and(|id| !d.bindings.iter().any(|b| &b.dataset == id)) {
                         self.error(
                             ErrorCode::InvalidModelReference,
@@ -1253,7 +1299,13 @@ impl<'a> Validator<'a> {
             },
             ScalarExprKind::ContextSlot(name) => {
                 if let Some(slot) = slots.and_then(|s| s.iter().find(|s| &s.name == name)) {
-                    self.same(&expr.value_type, &expr.unit, &slot.value_type, &None, owner);
+                    self.same(
+                        &expr.value_type,
+                        expr.unit.as_ref(),
+                        &slot.value_type,
+                        None,
+                        owner,
+                    );
                 } else {
                     self.error(ErrorCode::PolicyViolation,owner,"Context references are permitted only in policies with declared typed slots");
                 }
@@ -1265,7 +1317,7 @@ impl<'a> Validator<'a> {
                         self.boolean(operand, owner);
                         self.boolean(expr, owner);
                     }
-                    _ => {
+                    UnaryOp::Negate => {
                         if !numeric(&operand.value_type) {
                             self.error(
                                 ErrorCode::IncompatibleTypes,
@@ -1275,9 +1327,9 @@ impl<'a> Validator<'a> {
                         }
                         self.same(
                             &expr.value_type,
-                            &expr.unit,
+                            expr.unit.as_ref(),
                             &operand.value_type,
-                            &operand.unit,
+                            operand.unit.as_ref(),
                             owner,
                         );
                     }
@@ -1301,16 +1353,22 @@ impl<'a> Validator<'a> {
                     error.primary_ref = Some(owner.clone());
                     self.errors.push(error);
                 }
-                self.arithmetic_units(*op, &left.unit, &right.unit, &expr.unit, owner);
+                self.arithmetic_units(
+                    *op,
+                    left.unit.as_ref(),
+                    right.unit.as_ref(),
+                    expr.unit.as_ref(),
+                    owner,
+                );
             }
             ScalarExprKind::Comparison { left, right, .. } => {
                 self.scalar(left, owner, dataset, slots, depth + 1);
                 self.scalar(right, owner, dataset, slots, depth + 1);
                 self.same(
                     &left.value_type,
-                    &left.unit,
+                    left.unit.as_ref(),
                     &right.value_type,
-                    &right.unit,
+                    right.unit.as_ref(),
                     owner,
                 );
                 self.boolean(expr, owner);
@@ -1346,18 +1404,18 @@ impl<'a> Validator<'a> {
                     self.scalar(value, owner, dataset, slots, depth + 1);
                     self.same(
                         &value.value_type,
-                        &value.unit,
+                        value.unit.as_ref(),
                         &expr.value_type,
-                        &expr.unit,
+                        expr.unit.as_ref(),
                         owner,
                     );
                 }
                 self.scalar(otherwise, owner, dataset, slots, depth + 1);
                 self.same(
                     &otherwise.value_type,
-                    &otherwise.unit,
+                    otherwise.unit.as_ref(),
                     &expr.value_type,
-                    &expr.unit,
+                    expr.unit.as_ref(),
                     owner,
                 );
             }
@@ -1437,9 +1495,9 @@ impl<'a> Validator<'a> {
                 {
                     self.same(
                         &expr.value_type,
-                        &expr.unit,
+                        expr.unit.as_ref(),
                         &c.result_type,
-                        &Some(c.to.clone()),
+                        Some(&c.to),
                         owner,
                     );
                     if operand.unit.as_ref() != Some(&c.from) {
@@ -1456,6 +1514,10 @@ impl<'a> Validator<'a> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the exhaustive metric-expression validation table together, including the numeric and unit contracts for each variant."
+    )]
     fn metric_expression(&mut self, expr: &MetricExpr, owner: &StableId, depth: usize) {
         if depth > 128 {
             self.error(
@@ -1469,7 +1531,13 @@ impl<'a> Validator<'a> {
         self.unit(expr.unit.as_ref(), owner);
         match &expr.kind {
             MetricExprKind::MeasureRef(id) => match self.measure(id) {
-                Some(m) => self.same(&expr.value_type, &expr.unit, &m.value_type, &m.unit, owner),
+                Some(m) => self.same(
+                    &expr.value_type,
+                    expr.unit.as_ref(),
+                    &m.value_type,
+                    m.unit.as_ref(),
+                    owner,
+                ),
                 None => self.missing(owner, id),
             },
             MetricExprKind::ExplicitCast { operand, rounding } => {
@@ -1504,7 +1572,13 @@ impl<'a> Validator<'a> {
             MetricExprKind::MetricRef(id) | MetricExprKind::Window { base_metric: id } => {
                 match self.metric(id) {
                     Some(m) => {
-                        self.same(&expr.value_type, &expr.unit, &m.value_type, &m.unit, owner)
+                        self.same(
+                            &expr.value_type,
+                            expr.unit.as_ref(),
+                            &m.value_type,
+                            m.unit.as_ref(),
+                            owner,
+                        );
                     }
                     None => self.missing(owner, id),
                 }
@@ -1527,7 +1601,13 @@ impl<'a> Validator<'a> {
                     error.primary_ref = Some(owner.clone());
                     self.errors.push(error);
                 }
-                self.arithmetic_units(*op, &left.unit, &right.unit, &expr.unit, owner);
+                self.arithmetic_units(
+                    *op,
+                    left.unit.as_ref(),
+                    right.unit.as_ref(),
+                    expr.unit.as_ref(),
+                    owner,
+                );
             }
             MetricExprKind::Ratio {
                 numerator,
@@ -1554,9 +1634,9 @@ impl<'a> Validator<'a> {
                 }
                 self.arithmetic_units(
                     ArithmeticOp::Divide,
-                    &numerator.unit,
-                    &denominator.unit,
-                    &expr.unit,
+                    numerator.unit.as_ref(),
+                    denominator.unit.as_ref(),
+                    expr.unit.as_ref(),
                     owner,
                 );
             }
@@ -1566,17 +1646,17 @@ impl<'a> Validator<'a> {
     fn arithmetic_units(
         &mut self,
         op: ArithmeticOp,
-        left: &Option<Unit>,
-        right: &Option<Unit>,
-        result: &Option<Unit>,
+        left: Option<&Unit>,
+        right: Option<&Unit>,
+        result: Option<&Unit>,
         owner: &StableId,
     ) {
         let valid = match op {
             ArithmeticOp::Add | ArithmeticOp::Subtract => left == right && result == left,
             ArithmeticOp::Multiply => {
-                if matches!(left, None | Some(Unit::Count) | Some(Unit::Ratio)) {
+                if matches!(left, None | Some(Unit::Count | Unit::Ratio)) {
                     result == right
-                } else if matches!(right, None | Some(Unit::Count) | Some(Unit::Ratio)) {
+                } else if matches!(right, None | Some(Unit::Count | Unit::Ratio)) {
                     result == left
                 } else {
                     false
@@ -1585,7 +1665,7 @@ impl<'a> Validator<'a> {
             ArithmeticOp::Divide => {
                 if left == right {
                     matches!(result, None | Some(Unit::Ratio))
-                } else if matches!(right, None | Some(Unit::Count) | Some(Unit::Ratio)) {
+                } else if matches!(right, None | Some(Unit::Count | Unit::Ratio)) {
                     result == left
                 } else {
                     false

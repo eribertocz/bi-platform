@@ -22,6 +22,7 @@ pub enum ContractEvidenceState {
 }
 
 impl ContractEvidenceState {
+    #[must_use]
     pub fn is_invalid(&self) -> bool {
         matches!(self, Self::Invalid { .. })
     }
