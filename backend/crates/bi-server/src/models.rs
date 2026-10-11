@@ -657,7 +657,7 @@ mod tests {
             std::fs::create_dir(root.path().join("metrics")).unwrap();
             let filename = format!("{name}.yaml");
             #[cfg(unix)]
-            project_metrics(root.path()).unwrap().symlink_file(outside.path().join("secret"), &filename).unwrap();
+            std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("metrics").join(&filename)).unwrap();
             #[cfg(windows)]
             {
                 let output = std::process::Command::new("cmd").args(["/c", "mklink", "/J"])
