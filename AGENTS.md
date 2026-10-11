@@ -7,6 +7,7 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 - Arquitectura: `LEER_PRIMERO.md`, `docs/arquitectura/INDICE_17_MODULOS.md`, `docs/arquitectura/DECISIONES_TECNICAS_RC2.md`, `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`; consultar el módulo pertinente a cada tarea.
 - **Decisiones vigentes: `docs/decisiones/` (ADR). Prevalecen sobre `docs/arquitectura/` donde la contradigan.** Toda desviación de la base se registra como ADR; las de producto, con la aprobación del propietario.
 - `docs/arquitectura/` es la base histórica original: no se modifica (hashes en `INVENTARIO.md`).
+- Producto: `docs/producto/` (blueprint del propietario y cómo se incorpora: capacidades, fronteras de seguridad, siguientes entregas).
 - Contrato HTTP vigente: `docs/api/openapi.json`. Los archivos de `contratos_referencia/` son solo muestras.
 
 ## Flujo
@@ -33,6 +34,7 @@ Cada capacidad sigue cinco pasos: **el propietario define el objetivo → un age
 - Seguridad: autorización en el servidor; nunca secretos en Git, logs ni comentarios.
 - Dependencia nueva: una línea en el PR con problema, paquete y licencia, alternativa y motivo.
 - **Módulos desacoplados (ADR 0008):** cada módulo define qué recibe y qué entrega, sin saber quién lo llama. Los núcleos (`sef-*` salvo `sef-adapter-*`…) no dependen de HTTP, almacenamiento, motores ni de otros módulos; solo los adaptadores (`bi-server`, `bi-runtime`, `sef-adapter-<motor>`) lo hacen. CI lo vigila (`deny.toml` y `backend.yml`).
+- **Permisos por un punto único (ADR 0010):** todo acceso a datos pasa por el plan del motor semántico con el contexto de seguridad de quien pregunta; ninguna vía (API, editor SQL, caché, exportación, IA) ejecuta SQL fuera de él. Toda ruta nueva declara su acción y recurso, con pruebas negativas de autorización.
 - Rendimiento: en rutas críticas, medir antes y después (`docs/arquitectura/PERFORMANCE_DESDE_G0.md`).
 - Documentación nueva solo cuando algo no se pueda expresar en código, contrato o pruebas.
 
@@ -45,7 +47,7 @@ Cada PR, de cualquiera de los dos, cumple esto o explica por qué no aplica:
 - Piezas de seguridad: modelo de amenazas breve en el PR (qué se protege, de quién y cómo se prueba).
 - Observabilidad desde el diseño: `tracing` estructurado con `request_id` y métricas preparadas para OpenTelemetry (M15).
 - Contratos estables: un cambio incompatible de la API se versiona; nunca se rompe un cliente sin aviso.
-- UI: accesibilidad verificada (axe) y tamaño de bundle medido por pantalla.
+- UI: objetivo WCAG 2.2 AA (ADR 0010), verificado con axe y con teclado y lector de pantalla en los flujos principales; tamaño de bundle medido por pantalla.
 - Causas raíz, nunca parches que oculten síntomas; sin `TODO` ni código muerto al integrar.
 - Referentes: antes de diseñar una capacidad nueva, revisar cómo la resuelven 2–4 herramientas de referencia (`docs/referentes/README.md`), **leyendo su código fuente cuando es abierto** (ELT: SQLMesh y Rill; motor semántico: Cube, Malloy, MetricFlow y Rill; visualización: Rill, cuya UI es Svelte, Superset y Grafana), y dejar en el PR qué se toma, qué se descarta y por qué.
 - **Nivel mínimo: Atlas BI.** Cada capacidad (visualización, ELT, motor semántico, filtros, trabajos…) alcanza al menos la profundidad de diseño del documento equivalente de Atlas BI (`E:\bi-platform\docs\`, tabla en `docs/referentes/atlasbi.md`), con implementación propia: sin Cube ni SQLMesh como dependencias.
