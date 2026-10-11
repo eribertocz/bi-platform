@@ -111,6 +111,20 @@ fn each_budget_has_its_own_truthful_diagnostic_and_document_path() {
         MAX_EXPRESSION_RECURSION,
         "niveles de recursión",
     );
+    too_large(
+        &format!(
+            "{}1{}",
+            "CASE WHEN TRUE THEN ".repeat(20),
+            " ELSE 0 END".repeat(20)
+        ),
+        MAX_EXPRESSION_RECURSION,
+        "niveles de recursión",
+    );
+    too_large(
+        &format!("{}TRUE", "NOT ".repeat(40)),
+        MAX_EXPRESSION_RECURSION,
+        "niveles de recursión",
+    );
     let max_bytes = sef_ossie::load::MAX_DOCUMENT_BYTES;
     too_large(&" ".repeat(max_bytes + 1), max_bytes, "bytes");
     let document = format!(
@@ -169,6 +183,25 @@ fn attacks_and_admitted_boundaries_run_in_an_isolated_process() {
         ),
         ("10000 NOT", format!("{}TRUE", "NOT ".repeat(10_000))),
         (
+            "CASE recursion recovered as identifier",
+            format!(
+                "{}1{}",
+                "CASE WHEN TRUE THEN ".repeat(20),
+                " ELSE 0 END".repeat(20)
+            ),
+        ),
+        (
+            "NOT recursion recovered as identifier",
+            format!("{}TRUE", "NOT ".repeat(40)),
+        ),
+        (
+            "NOT recursion inside CASE",
+            format!(
+                "CASE WHEN TRUE THEN {}TRUE ELSE FALSE END",
+                "NOT ".repeat(40)
+            ),
+        ),
+        (
             "1000 nested CASE",
             format!(
                 "{}1{}",
@@ -217,6 +250,10 @@ fn attacks_and_admitted_boundaries_run_in_an_isolated_process() {
             "{label}"
         );
     }
+    admitted_boundaries();
+}
+
+fn admitted_boundaries() {
     // Maximum width plus near-maximum structural cost: walk and drop must
     // remain safe together, not only when measured independently.
     let text = format!("{} + {}", vec!["1"; 124].join(" + "), mapping(900));
@@ -236,6 +273,9 @@ fn attacks_and_admitted_boundaries_run_in_an_isolated_process() {
 
 #[test]
 fn width_discounts_do_not_hide_language_violations() {
+    for name in ["case", "not", "when", "then", "else"] {
+        analyze(name, Context::Field).unwrap();
+    }
     for (text, code) in [
         (
             "CASE x WHEN 1 THEN (SELECT 1) END",
@@ -281,6 +321,19 @@ fn width_discounts_do_not_hide_language_violations() {
 
 proptest! {
     #[test]
+    fn valid_nesting_errors_are_resources_not_syntax(depth in 1usize..50) {
+        for text in [
+            format!("{}1{}", "CASE WHEN TRUE THEN ".repeat(depth), " ELSE 0 END".repeat(depth)),
+            format!("{}TRUE", "NOT ".repeat(depth)),
+            format!("CASE WHEN TRUE THEN {}TRUE ELSE FALSE END", "NOT ".repeat(depth)),
+        ] {
+            if let Err(error) = analyze(&text, Context::Field) {
+                prop_assert_eq!(error.code, Code::ExpressionTooLarge);
+            }
+        }
+    }
+
+    #[test]
     fn bounded_unicode_input_never_panics(
         characters in prop::collection::vec(any::<char>(), 0..=4096),
         metric in any::<bool>(),
@@ -303,7 +356,7 @@ proptest! {
     #[test]
     fn flat_mapping_width_is_bounded(branches in 1usize..1200) {
         let result = analyze(&mapping(branches), Context::Field);
-        prop_assert_eq!(result.is_ok(), branches * 4 + 4 <= MAX_EXPRESSION_TOKENS);
+        prop_assert_eq!(result.is_ok(), branches * 4 + 3 <= MAX_EXPRESSION_TOKENS);
         if let Err(error) = result { prop_assert_eq!(error.code, Code::ExpressionTooLarge); }
     }
 

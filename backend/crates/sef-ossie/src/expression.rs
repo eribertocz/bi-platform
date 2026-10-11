@@ -19,7 +19,7 @@ use sqlparser::ast::{
     Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value,
     WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
 };
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{Dialect, GenericDialect};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -146,16 +146,59 @@ fn parse(text: &str) -> Result<Expr, Diagnostic> {
         ParserError::RecursionLimitExceeded => {
             too_large(MAX_EXPRESSION_RECURSION, "niveles de recursión del parser")
         }
-        other => syntax(format!("Expresión no válida: {other}")),
+        other => syntax_diagnostic(text, format!("Expresión no válida: {other}")),
     })?;
     if parser.peek_token().token != Token::EOF {
-        return Err(syntax(
+        return Err(syntax_diagnostic(
+            text,
             "Después de la expresión sobra texto: una expresión es un solo valor, no varias \
              sentencias."
                 .to_owned(),
         ));
     }
     Ok(expr)
+}
+
+/// `GenericDialect` may recover from a recursion error by treating CASE/NOT as
+/// identifiers, then report trailing text instead. Probe only failed parses,
+/// disabling that recovery. The probe never admits an expression or changes
+/// the successful `GenericDialect` path, and uses the same prechecked input and
+/// recursion cap. A typed resource error takes precedence over syntax.
+fn syntax_diagnostic(text: &str, message: String) -> Diagnostic {
+    let dialect = RecursionDiagnosticDialect;
+    if let Ok(tokens) = Tokenizer::new(&GenericDialect {}, text).tokenize()
+        && matches!(
+            Parser::new(&dialect)
+                .with_recursion_limit(MAX_EXPRESSION_RECURSION)
+                .with_tokens(tokens)
+                .parse_expr(),
+            Err(ParserError::RecursionLimitExceeded)
+        )
+    {
+        return too_large(MAX_EXPRESSION_RECURSION, "niveles de recursión del parser");
+    }
+    Diagnostic::error(Code::ExpressionSyntax, "", message)
+}
+
+#[derive(Debug)]
+struct RecursionDiagnosticDialect;
+
+impl Dialect for RecursionDiagnosticDialect {
+    fn dialect(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<GenericDialect>()
+    }
+
+    fn is_identifier_start(&self, ch: char) -> bool {
+        GenericDialect {}.is_identifier_start(ch)
+    }
+
+    fn is_identifier_part(&self, ch: char) -> bool {
+        GenericDialect {}.is_identifier_part(ch)
+    }
+
+    fn is_reserved_for_identifier(&self, _keyword: Keyword) -> bool {
+        true
+    }
 }
 
 fn too_large(limit: usize, unit: &str) -> Diagnostic {
