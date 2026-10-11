@@ -309,3 +309,67 @@ fn the_official_examples_conform_to_the_official_schema() {
         assert!(schema().is_valid(&serde_json::from_str(&json).unwrap()));
     }
 }
+
+#[test]
+fn present_optional_properties_reject_null_in_yaml_and_json() {
+    let base = serde_json::json!({
+        "version": SPEC_VERSION, "name": "m",
+        "datasets": [{"name": "d", "source": "t", "fields": [{
+            "name": "x", "expression": {"dialects": [{
+                "dialect": "OSSIE_SQL_2026", "expression": "x"
+            }]}
+        }]}],
+        "metrics": [{"name": "n", "expression": {"dialects": [{
+            "dialect": "OSSIE_SQL_2026", "expression": "SUM(d.x)"
+        }]}}],
+        "relationships": [{"name": "r", "from": "d", "to": "d",
+            "from_columns": ["x"], "to_columns": ["x"]}]
+    });
+    for (path, properties) in [
+        ("", vec!["description", "ai_context"]),
+        (
+            "/datasets/0",
+            vec!["description", "ai_context", "primary_key", "unique_keys"],
+        ),
+        (
+            "/datasets/0/fields/0",
+            vec![
+                "description",
+                "ai_context",
+                "datatype",
+                "dimension",
+                "label",
+            ],
+        ),
+        ("/metrics/0", vec!["description", "ai_context", "datatype"]),
+        ("/relationships/0", vec!["ai_context"]),
+    ] {
+        for property in properties {
+            let mut input = base.clone();
+            input.pointer_mut(path).unwrap()[property] = serde_json::Value::Null;
+            assert!(!schema().is_valid(&input), "{path}/{property}");
+            for text in [input.to_string(), serde_saphyr::to_string(&input).unwrap()] {
+                assert!(parse(&text).is_err(), "{path}/{property}: {text}");
+            }
+        }
+    }
+    for (property, value) in [
+        ("dimension", serde_json::json!({"is_time": null})),
+        ("ai_context", serde_json::json!({"instructions": null})),
+        ("ai_context", serde_json::json!({"synonyms": null})),
+        ("ai_context", serde_json::json!({"examples": null})),
+    ] {
+        let mut input = base.clone();
+        input["datasets"][0]["fields"][0][property] = value;
+        assert!(!schema().is_valid(&input));
+        for text in [input.to_string(), serde_saphyr::to_string(&input).unwrap()] {
+            assert!(parse(&text).is_err(), "{text}");
+        }
+    }
+    // Unknown AI properties are schema-permitted arbitrary JSON, including null.
+    let mut input = base;
+    input["ai_context"] = serde_json::json!({"vendor": null});
+    assert!(schema().is_valid(&input));
+    let model = parse(&input.to_string()).unwrap();
+    assert_eq!(serde_json::to_value(model).unwrap(), input);
+}

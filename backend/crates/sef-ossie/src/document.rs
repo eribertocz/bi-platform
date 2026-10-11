@@ -18,7 +18,11 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    T::deserialize(deserializer).map(Some)
+    // Check null before deserializing T: an untagged struct variant with
+    // defaults/flatten can otherwise interpret null as an empty object.
+    Option::<T>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("an explicitly present property cannot be null"))
 }
 
 /// The specification version this crate reads and writes.
