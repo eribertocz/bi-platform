@@ -170,7 +170,7 @@ fn fields_are_row_level_and_aggregates_do_not_nest() {
 #[test]
 fn deep_nesting_is_a_diagnostic_not_a_crash() {
     let deep = format!("{}1{}", "(".repeat(10_000), ")".repeat(10_000));
-    assert_eq!(rejected(&deep, Context::Field), Code::ExpressionSyntax);
+    assert_eq!(rejected(&deep, Context::Field), Code::ExpressionTooLarge);
 }
 
 proptest! {
