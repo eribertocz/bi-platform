@@ -2,7 +2,7 @@
 
 **Fuente:** [`BLUEPRINT_2026-10-11.md`](BLUEPRINT_2026-10-11.md), documento del propietario. **Fecha del análisis:** 2026-10-11, sobre `main` en `7d5f53f`. **Responde a:** §17 del blueprint (primer entregable).
 
-Este documento no sustituye a los ADR. Las decisiones de producto que propone (§7) necesitan la aprobación del propietario y, una vez aprobadas, se registran como ADR.
+Las rutas citadas son de `main` en ese commit; lo que todavía está en un PR abierto se indica con su número. Este documento no sustituye a los ADR. Las decisiones de producto que propone (§7) necesitan la aprobación del propietario y, una vez aprobadas, se registran como ADR.
 
 ## 1. Conclusión
 
@@ -28,28 +28,28 @@ Este documento no sustituye a los ADR. Las decisiones de producto que propone (�
 
 | Capacidad | Estado | Evidencia |
 |---|---|---|
-| Inicio de sesión y sesiones | **Parcial** | `bi-server/src/auth.rs`: cookie `HttpOnly; SameSite=Strict`, validación de `Origin` y sesiones en PostgreSQL (`migrations/0002_sessions.sql`). Pruebas en `tests/auth.rs` y `e2e/auth.spec.ts`. El acceso de desarrollo (`BI_DEV_USERS`) solo trae identidades sintéticas, y el build de producción no tiene selector. Falta la federación (OIDC), prevista para G2 en el propio `auth.rs`. |
+| Inicio de sesión y sesiones | **Parcial** | `backend/crates/bi-server/src/auth.rs`: cookie `HttpOnly; SameSite=Strict`, validación de `Origin` y sesiones en PostgreSQL (`backend/crates/bi-server/migrations/0002_sessions.sql`). Pruebas en `backend/crates/bi-server/tests/auth.rs` y `frontend/e2e/auth.spec.ts`. El acceso de desarrollo (`BI_DEV_USERS`) solo trae identidades sintéticas, y el build de producción no tiene selector. Falta la federación (OIDC), prevista para G2 en el propio `auth.rs`. |
 | Organizaciones, espacios, grupos y roles | **Ausente** | No hay tablas ni rutas. |
 | Autorización centralizada (sujeto + acción + recurso + contexto) | **Ausente** | Hoy solo se comprueba que exista una sesión. |
-| RLS y políticas de filas | **Parcial** | Se declaran y compilan a CSMIR (`Policy`, `ContextSlot` enlazado como parámetro; caso 015 del corpus y `tests/csmir_governance.rs`), pero aún no se aplican al ejecutar (#45, #47). |
+| RLS y políticas de filas | **Parcial** | Modeladas en CSMIR (`backend/crates/sef-model-ir/src/policy.rs`: `Policy` y `ContextSlot`, valor de contexto enlazado como parámetro) y probadas en el caso 015 del corpus (`backend/crates/sef-model-ir/tests/corpus_models.rs`, `model_validation.rs`). Su declaración en documentos Ossie llega con la parte 3b de #48 (PR pendiente). Aún no se aplican al ejecutar (#45, #47). |
 | CLS y enmascaramiento | **Ausente** | — |
-| Auditoría de eventos | **Ausente** | Hay logs estructurados con `request_id` (`telemetry.rs`), que no son un registro de auditoría. |
+| Auditoría de eventos | **Ausente** | Hay logs estructurados con `request_id` (`backend/crates/bi-server/src/telemetry.rs`), que no son un registro de auditoría. |
 | Linaje | **Parcial** | CSMIR guarda las dependencias tipadas métrica → medida → campo → origen (`Metric.dependencies`, relaciones y puentes). Falta el grafo navegable y la exportación OpenLineage (ADR 0008 §3). |
 | Versionado de definiciones | **Parcial** | El proyecto son archivos en Git (ADR 0003) y CSMIR da una huella por objeto y por modelo. Falta publicar o revertir desde la plataforma. |
-| Conectores | **Parcial** | DuckDB, Parquet y DuckLake con catálogo PostgreSQL (`bi-runtime/tests/lake.rs`). ClickHouse está decidido (ADR 0002) pero no implementado. |
+| Conectores | **Parcial** | DuckDB, Parquet y DuckLake con catálogo PostgreSQL (`backend/crates/bi-runtime/tests/lake.rs`). ClickHouse está decidido (ADR 0002) pero no implementado. |
 | Modos en vivo y materializado | **Parcial** | El modo en vivo funciona sobre el dataset sintético; los demás están decididos (ADR 0009). |
 | Ingesta, transformación y calidad | **Ausente** | G3 (ADR 0005). |
 | Catálogo técnico (tipos exactos y nulabilidad) | **Parcial** | `sef-adapter-duckdb` con `DESCRIBE`, en revisión (#65). |
-| Sandbox del motor | **Implementado** | `bi-runtime/src/bootstrap.rs`: `enable_external_access = false`, `allowed_directories` y `lock_configuration = true`. |
-| Consulta tipada (valores exactos, límite de tiempo, cancelación) | **Implementado** | `bi-server/src/query/`. Los valores nunca llegan al texto SQL (proptest en `query/properties.rs`). Pruebas en `tests/query.rs` (`a_query_past_its_deadline_is_cancelled`). |
-| Motor semántico | **Parcial** | Ossie → CSMIR: los 21 casos del corpus dan una huella idéntica (#63 y 3b de #48). Faltan SQIR (#44), corrección (#45), planificador (#46) y ejecución (#47). |
+| Sandbox del motor | **Implementado** | `backend/crates/bi-runtime/src/bootstrap.rs`: `enable_external_access = false`, `allowed_directories` y `lock_configuration = true`. |
+| Consulta tipada (valores exactos, límite de tiempo, cancelación) | **Implementado** | `backend/crates/bi-server/src/query/`. Los valores nunca llegan al texto SQL (proptest en `backend/crates/bi-server/src/query/properties.rs`). Pruebas en `backend/crates/bi-server/tests/query.rs` (`a_query_past_its_deadline_is_cancelled`). |
+| Motor semántico | **Parcial** | En `main`: CSMIR con huellas (`backend/crates/sef-model-ir`), y lectura, validación y análisis de expresiones Ossie (`backend/crates/sef-ossie`). En PR: Ossie → CSMIR, donde los 21 casos del corpus dan una huella idéntica (#63 aprobado, y la parte 3b de #48). Faltan SQIR (#44), corrección (#45), planificador (#46) y ejecución (#47). |
 | Caché de resultados | **Ausente** | No existe; tampoco hay riesgo de filtración por caché. |
 | Editor SQL | **Bloqueado** | Por el punto único de autorización (§3). |
-| Explorador sin código | **Parcial** | `routes/explorar`: KPI, gráfico y filtro sobre el dataset sintético, con oráculo (`e2e/sales.oracle.json`) y axe (`e2e/explore.spec.ts`). Falta elegir métricas y dimensiones del modelo. |
-| Visualización | **Parcial** | ECharts básico. Falta el contrato `VisualSpec` (ADR 0008 §5). |
+| Explorador sin código | **Parcial** | `frontend/src/routes/explorar/`: KPI, gráfico y filtro sobre el dataset sintético, con oráculo (`frontend/e2e/sales.oracle.json`) y axe (`frontend/e2e/explore.spec.ts`). Falta elegir métricas y dimensiones del modelo. |
+| Visualización | **Parcial** | ECharts básico. Falta un contrato de visualización propio; ADR 0008 §5 solo lo anticipa como formato futuro (`VisualSpec`), sin definirlo. |
 | Dashboards, pivot, colaboración, exportación, alertas, *embedding* e IA | **Ausente** | G4 y G5. La exportación está **bloqueada** hasta el punto único de autorización. |
 | Observabilidad | **Parcial** | Logs JSON con `request_id`, métricas OTLP por HTTPS (#60) y `/health/live` y `/health/ready`. Faltan las trazas distribuidas OTel. |
-| Accesibilidad | **Parcial** | axe en e2e; falta declarar el objetivo WCAG 2.2 AA (§7). |
+| Accesibilidad | **Parcial** | axe en e2e (`frontend/e2e/explore.spec.ts`). Objetivo WCAG 2.2 AA aprobado en ADR 0010. |
 | Copias de seguridad y restauración | **Ausente** | G6. |
 
 ## 3. Fronteras de seguridad: vías por las que una consulta podría evadir políticas (§17.2)
@@ -78,7 +78,7 @@ Este documento no sustituye a los ADR. Las decisiones de producto que propone (�
 | Linaje con declarado, observado e inferido | CSMIR da el declarado; DuckDB, al analizar los modelos SQL, da el observado (ADR 0005 §5); se exporta a OpenLineage | G3–G4 |
 | Explicar cualquier número (§1, §12.1) | Certificado del plan (#46): reglas aplicadas, grano, políticas, redondeo, SQL efectivo e instantánea de datos | G2 (certificado), G4 (UI) |
 | Pruebas de oro entre canales (§7) | El mismo KPI con el mismo contexto en API, explorador, dashboard e IA, comparado con el oráculo del corpus | Cada canal al llegar |
-| Contrato de visualización abstracto (§9) | `VisualSpec` (ADR 0008 §5) con adaptador ECharts; sin licencias comerciales | G4 |
+| Contrato de visualización abstracto (§9) | Definir el contrato que ADR 0008 §5 anticipa como `VisualSpec`, con adaptador ECharts y sin licencias comerciales | G4 (ADR propio) |
 | Objetivo WCAG 2.2 AA (§14) | Se añade a AGENTS.md | Ahora |
 | DoD (§16): evento de auditoría y pruebas negativas de autorización | Se añade a AGENTS.md cuando exista el punto de autorización | G2 |
 | No lanzar SQL libre, cachés ni exportaciones antes de sus controles (§15) | Ya es así; queda escrito en §3 | Ahora |
@@ -102,7 +102,9 @@ Este documento no sustituye a los ADR. Las decisiones de producto que propone (�
 7. **Portabilidad por estándar.** Ossie como formato de entrada y salida (parte 4 de #48), con sus conversores hacia Cube, dbt, Power BI, Tableau y otros.
 8. **Identificadores que sobreviven al renombrado** (#67). El nombre visible queda separado del identificador estable, como el `lineageTag` de Power BI, para que renombrar nunca rompa dashboards, permisos ni cachés.
 
-## 7. Decisiones que se proponen al propietario
+## 7. Decisiones del propietario
+
+**Aprobadas el 2026-10-11 (ADR 0010):** A, B (salvo organizaciones y espacios de trabajo, que quedan para más adelante) y C. Se conserva la propuesta tal como se presentó.
 
 - **A. Punto único de aplicación de políticas** (§3), como regla de arquitectura en AGENTS.md y en un ADR.
 - **B. Adelantar a G2 lo mínimo de seguridad del blueprint (F0):**
