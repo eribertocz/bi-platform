@@ -6,6 +6,11 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
+default = ["bundled"]
+# Compile the DuckDB engine from source into the binary (local and CI).
+# Without it, the build links the official prebuilt libduckdb of the same
+# version found in DUCKDB_LIB_DIR, as the container image does.
+bundled = ["duckdb/bundled", "duckdb/parquet"]
 # Tests against a real DuckLake catalog in PostgreSQL (see tests/lake.rs).
 postgres-tests = []
 
