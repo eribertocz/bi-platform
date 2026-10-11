@@ -99,6 +99,15 @@ async fn absent_configuration_missing_folder_and_empty_folder_are_distinct() {
 }
 
 #[tokio::test]
+async fn configured_models_require_a_ready_analytical_runtime() {
+    let p = project();
+    write(p.path(), "ventas.yaml", VALID);
+    let (status, body) = response(&app(Some(p.path()), Analytics::disabled())).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["code"], "analytics_unavailable");
+}
+
+#[tokio::test]
 async fn compiles_each_file_with_exact_metadata_and_reloads_without_stale_values() {
     let p = project();
     write(p.path(), "ventas.yaml", VALID);

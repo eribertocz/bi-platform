@@ -98,4 +98,12 @@ proptest! {
     fn unknown_types_have_no_fallback(s in "[a-z]{1,50}") {
         prop_assert!(value_type(&s).is_err());
     }
+    #[test]
+    fn source_injection_never_becomes_sql(payload in "[a-zA-Z0-9_ ;'()/-]{0,70}") {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE sales (x BIGINT)").unwrap();
+        let source = format!("sales;{payload}");
+        prop_assert!(matches!(describe(&conn, &source), Err(CatalogError::UnknownSource)));
+        prop_assert!(describe(&conn, "sales").is_ok());
+    }
 }

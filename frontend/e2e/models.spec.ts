@@ -1,10 +1,13 @@
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 test('real project: login, valid metadata, Spanish file error and accessible reload', async ({
   page,
   request,
 }) => {
+  test.setTimeout(150_000);
   await expect
     .poll(async () => (await request.get('/health/ready')).status(), { timeout: 120_000 })
     .toBe(200);
@@ -37,5 +40,26 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   await expect(invalid).toContainText('El origen no existe');
   await page.reload();
   await expect(page.getByRole('button', { name: 'Ventas', exact: true })).toBeVisible();
+  const file = fileURLToPath(
+    new URL('../../examples/models-project/metrics/ventas.yaml', import.meta.url),
+  );
+  const original = readFileSync(file, 'utf8');
+  await page.getByRole('button', { name: 'Ventas', exact: true }).click();
+  try {
+    writeFileSync(file, 'version: [\n');
+    await page.getByRole('button', { name: 'Actualizar modelos' }).click();
+    const broken = page.getByRole('region', { name: 'ventas.yaml', exact: true });
+    await expect(broken).toContainText('El archivo no es un documento YAML o JSON válido');
+    await expect(broken).toContainText('Línea');
+    await expect(broken).toContainText('columna');
+    await expect(broken.getByRole('heading', { name: 'Métricas', exact: true })).toHaveCount(0);
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  } finally {
+    writeFileSync(file, original);
+  }
+  await page.getByRole('button', { name: 'Actualizar modelos' }).click();
+  await expect(page.getByRole('region', { name: 'Ventas', exact: true })).toContainText(
+    'importe_total',
+  );
   expect(errors).toEqual([]);
 });

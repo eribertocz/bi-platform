@@ -176,6 +176,7 @@ mod tests {
         assert!(config.database_url_is_default);
         assert_eq!(config.log_format, LogFormat::Text);
         assert_eq!(config.static_dir, None);
+        assert_eq!(config.project_dir, None);
         assert!(config.analytics.is_some());
         assert_eq!(config.dev_fixture, None);
         assert_eq!(config.query_timeout, DEFAULT_QUERY_TIMEOUT);
@@ -188,6 +189,7 @@ mod tests {
             ("BI_DATABASE_URL", "postgres://u:p@db:5432/x"),
             ("BI_LOG_FORMAT", "json"),
             ("BI_STATIC_DIR", "../frontend/build"),
+            ("BI_PROJECT_DIR", "../examples/models-project"),
         ]))
         .unwrap();
         assert_eq!(config.bind_addr, "0.0.0.0:9000".parse().unwrap());
@@ -195,6 +197,10 @@ mod tests {
         assert!(!config.database_url_is_default);
         assert_eq!(config.log_format, LogFormat::Json);
         assert_eq!(config.static_dir, Some(PathBuf::from("../frontend/build")));
+        assert_eq!(
+            config.project_dir,
+            Some(PathBuf::from("../examples/models-project"))
+        );
     }
 
     #[test]

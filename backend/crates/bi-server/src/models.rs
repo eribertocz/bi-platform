@@ -152,7 +152,7 @@ impl From<Diagnostic> for ModelDiagnostic {
     fn from(d: Diagnostic) -> Self {
         let message = match d.code {
             Code::Syntax => "El archivo no es un documento YAML o JSON válido: revisa la sintaxis, las propiedades obligatorias y las claves repetidas en el lugar indicado.".to_owned(),
-            Code::SemanticContract => format!("El modelo incumple un contrato de tipos, unidades o relaciones. Revisa el elemento indicado ({}).", d.message.rsplit('[').next().unwrap_or("semantic_contract").trim_end_matches(']')),
+            Code::SemanticContract => semantic_message(&d.message),
             _ => d.message,
         };
         Self {
@@ -168,6 +168,50 @@ impl From<Diagnostic> for ModelDiagnostic {
             message,
         }
     }
+}
+
+fn semantic_message(message: &str) -> String {
+    let code = message
+        .rsplit('[')
+        .next()
+        .unwrap_or("semantic_contract")
+        .trim_end_matches(']');
+    let explanation = match code {
+        "INCOMPATIBLE_TYPES" => {
+            "Los tipos de los campos o de la expresión no son compatibles. Declara tipos compatibles sin perder precisión."
+        }
+        "INCOMPATIBLE_UNITS" | "MISSING_UNIT_CONVERSION" => {
+            "Las unidades de la métrica no son compatibles o falta una conversión explícita. Revisa sus unidades."
+        }
+        "INVALID_GRAIN" => {
+            "El nivel de detalle del modelo no coincide con sus claves o sus métricas. Revisa el grano declarado."
+        }
+        "INVALID_RELATIONSHIP_CONTRACT" | "INVALID_MODEL_REFERENCE" => {
+            "Una relación o referencia no coincide con los campos y claves del modelo. Revisa los elementos relacionados."
+        }
+        "INVALID_TEMPORAL_CONTRACT" | "AMBIGUOUS_TEMPORAL_SELECTION" => {
+            "La definición temporal es incompleta o ambigua. Revisa la zona horaria y los campos de fecha."
+        }
+        "INVALID_ALLOCATION_CONTRACT" => {
+            "La regla de distribución de una métrica entre filas es incompleta. Revisa sus pesos y claves."
+        }
+        "METRIC_DEPENDENCY_CYCLE" => {
+            "Hay métricas que dependen de sí mismas. Elimina la dependencia circular."
+        }
+        "INVALID_METRIC_RECOMPOSITION" => {
+            "La métrica no se puede recomponer con las medidas y el grano declarados. Revisa su expresión."
+        }
+        "INVALID_WINDOW_SEMANTICS" => {
+            "La ventana de la métrica no tiene una definición válida. Revisa su orden y su partición."
+        }
+        "POLICY_VIOLATION" => {
+            "La política declarada no permite esta definición. Revisa las reglas del modelo."
+        }
+        _ => {
+            "El modelo incumple un contrato semántico. Revisa la definición del elemento indicado."
+        }
+    };
+    format!("{explanation} ({code})")
 }
 
 #[utoipa::path(get, path = "/api/v1/models", tag = "models", operation_id = "listModels",
