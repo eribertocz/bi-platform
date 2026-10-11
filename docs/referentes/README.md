@@ -32,3 +32,4 @@
 ## Fichas por herramienta
 - [Rill](rill.md): primera ficha (v0.90.5).
 - [Apache Ossie](ossie.md): estándar de intercambio semántico y lenguaje portable de expresiones (`OSSIE_SQL_2026`), base del motor semántico de G2.
+- [Atlas BI](atlasbi.md): proyecto hermano del propietario (`E:i-platform`); ideas de filtros, cálculos de autoservicio, visualización, trabajos y mantenimiento del lago.
