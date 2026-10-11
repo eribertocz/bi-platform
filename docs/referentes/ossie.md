@@ -4,6 +4,7 @@
 - Especificación núcleo: `core-spec/spec.md`, versión **0.2.0.dev0 (borrador, mutable)**, con JSON Schema en `core-spec/ossie-schema.json`.
 - Lenguaje de expresiones: `core-spec/expression_language.md`, estado *Proposed Final*. Su grupo de trabajo incluye Snowflake, Databricks, dbt Labs, Cube, Lightdash, ThoughtSpot, Salesforce, Starburst y Malloy.
 - Última etiqueta publicada: `osi-0.1.1-rc1`.
+- Estructura completa del estándar, lenguaje de expresiones, propuestas en curso y lo que le falta: [`ossie-especificacion.md`](ossie-especificacion.md).
 
 **Decisión de base:** compatibilidad con Ossie por diseño (memoria del proyecto; M10 §6.2: "primera apuesta de interoperabilidad semántica").
 
