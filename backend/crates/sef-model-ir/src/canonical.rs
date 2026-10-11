@@ -24,6 +24,7 @@ pub enum Domain {
 }
 
 impl Domain {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Csmir => "CSMIR",
@@ -81,6 +82,7 @@ impl CanonicalValue {
         Self::Set(values.into_iter().map(|v| v.canonical_value()).collect())
     }
 
+    #[must_use]
     pub fn optional<T: Canonical + ?Sized>(value: Option<&T>) -> Self {
         match value {
             None => Self::Absent,
@@ -88,12 +90,19 @@ impl CanonicalValue {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error for duplicate map keys, invalid variant tags, non-finite
+    /// floats, exhausted resource limits or CBOR encoding failures.
     pub fn encode(&self) -> Result<Vec<u8>, CanonicalError> {
         let mut budget = Budget::default();
         let value = self.to_cbor(0, &mut budget)?;
         encode_cbor(&value)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if canonical encoding fails; see [`Self::encode`].
     pub fn fingerprint(&self, domain: Domain) -> Result<Fingerprint, CanonicalError> {
         fingerprint(domain, self)
     }
@@ -238,6 +247,10 @@ impl Budget {
 }
 
 /// The exact bytes hashed by `sef-dcbor-sha256-v1` (not only the inner value).
+/// # Errors
+///
+/// Returns an error for duplicate map keys, invalid variant tags, non-finite
+/// floats, exhausted resource limits or CBOR encoding failures.
 pub fn fingerprint_bytes<T: Canonical + ?Sized>(
     domain: Domain,
     value: &T,
@@ -254,6 +267,9 @@ pub fn fingerprint_bytes<T: Canonical + ?Sized>(
     ]))
 }
 
+/// # Errors
+///
+/// Returns an error if canonical encoding fails; see [`fingerprint_bytes`].
 pub fn fingerprint<T: Canonical + ?Sized>(
     domain: Domain,
     value: &T,
@@ -266,6 +282,7 @@ pub fn fingerprint<T: Canonical + ?Sized>(
 pub struct Fingerprint([u8; 32]);
 
 impl Fingerprint {
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

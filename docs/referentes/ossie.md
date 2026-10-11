@@ -82,7 +82,8 @@ Es lo que es SEF, con su corpus de 21 casos. Con Ossie nativo y el corpus como c
 | dbt Core ≥ 1.12 | Lee documentos Ossie de `osi/`. | `[DOCS]`; solo versiones **0.1.0/0.1.1**, no 0.2.0.dev0. |
 | Lightdash | Importación y exportación Ossie anunciadas. | `[DOCS]` |
 | `Dactopus/dactopus-ossie-clickhouse` (Python, Apache-2.0) | Modelo Ossie sobre ClickHouse. | Existe; útil al llegar ClickHouse (ADR 0002). |
-| "Dosi" de Datus (motor Rust) | Citado por un resumen de IA. | **No verificado:** no aparece en GitHub ni en la web; la organización Datus solo publica herramientas en Python. |
+| **Dosi** de Datus (Rust) | Motor Ossie nativo: valida contra el esquema y compila métricas, dimensiones y filtros a SQL de 16 dialectos; CLI, MCP, REST/Arrow. | **Existe y es propietario:** `Datus-ai/dosi-dist` solo distribuye binarios ("Dosi is proprietary; no source is published here"). No se puede estudiar su código; como mucho, compararlo como caja negra. Es la competencia directa en Rust. |
+| `spiculedata/ossie` (Java, Apache-2.0) | Librería JVM para leer y escribir Ossie, con generación de SQL vía Apache Calcite. | Existe. |
 
 **Debate abierto sobre cómo consultar** ([datalakehousehub](https://datalakehousehub.com/blog/ossie-semantic-query-interface-agents)): un modelo de consulta restringido frente a SQL normal con un agregado `MEASURE()`. El grupo de trabajo converge hacia un diseño **por capas que mantiene ambos**. Lo mismo haremos: SQIR (#44) como consulta estructurada, y después SQL sobre métricas con `MEASURE()`, como Cube, Rill `metrics_sql` y Atlas BI A2.
 

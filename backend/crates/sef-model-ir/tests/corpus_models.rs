@@ -1271,7 +1271,7 @@ fn case_021() -> ModelDefinition {
     f.0
 }
 
-fn assert_representation(case: u8, model: ModelDefinition) {
+fn assert_fixture_sources(case: u8, model: &ModelDefinition) {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/cases")
         .join(format!("CASE-{case:03}"));
@@ -1317,6 +1317,10 @@ fn assert_representation(case: u8, model: ModelDefinition) {
         _ => "result.csv",
     };
     assert!(fixture.join("expected").join(expected).is_file());
+}
+
+fn assert_representation(case: u8, model: ModelDefinition) {
+    assert_fixture_sources(case, &model);
     let semantic_ids: Vec<_> = model
         .datasets
         .iter()
@@ -1361,7 +1365,7 @@ fn assert_representation(case: u8, model: ModelDefinition) {
             "missing object hash: {object}"
         );
     }
-    assert!(!compiled.definition().metrics.is_empty());
+    assert_ne!(compiled.definition().metrics, [] as [Metric; 0]);
     let mut reordered = model;
     reordered.source_bindings.reverse();
     for source in &mut reordered.source_bindings {

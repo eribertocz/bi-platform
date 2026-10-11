@@ -21,6 +21,7 @@ pub struct ObjectMetadata {
 }
 
 impl ObjectMetadata {
+    #[must_use]
     pub fn new(identity: ObjectIdentity) -> Self {
         Self {
             identity,
@@ -28,6 +29,7 @@ impl ObjectMetadata {
             description: None,
         }
     }
+    #[must_use]
     pub fn id(&self) -> &StableId {
         &self.identity.stable_id
     }
@@ -170,6 +172,7 @@ pub struct AggregationContract {
 }
 
 impl AggregationContract {
+    #[must_use]
     pub fn fully_additive() -> Self {
         Self {
             classification: AggregationClass::FullyAdditive,
@@ -303,6 +306,7 @@ pub struct ModelDefinition {
 }
 
 impl ModelDefinition {
+    #[must_use]
     pub fn new(metadata: ObjectMetadata) -> Self {
         Self {
             metadata,
@@ -321,6 +325,10 @@ impl ModelDefinition {
             extensions: Vec::new(),
         }
     }
+    /// # Errors
+    ///
+    /// Returns validation diagnostics for an invalid definition, or
+    /// `UnsupportedSemanticConstruct` if canonical encoding fails.
     pub fn compile(self) -> Result<CompiledSemanticModel, Vec<Diagnostic>> {
         CompiledSemanticModel::compile(self)
     }
@@ -334,6 +342,10 @@ pub struct CompiledSemanticModel {
 }
 
 impl CompiledSemanticModel {
+    /// # Errors
+    ///
+    /// Returns validation diagnostics for an invalid definition, or
+    /// `UnsupportedSemanticConstruct` if canonical encoding fails.
     pub fn compile(mut definition: ModelDefinition) -> Result<Self, Vec<Diagnostic>> {
         crate::validation::validate(&definition)?;
         definition.normalize();
@@ -358,12 +370,15 @@ impl CompiledSemanticModel {
             object_hashes,
         })
     }
+    #[must_use]
     pub fn definition(&self) -> &ModelDefinition {
         &self.definition
     }
+    #[must_use]
     pub fn content_hash(&self) -> &Fingerprint {
         &self.content_hash
     }
+    #[must_use]
     pub fn object_hash(&self, id: &StableId) -> Option<&Fingerprint> {
         self.object_hashes.get(id)
     }
