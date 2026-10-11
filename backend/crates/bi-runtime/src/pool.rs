@@ -22,6 +22,52 @@ pub struct Runtime {
 
 struct Shared {
     sender: Mutex<Option<SyncSender<Job>>>,
+    load: Arc<Mutex<PoolLoad>>,
+}
+
+/// Instantaneous pool occupancy, independent of any telemetry SDK.
+/// Cancelled queued jobs occupy a slot until dequeued; running jobs keep
+/// their slot through interruption and connection recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolLoad {
+    pub queued: usize,
+    pub running: usize,
+    /// Live worker slots (decreases when a worker retires).
+    pub workers: usize,
+    pub queue_capacity: usize,
+}
+
+struct Occupancy {
+    load: Arc<Mutex<PoolLoad>>,
+    running: bool,
+}
+
+impl Occupancy {
+    fn start(&mut self) {
+        let mut load = lock(&self.load);
+        load.queued -= 1;
+        load.running += 1;
+        self.running = true;
+    }
+}
+
+impl Drop for Occupancy {
+    fn drop(&mut self) {
+        let mut load = lock(&self.load);
+        if self.running {
+            load.running -= 1;
+        } else {
+            load.queued -= 1;
+        }
+    }
+}
+
+struct WorkerSlot(Arc<Mutex<PoolLoad>>);
+
+impl Drop for WorkerSlot {
+    fn drop(&mut self) {
+        lock(&self.0).workers -= 1;
+    }
 }
 
 impl Drop for Shared {
@@ -163,18 +209,38 @@ impl Runtime {
     fn spawn(workers: Vec<Worker>, queue_capacity: usize) -> Result<Self, RuntimeError> {
         let (sender, receiver) = sync_channel::<Job>(queue_capacity);
         let receiver = Arc::new(Mutex::new(receiver));
+        let load = Arc::new(Mutex::new(PoolLoad {
+            queued: 0,
+            running: 0,
+            workers: 0,
+            queue_capacity,
+        }));
         for (index, worker) in workers.into_iter().enumerate() {
             let receiver = Arc::clone(&receiver);
+            lock(&load).workers += 1;
+            let slot = WorkerSlot(Arc::clone(&load));
             // Detached on purpose; see `Shared::drop`.
             std::thread::Builder::new()
                 .name(format!("bi-duckdb-{index}"))
-                .spawn(move || worker_loop(worker, &receiver))?;
+                .spawn(move || {
+                    let _slot = slot;
+                    worker_loop(worker, &receiver);
+                })?;
         }
         Ok(Self {
             shared: Arc::new(Shared {
                 sender: Mutex::new(Some(sender)),
+                load,
             }),
         })
+    }
+
+    /// Coherent snapshot of confirmed admissions and live worker capacity.
+    #[must_use]
+    pub fn load(&self) -> PoolLoad {
+        // Admission holds this lock until a failed send has rolled back.
+        let _sender = lock(&self.shared.sender);
+        *lock(&self.shared.load)
     }
 
     /// Runs `job` on a pooled connection. Dropping the returned future before
@@ -194,12 +260,21 @@ impl Runtime {
         });
         let (reply, result) = oneshot::channel();
         let job_control = Arc::clone(&control);
-        let boxed: Job = Box::new(move |worker: &mut Worker| {
-            reply.send(worker.execute(&job_control, job)).ok();
-        });
         {
             let sender = lock(&self.shared.sender);
             let sender = sender.as_ref().ok_or(RuntimeError::Unavailable)?;
+            lock(&self.shared.load).queued += 1;
+            let mut occupancy = Occupancy {
+                load: Arc::clone(&self.shared.load),
+                running: false,
+            };
+            let boxed: Job = Box::new(move |worker: &mut Worker| {
+                occupancy.start();
+                let outcome = worker.execute(&job_control, job);
+                // Release before replying; completion implies no active work.
+                drop(occupancy);
+                reply.send(outcome).ok();
+            });
             sender.try_send(boxed).map_err(|error| match error {
                 TrySendError::Full(_) => RuntimeError::Busy,
                 TrySendError::Disconnected(_) => RuntimeError::Unavailable,
@@ -237,6 +312,9 @@ mod tests {
                 .run(|conn| conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)))
                 .await;
             assert!(matches!(next, Err(RuntimeError::Unavailable)), "{next:?}");
+            assert_eq!(runtime.load().workers, 0);
+            assert_eq!(runtime.load().queued, 0);
+            assert_eq!(runtime.load().running, 0);
         });
     }
 }

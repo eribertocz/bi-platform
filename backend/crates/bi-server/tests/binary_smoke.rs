@@ -84,6 +84,33 @@ fn rejects_invalid_configuration() {
 }
 
 #[test]
+fn invalid_optional_metrics_configuration_does_not_prevent_startup() {
+    let port = free_port();
+    let child = Command::new(BINARY)
+        .env("BI_BIND_ADDR", format!("127.0.0.1:{port}"))
+        .env("BI_DATABASE_URL", "postgres://bi:bi@127.0.0.1:1/bi")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://[invalid")
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _server = Server(child);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some((status, _)) = get(port, "/health/live") {
+            assert_eq!(status, 200);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "optional exporter must not block startup"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
 fn openapi_subcommand_prints_the_contract() {
     let output = Command::new(BINARY).arg("openapi").output().unwrap();
     assert!(output.status.success());

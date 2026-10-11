@@ -21,6 +21,7 @@ use tower_http::request_id::RequestId;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::metrics::{Outcome, QueryMetrics, Rejected};
 use crate::problem::Problem;
 use plan::{Param, QueryRequest, ResultColumn};
 
@@ -71,7 +72,20 @@ pub async fn run(
         .unwrap_or_default();
     match handle(&state, body).await {
         Ok(response) => response,
-        Err(rejection) => rejection.into_response(&request_id),
+        Err(rejection) => {
+            let reason = match rejection.code {
+                "invalid_query" => Some(Rejected::InvalidQuery),
+                "too_many_queries" => Some(Rejected::Busy),
+                "query_timeout" => Some(Rejected::Timeout),
+                "result_too_large" => Some(Rejected::ResultTooLarge),
+                "analytics_unavailable" => Some(Rejected::Unavailable),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                state.metrics.reject(reason);
+            }
+            rejection.into_response(&request_id)
+        }
     }
 }
 
@@ -116,15 +130,7 @@ async fn handle(
             Some(rejection.body_text()),
         )
     })?;
-    let planning = Instant::now();
-    let plan = plan::compile(&request).map_err(|invalid| {
-        Rejection::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_query",
-            Some(invalid.0),
-        )
-    })?;
-    let plan_time = planning.elapsed();
+    let (plan, plan_time) = compile(&request, &state.metrics)?;
     let runtime = state.analytics.runtime().ok_or_else(|| {
         Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -141,6 +147,7 @@ async fn handle(
         plan.params,
         plan.columns.len(),
         fetch_limit,
+        &state.metrics,
     )
     .await
     .map_err(|failure| match failure {
@@ -187,6 +194,7 @@ async fn handle(
         Rejection::new(StatusCode::INTERNAL_SERVER_ERROR, "query_failed", None)
     })?;
     let serialize_time = serializing.elapsed();
+    state.metrics.serialize(serialize_time);
 
     tracing::info!(
         dataset = %request.dataset,
@@ -210,6 +218,30 @@ async fn handle(
     ))
 }
 
+fn compile(
+    request: &QueryRequest,
+    metrics: &QueryMetrics,
+) -> Result<(plan::Plan, Duration), Rejection> {
+    let planning = Instant::now();
+    let compiled = plan::compile(request);
+    let elapsed = planning.elapsed();
+    metrics.compile(
+        elapsed,
+        if compiled.is_ok() {
+            Outcome::Ok
+        } else {
+            Outcome::Error
+        },
+    );
+    compiled.map(|plan| (plan, elapsed)).map_err(|invalid| {
+        Rejection::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_query",
+            Some(invalid.0),
+        )
+    })
+}
+
 enum Failure {
     Timeout,
     Runtime(RuntimeError),
@@ -225,19 +257,42 @@ async fn execute(
     params: Vec<Param>,
     columns: usize,
     fetch_limit: usize,
+    metrics: &QueryMetrics,
 ) -> Result<(Fetched, Duration, Duration), Failure> {
     let submitted = Instant::now();
+    let timer = metrics.execution(submitted);
+    let marker = timer
+        .as_ref()
+        .map(crate::metrics::ExecutionTimer::start_marker);
     let execution = runtime.run(move |conn| {
         let started = Instant::now();
-        let fetched = fetch(conn, &sql, &params, columns, fetch_limit)?;
-        Ok((fetched, started.elapsed()))
+        if let Some(marker) = &marker {
+            marker.start(started);
+        }
+        let fetched = fetch(conn, &sql, &params, columns, fetch_limit);
+        let execute_time = started.elapsed();
+        if let Some(marker) = &marker {
+            marker.end(started + execute_time);
+        }
+        fetched.map(|fetched| (fetched, execute_time))
     });
-    match tokio::time::timeout(deadline, execution).await {
+    let outcome = tokio::time::timeout(deadline, execution).await;
+    let completed = submitted.elapsed();
+    if let Some(timer) = timer {
+        timer.finish(match &outcome {
+            Err(_) => Outcome::Timeout,
+            Ok(Ok(_)) => Outcome::Ok,
+            Ok(Err(RuntimeError::Busy)) => Outcome::Busy,
+            Ok(Err(RuntimeError::Engine(_) | RuntimeError::Panicked)) => Outcome::Error,
+            Ok(Err(_)) => Outcome::Unavailable,
+        });
+    }
+    match outcome {
         Err(_) => Err(Failure::Timeout),
         Ok(Err(error)) => Err(Failure::Runtime(error)),
         Ok(Ok((fetched, execute_time))) => Ok((
             fetched,
-            submitted.elapsed().saturating_sub(execute_time),
+            completed.saturating_sub(execute_time),
             execute_time,
         )),
     }

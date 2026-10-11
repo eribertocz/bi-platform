@@ -18,7 +18,7 @@ use std::fmt;
 pub use bootstrap::{Bootstrap, LoadOutcome};
 pub use config::{LakeConfig, RuntimeConfig};
 pub use duckdb;
-pub use pool::Runtime;
+pub use pool::{PoolLoad, Runtime};
 
 /// Alias under which the DuckLake is attached.
 pub const LAKE: &str = "lake";
