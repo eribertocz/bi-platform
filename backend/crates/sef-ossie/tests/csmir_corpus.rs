@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use sef_model_ir::identity::SourceHandle;
 use sef_model_ir::time::TimestampSemantics;
 use sef_model_ir::types::{DecimalType, ValueType};
+use sef_ossie::Code;
 use sef_ossie::catalog::{Catalog, Column, Relation};
 use sef_ossie::csmir::{Options, compile};
 
@@ -99,7 +100,15 @@ fn golden(case: u8) -> String {
 fn assert_same_fingerprint(case: u8) {
     let loaded = sef_ossie::load(&corpus(&format!("CASE-{case:03}.yaml")))
         .unwrap_or_else(|errors| panic!("CASE-{case:03} must load: {errors:#?}"));
-    assert!(loaded.warnings.is_empty(), "{:#?}", loaded.warnings);
+    // An as-of relationship cannot point at a unique key of its history:
+    // Ossie warns, and our temporal extension states the match instead.
+    let expected: &[Code] = if case == 13 {
+        &[Code::KeyNotCovered]
+    } else {
+        &[]
+    };
+    let warnings: Vec<Code> = loaded.warnings.iter().map(|warning| warning.code).collect();
+    assert_eq!(warnings, expected, "{:#?}", loaded.warnings);
     let options = Options {
         namespace: "corpus".to_owned(),
         model: format!("case-{case:03}"),
@@ -137,11 +146,19 @@ corpus_case!(
     case_004_independent_grains => 4,
     case_005_multihop => 5,
     case_006_ratio_decomposition => 6,
+    case_007_period_end_balance => 7,
+    case_008_distinct_recompute => 8,
     case_009_conformed_grain => 9,
     case_010_declared_metric_grain => 10,
+    case_011_bridge_allocation => 11,
     case_012_time_bucket => 12,
+    case_013_as_of_history => 13,
     case_014_null_contracts => 14,
+    case_015_tenant_policy => 15,
     case_016_role_playing => 16,
     case_017_currency_units => 17,
+    case_018_rollup_measure => 18,
     case_019_timezone_and_exact_decimal => 19,
+    case_020_forbidden_time_axis => 20,
+    case_021_cumulative_window => 21,
 );

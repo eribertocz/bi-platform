@@ -68,6 +68,12 @@ pub(crate) trait Names {
     fn reference(&mut self, qualifier: Option<&str>, name: &str) -> Result<ScalarExpr, Failure>;
     /// The zone `DATE_TRUNC` buckets in, when the expression may bucket time.
     fn timezone(&self) -> Option<&IanaZoneId>;
+    /// A request context value (`:name`), where the expression admits them.
+    fn context(&mut self, name: &str) -> Result<ScalarExpr, Failure> {
+        Err(not_representable(&format!(
+            "El parámetro `:{name}` (solo las políticas leen valores de la petición)"
+        )))
+    }
 }
 
 /// Exact-division policy for `CAST(a / b AS DECIMAL(p, s))`.
@@ -163,6 +169,10 @@ impl<N: Names> Translator<'_, N> {
                 Value::Null => return Ok(Typed::Null),
                 Value::SingleQuotedString(text) => literal(Literal::Utf8(text.clone())),
                 Value::Boolean(value) => literal(Literal::Boolean(*value)),
+                Value::Placeholder(name) => match name.strip_prefix(':') {
+                    Some(name) if !name.is_empty() => self.names.context(name)?,
+                    _ => return Err(not_representable("Un parámetro posicional (`?`, `$1`)")),
+                },
                 _ => return Err(not_representable("Ese literal")),
             },
             Expr::TypedString(typed) => match (&typed.data_type, &typed.value.value) {

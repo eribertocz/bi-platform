@@ -21,6 +21,7 @@
 //! rounding) comes from our extension ([`crate::extension`]), never from
 //! defaults that would change a number.
 
+mod contracts;
 mod metric;
 pub(crate) mod scalar;
 
@@ -34,8 +35,9 @@ use sef_model_ir::model::{
     Entity, EntityKey, Field, FieldBinding, KeyBinding, ModelDefinition, Namespace, ObjectMetadata,
     SemanticDataset, SourceBinding,
 };
+use sef_model_ir::policy::{Policy, PolicyScope};
 use sef_model_ir::relationships::{
-    Cardinality, ContractEvidenceState, KeyPair, Optionality, Relationship,
+    Bridge, Cardinality, ContractEvidenceState, KeyPair, Optionality, Relationship,
 };
 use sef_model_ir::time::TimestampSemantics;
 use sef_model_ir::time::{IanaZoneId, TimeRole, TimeSemantics};
@@ -148,8 +150,11 @@ fn convert(
         entities: BTreeMap::new(),
         dimensions: BTreeMap::new(),
         relationships: Vec::new(),
+        bridges: Vec::new(),
+        policies: Vec::new(),
         measures: Vec::new(),
         metrics: Vec::new(),
+        extension,
     };
     converter.run();
     if converter.found.iter().any(Diagnostic::is_error) {
@@ -173,6 +178,9 @@ struct Converter<'a> {
     relationships: Vec<Relationship>,
     measures: Vec<sef_model_ir::model::Measure>,
     metrics: Vec<sef_model_ir::model::Metric>,
+    bridges: Vec<Bridge>,
+    policies: Vec<Policy>,
+    extension: ModelExtension,
 }
 
 struct DatasetState<'a> {
@@ -258,6 +266,8 @@ impl<'a> Converter<'a> {
         self.computed_fields();
         self.dimensions();
         self.grains();
+        self.bridges();
+        self.policies();
         if self.found.iter().any(Diagnostic::is_error) {
             return;
         }
@@ -658,6 +668,14 @@ impl<'a> Converter<'a> {
                     bindings.push(binding);
                 }
             }
+            let temporal_constraint = match extension.temporal.as_ref().map(|t| self.temporal(t)) {
+                Some(Ok(constraint)) => Some(constraint),
+                Some(Err(failure)) => {
+                    self.fail(&format!("{path}/custom_extensions"), failure);
+                    continue;
+                }
+                None => None,
+            };
             let segment = ids::segment(&relationship.name);
             let Some(metadata) = self.metadata("relationship", &segment, &path) else {
                 continue;
@@ -674,7 +692,7 @@ impl<'a> Converter<'a> {
                     // Unknown is optional: a left join never drops rows.
                     Some(OptionalityDeclaration::Optional) | None => Optionality::Optional,
                 },
-                temporal_constraint: None,
+                temporal_constraint,
                 evidence: ContractEvidenceState::DeclaredUnverified,
             });
         }
@@ -764,6 +782,12 @@ impl<'a> Converter<'a> {
             || format!("{}.{}", self.datasets[d].segment, field.segment),
             ids::segment,
         );
+        // People see the name as written; the ID segment is internal.
+        let label = field
+            .extension
+            .dimension
+            .clone()
+            .unwrap_or_else(|| format!("{}.{}", self.model.datasets[d].name, field.ossie.name));
         let semantic_role = field.extension.semantic_role.clone();
         let tzdb = field
             .extension
@@ -801,9 +825,10 @@ impl<'a> Converter<'a> {
                 return;
             }
         };
-        let Some(metadata) = self.metadata("dimension", &name, &path) else {
+        let Some(mut metadata) = self.metadata("dimension", &name, &path) else {
             return;
         };
+        metadata.label = Some(label);
         let binding = DimensionBinding {
             dataset: self.datasets[d].id.clone(),
             expression: expression.clone(),
@@ -1000,6 +1025,12 @@ impl<'a> Converter<'a> {
                     .find(|dataset| normalize_identifier(&dataset.name) == state.normalized)
                     .and_then(|dataset| dataset.description.clone()),
             );
+            let policy_refs = self
+                .policies
+                .iter()
+                .filter(|policy| policy.scope == PolicyScope::Dataset(state.id.clone()))
+                .map(|policy| policy.metadata.id().clone())
+                .collect();
             definition.datasets.push(SemanticDataset {
                 metadata,
                 source_binding,
@@ -1007,7 +1038,7 @@ impl<'a> Converter<'a> {
                 fields,
                 key_bindings: state.key_bindings,
                 time_roles: state.time_roles,
-                policy_refs: Vec::new(),
+                policy_refs,
             });
         }
         for (entity, keys) in self.entities {
@@ -1036,6 +1067,8 @@ impl<'a> Converter<'a> {
             });
         }
         definition.relationships = self.relationships;
+        definition.bridges = self.bridges;
+        definition.policies = self.policies;
         definition.measures = self.measures;
         definition.metrics = self.metrics;
         Ok((definition, self.paths))
