@@ -1,6 +1,6 @@
 # 0002 — Fuentes modernas, conexiones en vivo y ClickHouse
 
-**Estado:** aprobada por el propietario, 2026-10-11 (Issue #26). **Amplía:** M01 §2.5 (prioridad MVP: Parquet/CSV y PostgreSQL) y M13 §6.1.
+**Estado:** aprobada por el propietario, 2026-10-11 (Issue #26). **Amplía:** M01 §2.5 (prioridad MVP: Parquet/CSV y PostgreSQL) y M13 §6.1. **Matizada por:** [0009](0009-modos-de-datos-y-persistencia-opcional.md) (modos de datos, persistencia opcional).
 
 ## Contexto
 El propietario quiere apuntar a formatos modernos y bases de datos, no a "todo tipo de formatos". Rill demuestra el valor de las conexiones en vivo: consulta un DuckLake o un DuckDB sin copiar datos (conector DuckLake desde la v0.86; DuckDB externo solo para desarrollo).
