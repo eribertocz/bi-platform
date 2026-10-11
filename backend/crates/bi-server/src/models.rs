@@ -522,10 +522,12 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
             Err(error) => {
                 let code = match error {
                     sef_adapter_duckdb::CatalogError::UnknownSource => "unknown_source",
+                    sef_adapter_duckdb::CatalogError::AmbiguousSource => "ambiguous_source",
                     sef_adapter_duckdb::CatalogError::UnsupportedType { .. } => {
                         "unsupported_source_type"
                     }
-                    sef_adapter_duckdb::CatalogError::Engine(_) => "catalog_unavailable",
+                    sef_adapter_duckdb::CatalogError::Engine(_)
+                    | sef_adapter_duckdb::CatalogError::InvalidHandle => "catalog_unavailable",
                 };
                 let mut d = ModelDiagnostic::error(code, error.to_string());
                 d.path = format!("/datasets/{i}/source");
@@ -635,10 +637,11 @@ fn type_label(value: &ValueType) -> String {
         ValueType::Float { bits } => format!("FLOAT{bits}"),
         ValueType::Utf8 => "VARCHAR".into(),
         ValueType::Date => "DATE".into(),
+        ValueType::Time => "TIME".into(),
         ValueType::Timestamp {
             timezone_semantics: sef_model_ir::time::TimestampSemantics::Instant,
         } => "TIMESTAMPTZ (instante)".into(),
-        other => format!("{other:?}"),
+        _ => "Tipo sin representación pública definida".into(),
     }
 }
 
@@ -646,6 +649,19 @@ fn type_label(value: &ValueType) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn public_types_never_show_internal_rust_metadata() {
+        assert_eq!(type_label(&ValueType::Time), "TIME");
+        let opaque = ValueType::OpaqueExtension {
+            namespace: "private_namespace".into(),
+            type_name: "internal_type".into(),
+        };
+        assert_eq!(
+            type_label(&opaque),
+            "Tipo sin representación pública definida"
+        );
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(48))]

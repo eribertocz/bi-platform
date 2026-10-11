@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use duckdb::Connection;
 use proptest::prelude::*;
 use sef_adapter_duckdb::{CatalogError, describe, value_type};

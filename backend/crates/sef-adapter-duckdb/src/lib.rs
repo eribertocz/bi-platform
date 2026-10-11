@@ -1,7 +1,7 @@
 //! Synchronous DuckDB implementation of Ossie's catalog port (ADR 0008).
 //! Receives a connection and relation names, never SQL from a document.
 
-use std::fmt::{self, Write as _};
+use std::fmt;
 
 use duckdb::Connection;
 use sef_model_ir::identity::SourceHandle;
@@ -12,6 +12,8 @@ use sef_ossie::catalog::{Column, Relation};
 #[derive(Debug)]
 pub enum CatalogError {
     UnknownSource,
+    AmbiguousSource,
+    InvalidHandle,
     UnsupportedType { column: String, sql_type: String },
     Engine(duckdb::Error),
 }
@@ -20,6 +22,8 @@ impl fmt::Display for CatalogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownSource => f.write_str("El origen no existe. Usa el nombre de una tabla o vista disponible."),
+            Self::AmbiguousSource => f.write_str("El origen coincide con varias tablas o vistas que solo difieren en mayúsculas. Usa nombres distintos en el catálogo."),
+            Self::InvalidHandle => f.write_str("No se pudo identificar la estructura del origen de forma segura."),
             Self::UnsupportedType { column, sql_type } => write!(f, "La columna {column:?} usa {sql_type}, un tipo que todavía no podemos representar exactamente. Cambia su tipo en el origen; no se redondeará ni se aproximará."),
             Self::Engine(_) => f.write_str("No se pudo leer la estructura del origen. Reintenta cuando el motor esté disponible."),
         }
@@ -101,14 +105,11 @@ pub fn describe(conn: &Connection, source: &str) -> Result<Relation, CatalogErro
         [database, schema, table] => (*database, *schema, *table),
         _ => return Err(CatalogError::UnknownSource),
     };
-    let actual: Result<(String, String, String), _> = conn.query_row(
-        "SELECT table_catalog, table_schema, table_name FROM information_schema.tables WHERE lower(table_catalog) = lower(?) AND lower(table_schema) = lower(?) AND lower(table_name) = lower(?)",
-        [database, schema, table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)));
-    let (database, schema, table) = match actual {
-        Ok(names) => names,
-        Err(duckdb::Error::QueryReturnedNoRows) => return Err(CatalogError::UnknownSource),
-        Err(error) => return Err(error.into()),
-    };
+    let actual = conn.prepare(
+        "SELECT table_catalog, table_schema, table_name FROM information_schema.tables WHERE lower(table_catalog) = lower(?) AND lower(table_schema) = lower(?) AND lower(table_name) = lower(?) LIMIT 2",
+    )?.query_map([database, schema, table], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<duckdb::Result<Vec<_>>>()?;
+    let (database, schema, table) = unique_relation(actual)?;
     let quote = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
     let sql = format!(
         "DESCRIBE {}.{}.{}",
@@ -134,7 +135,7 @@ pub fn describe(conn: &Connection, source: &str) -> Result<Relation, CatalogErro
                 sql_type,
             })?;
             Ok(Column {
-                handle: handle(&[&database, &schema, &table, &name]),
+                handle: handle(&[&database, &schema, &table, &name])?,
                 name,
                 value_type,
                 nullable: nullable == "YES",
@@ -142,24 +143,52 @@ pub fn describe(conn: &Connection, source: &str) -> Result<Relation, CatalogErro
         })
         .collect::<Result<Vec<_>, CatalogError>>()?;
     Ok(Relation {
-        source: handle(&[&database]),
-        relation: handle(&[&database, &schema, &table]),
+        source: handle(&[&database])?,
+        relation: handle(&[&database, &schema, &table])?,
         columns,
     })
 }
 
+fn unique_relation(
+    mut rows: Vec<(String, String, String)>,
+) -> Result<(String, String, String), CatalogError> {
+    if rows.len() > 1 {
+        return Err(CatalogError::AmbiguousSource);
+    }
+    rows.pop().ok_or(CatalogError::UnknownSource)
+}
+
 // Hex is injective, case preserving and satisfies SourceHandle's logical tokens.
-fn handle(parts: &[&str]) -> SourceHandle {
+fn handle(parts: &[&str]) -> Result<SourceHandle, CatalogError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let encoded = parts
         .iter()
         .map(|part| {
             let mut text = String::from("n");
             for byte in part.bytes() {
-                write!(text, "{byte:02x}").expect("writing to String");
+                text.push(char::from(HEX[usize::from(byte >> 4)]));
+                text.push(char::from(HEX[usize::from(byte & 15)]));
             }
             text
         })
         .collect::<Vec<_>>()
         .join("/");
-    SourceHandle::new(encoded).expect("hex tokens are valid logical handles")
+    SourceHandle::new(encoded).map_err(|_| CatalogError::InvalidHandle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_folded_catalog_collisions_never_choose_a_relation() {
+        let rows = vec![
+            ("pg".into(), "public".into(), "Sales".into()),
+            ("pg".into(), "public".into(), "sales".into()),
+        ];
+        assert!(matches!(
+            unique_relation(rows),
+            Err(CatalogError::AmbiguousSource)
+        ));
+    }
 }
