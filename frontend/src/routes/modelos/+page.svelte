@@ -7,6 +7,9 @@
     type ModelsResponse,
     type ModelMember,
   } from '#lib/api/models.ts';
+  import type { components } from '#lib/api/generated.ts';
+  type AiContext = components['schemas']['ModelAiContext'];
+  type Annotation = components['schemas']['ModelAnnotation'];
   let attempt = $state(0);
   let selected = $state<string | null>(null);
   let view = $state<
@@ -40,6 +43,21 @@
   });
 </script>
 
+{#snippet aiContext(context: AiContext | null | undefined)}
+  {#if typeof context === 'object' && context?.synonyms?.length}
+    <p class="text-slate-700">Sinónimos para IA: {context.synonyms.join(', ')}</p>
+  {/if}
+{/snippet}
+
+{#snippet annotation(info: Annotation, dimension = true)}
+  {#if info.label}<p>{info.label}</p>{/if}
+  {#if info.is_time}<span class="font-semibold"
+      >{dimension ? 'Dimensión de tiempo' : 'Campo de tiempo'}</span
+    >{/if}
+  {#if info.description}<p class="text-slate-700">{info.description}</p>{/if}
+  {@render aiContext(info.ai_context)}
+{/snippet}
+
 {#snippet members(title: string, items: ModelMember[])}
   <h3 class="mt-5 mb-2 font-semibold">{title}</h3>
   {#if items.length === 0}<p>No hay {title.toLowerCase()} en este modelo.</p>
@@ -49,6 +67,10 @@
           {#if item.nullable === true}<span> · Admite valores sin dato (NULL)</span>
           {:else if item.nullable === false}<span> · No admite valores sin dato</span>
           {:else}<span> · Nulabilidad no determinada</span>{/if}
+          {#each item.annotations as info (info.path)}
+            {#if item.annotations.length > 1}<p class="mt-2">Origen: {info.name}</p>{/if}
+            {@render annotation(info)}
+          {/each}
         </li>{/each}
     </ul>{/if}
 {/snippet}
@@ -96,12 +118,36 @@
       </ul>
     {/if}
     {#if active}
-      <section class="panel" aria-labelledby="model-detail-title" aria-live="polite">
+      <section
+        class="panel [overflow-wrap:anywhere]"
+        aria-labelledby="model-detail-title"
+        aria-live="polite"
+      >
         <h2 id="model-detail-title">{active.name}</h2>
         <p class="mb-4">Archivo: {active.file}</p>
         {#if active.status === 'valid'}
+          {#if active.description}<p>{active.description}</p>{/if}
+          {@render aiContext(active.ai_context)}
           {@render members('Métricas', active.metrics)}
           {@render members('Dimensiones', active.dimensions)}
+          <details class="mt-5">
+            <summary>Datasets y campos declarados</summary>
+            {#each active.datasets as dataset (dataset.name)}
+              <h3 class="mt-4 font-semibold">{dataset.name}</h3>
+              {#if dataset.description}<p>{dataset.description}</p>{/if}
+              {@render aiContext(dataset.ai_context)}
+              <ul class="space-y-3 mt-2">
+                {#each dataset.fields as field (field.name)}
+                  <li>
+                    <strong>{field.name}</strong>{@render annotation(
+                      field.annotation,
+                      field.is_dimension,
+                    )}
+                  </li>
+                {/each}
+              </ul>
+            {/each}
+          </details>
           <details class="mt-5">
             <summary>Huella de esta definición</summary>
             <p class="break-all mt-2">{active.fingerprint}</p>

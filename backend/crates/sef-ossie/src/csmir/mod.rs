@@ -90,6 +90,86 @@ pub fn compile(
     options: &Options,
 ) -> Result<CompiledSemanticModel, Vec<Diagnostic>> {
     let (definition, paths) = convert(model, catalog, options)?;
+    compile_definition(definition, &paths)
+}
+
+/// A semantic snapshot with its original interchange document. Presentation
+/// context stays outside CSMIR and is never used for name resolution or hashes.
+#[derive(Debug, Clone)]
+pub struct CompiledDocument {
+    pub semantic: CompiledSemanticModel,
+    /// Warnings based on inferred source/expression types. Document-level
+    /// warnings are supplied separately by [`crate::load`].
+    pub warnings: Vec<Diagnostic>,
+    document: SemanticModel,
+    paths: Paths,
+}
+
+impl CompiledDocument {
+    /// The original document, including opaque AI properties and explicit
+    /// versus inferred time roles. This is not a CSMIR-to-Ossie exporter.
+    #[must_use]
+    pub fn document(&self) -> &SemanticModel {
+        &self.document
+    }
+
+    /// Every Ossie origin of an object, including all conformed bindings.
+    /// Synthetic objects with no declared origin return an empty list.
+    #[must_use]
+    pub fn origins(&self, id: &StableId) -> Vec<&str> {
+        self.paths
+            .get(id)
+            .map_or_else(Vec::new, |paths| paths.iter().map(String::as_str).collect())
+    }
+}
+
+/// Compiles while retaining non-semantic metadata for catalog consumers.
+///
+/// # Errors
+/// The same conversion and semantic diagnostics as [`compile`].
+pub fn compile_document(
+    model: &SemanticModel,
+    catalog: &Catalog,
+    options: &Options,
+) -> Result<CompiledDocument, Vec<Diagnostic>> {
+    let (definition, paths) = convert(model, catalog, options)?;
+    let semantic = compile_definition(definition, &paths)?;
+    let mut warnings = Vec::new();
+    for dimension in &semantic.definition().dimensions {
+        if dimension.value_type != ValueType::Utf8 {
+            continue;
+        }
+        for path in paths.get(dimension.metadata.id()).into_iter().flatten() {
+            let parts: Vec<&str> = path.split('/').collect();
+            let ["", "datasets", d, "fields", f] = parts.as_slice() else {
+                continue;
+            };
+            let field = d
+                .parse::<usize>()
+                .ok()
+                .and_then(|d| model.datasets.get(d))
+                .and_then(|d| f.parse::<usize>().ok().and_then(|f| d.fields.get(f)));
+            if field.is_some_and(|f| f.datatype.is_none() && f.is_time()) {
+                warnings.push(Diagnostic::warning(
+                    Code::NonTemporalTimeRole,
+                    format!("{path}/dimension/is_time"),
+                    "Este campo tiene is_time: true, pero el tipo de su expresión no es temporal. Revisa cómo representa el tiempo; el rol declarado se conserva.",
+                ));
+            }
+        }
+    }
+    Ok(CompiledDocument {
+        semantic,
+        warnings,
+        document: model.clone(),
+        paths,
+    })
+}
+
+fn compile_definition(
+    definition: ModelDefinition,
+    paths: &Paths,
+) -> Result<CompiledSemanticModel, Vec<Diagnostic>> {
     definition.compile().map_err(|diagnostics| {
         diagnostics
             .into_iter()
@@ -98,6 +178,7 @@ pub fn compile(
                     .primary_ref
                     .as_ref()
                     .and_then(|id| paths.get(id))
+                    .and_then(|paths| paths.first())
                     .cloned()
                     .unwrap_or_default();
                 Diagnostic::error(
@@ -110,7 +191,7 @@ pub fn compile(
     })
 }
 
-type Paths = BTreeMap<StableId, String>;
+type Paths = BTreeMap<StableId, Vec<String>>;
 
 fn convert(
     model: &SemanticModel,
@@ -235,9 +316,10 @@ impl<'a> Converter<'a> {
     fn id(&mut self, kind: &str, name: &str, path: &str) -> Option<StableId> {
         match self.ids.id(kind, name) {
             Ok(id) => {
-                self.paths
-                    .entry(id.clone())
-                    .or_insert_with(|| path.to_owned());
+                let paths = self.paths.entry(id.clone()).or_default();
+                if !paths.iter().any(|existing| existing == path) {
+                    paths.push(path.to_owned());
+                }
                 Some(id)
             }
             Err(id) => {

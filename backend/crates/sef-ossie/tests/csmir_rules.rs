@@ -20,6 +20,102 @@ use sef_ossie::document::{
 };
 use sef_ossie::{Code, Diagnostic};
 
+#[test]
+fn compiled_document_keeps_each_conformed_dimension_origin() {
+    let mut model = document(1);
+    let mut second = model.datasets[0].clone();
+    second.name = "other_sales".into();
+    second.fields[1].description = Some("Another description".into());
+    model.datasets.push(second);
+    let compiled = sef_ossie::csmir::compile_document(&model, &catalog(1), &options(1))
+        .expect("metadata fixture");
+    let id = compiled.semantic.definition().dimensions[0].metadata.id();
+    assert_eq!(
+        compiled.origins(id),
+        ["/datasets/0/fields/1", "/datasets/1/fields/1"]
+    );
+    assert_eq!(compiled.document(), &model);
+}
+
+#[test]
+fn ai_synonyms_never_resolve_expression_names() {
+    let mut model = document(1);
+    model.datasets[0].fields[2].ai_context = Some(sef_ossie::document::AiContext::Structured(
+        sef_ossie::document::StructuredAiContext {
+            synonyms: Some(vec!["billing".into()]),
+            ..Default::default()
+        },
+    ));
+    model.metrics[0].expression.dialects[0].expression = "SUM(sales.billing)".into();
+    let errors =
+        compile(&model, &catalog(1), &options(1)).expect_err("synonyms are not identifiers");
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code == Code::UnknownReference || d.code == Code::UnknownColumn)
+    );
+}
+
+#[test]
+fn time_on_inferred_text_is_a_warning_and_preserves_the_hash() {
+    let mut model = document(1);
+    let baseline = compile(&model, &catalog(1), &options(1)).expect("metadata fixture");
+    model.datasets[0].fields[1]
+        .dimension
+        .as_mut()
+        .expect("metadata fixture")
+        .is_time = Some(true);
+    let compiled = sef_ossie::csmir::compile_document(&model, &catalog(1), &options(1))
+        .expect("metadata fixture");
+    assert_eq!(compiled.semantic.content_hash(), baseline.content_hash());
+    assert_eq!(compiled.warnings.len(), 1);
+    assert_eq!(compiled.warnings[0].code, Code::NonTemporalTimeRole);
+    assert_eq!(compiled.warnings[0].severity, sef_ossie::Severity::Warning);
+    assert_eq!(
+        compiled.warnings[0].path,
+        "/datasets/0/fields/1/dimension/is_time"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+    #[test]
+    fn presentation_context_does_not_change_hashes_and_roundtrips(
+        text in ".{0,80}", key in "[a-z][a-z0-9_]{0,15}", explicit in any::<bool>(),
+    ) {
+        let mut model = document(1);
+        let baseline = compile(&model, &catalog(1), &options(1)).expect("metadata fixture");
+        let context = sef_ossie::document::AiContext::Structured(sef_ossie::document::StructuredAiContext {
+            instructions: Some(text.clone()), synonyms: Some(vec![text.clone()]), examples: Some(vec![text.clone()]),
+            other: BTreeMap::from([(format!("vendor_{key}"), serde_json::json!({"nested": [null, true, text]}))]),
+        });
+        model.description = Some(text.clone());
+        model.ai_context = Some(context.clone());
+        for dataset in &mut model.datasets {
+            dataset.description = Some(text.clone());
+            dataset.ai_context = Some(context.clone());
+            for field in &mut dataset.fields {
+                field.description = Some(text.clone());
+                field.label = Some(text.clone());
+                field.ai_context = Some(context.clone());
+                if let Some(dimension) = &mut field.dimension { dimension.is_time = Some(explicit); }
+            }
+        }
+        for metric in &mut model.metrics { metric.description = Some(text.clone()); metric.ai_context = Some(context.clone()); }
+        let compiled = sef_ossie::csmir::compile_document(&model, &catalog(1), &options(1)).expect("metadata fixture");
+        prop_assert_eq!(baseline.content_hash(), compiled.semantic.content_hash());
+        for id in baseline.definition().datasets.iter().map(|d| d.metadata.id())
+            .chain(baseline.definition().dimensions.iter().map(|d| d.metadata.id()))
+            .chain(baseline.definition().metrics.iter().map(|m| m.metadata.id())) {
+            prop_assert_eq!(baseline.object_hash(id), compiled.semantic.object_hash(id));
+        }
+        for serialized in [sef_ossie::to_yaml(compiled.document()).expect("metadata fixture"), sef_ossie::to_json(compiled.document()).expect("metadata fixture")] {
+            let restored = sef_ossie::load(&serialized).expect("metadata fixture").model;
+            prop_assert_eq!(&restored, &model);
+        }
+    }
+}
+
 fn read(file: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/corpus")
