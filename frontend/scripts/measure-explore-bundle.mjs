@@ -4,17 +4,18 @@ import { gzipSync } from 'node:zlib';
 // Run after `npm run build`. The route graph includes shared runtime chunks
 // (possibly cached); excludes CSS, source maps and shell entrypoints.
 const output = '.svelte-kit/output/client/';
+const route = process.argv[2] ?? 'explorar';
 /** @type {Record<string, { file: string; name?: string; isDynamicEntry?: boolean; imports?: string[]; dynamicImports?: string[] }>} */
 const manifest = JSON.parse(readFileSync(`${output}.vite/manifest.json`, 'utf8'));
 const nodes = '.svelte-kit/generated/build/client-optimized/nodes/';
 const routeNode = readdirSync(nodes).find((name) =>
-  readFileSync(nodes + name, 'utf8').includes('src/routes/explorar/+page.svelte'),
+  readFileSync(nodes + name, 'utf8').includes(`src/routes/${route}/+page.svelte`),
 );
-if (!routeNode) throw new Error('Build the exploration route before measuring.');
+if (!routeNode) throw new Error(`Build the ${route} route before measuring.`);
 const root = Object.keys(manifest).find(
   (key) => manifest[key]?.name === `nodes/${routeNode.replace('.js', '')}`,
 );
-if (!root) throw new Error('Exploration route missing in the client manifest.');
+if (!root) throw new Error(`${route} route missing in the client manifest.`);
 /** @param {string} key @param {boolean} dynamic @param {Set<string>} seen */
 function dependencies(key, dynamic = false, seen = new Set()) {
   if (seen.has(key)) return seen;
@@ -47,6 +48,11 @@ const chart = 'src/lib/features/explore/echarts.ts';
 if (!manifest[chart]?.isDynamicEntry) throw new Error('ECharts must have its own dynamic entry.');
 const initial = dependencies(root);
 if (initial.has(chart)) throw new Error('ECharts must stay behind a dynamic import.');
+if (route !== 'explorar') {
+  if (dependencies(root, true).has(chart)) throw new Error('ECharts reached an unrelated route.');
+  console.log(JSON.stringify({ route, initial: measure(initial) }, null, 2));
+  process.exit(0);
+}
 for (const name of readdirSync(nodes).filter((name) => name !== routeNode)) {
   const key = Object.keys(manifest).find(
     (key) => manifest[key]?.name === `nodes/${name.replace('.js', '')}`,

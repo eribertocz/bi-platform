@@ -1,0 +1,17 @@
+[package]
+name = "sef-adapter-duckdb"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+duckdb.workspace = true
+sef-ossie = { path = "../sef-ossie" }
+sef-model-ir = { path = "../sef-model-ir" }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

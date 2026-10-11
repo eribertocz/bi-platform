@@ -56,11 +56,12 @@ deny = [
     # Metadata store and telemetry export: the server only.
     { crate = "sqlx", wrappers = ["bi-server"] },
     { crate = "opentelemetry-otlp", wrappers = ["bi-server"] },
-    # The embedded engine: its runtime adapter only.
-    { crate = "duckdb", wrappers = ["bi-runtime"] },
+    # The embedded engine: execution and catalog adapters only.
+    { crate = "duckdb", wrappers = ["bi-runtime", "sef-adapter-duckdb"] },
     # Adapters are composed by the server only; the semantic engine (sef-*)
     # never depends on them (also checked in backend.yml).
     { crate = "bi-runtime", wrappers = ["bi-server"] },
+    { crate = "sef-adapter-duckdb", wrappers = ["bi-server"] },
     { crate = "bi-fixtures", wrappers = ["bi-runtime", "bi-server"] },
 ]
 

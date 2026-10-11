@@ -169,6 +169,72 @@
         ]
       }
     },
+    "/api/v1/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real.",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "Estado del proyecto y resultados por archivo; sin configuración, lista vacía. Directorio inaccesible o límites globales: project_status unavailable y diagnóstico; nunca resultados parciales.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión válida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Demasiadas cargas simultáneas",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Motor no disponible o lectura fallida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Tiempo de compilación agotado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/queries": {
       "post": {
         "tags": [
@@ -414,6 +480,13 @@
         },
         "additionalProperties": false
       },
+      "DiagnosticSeverity": {
+        "type": "string",
+        "enum": [
+          "error",
+          "warning"
+        ]
+      },
       "Filter": {
         "type": "object",
         "required": [
@@ -495,6 +568,179 @@
           "unavailable"
         ]
       },
+      "ModelDiagnostic": {
+        "type": "object",
+        "required": [
+          "code",
+          "severity",
+          "path",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "column": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "JSON pointer; empty string denotes the document root."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/DiagnosticSeverity"
+          }
+        }
+      },
+      "ModelFile": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "name",
+              "fingerprint",
+              "metrics",
+              "dimensions",
+              "diagnostics",
+              "status"
+            ],
+            "properties": {
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelDiagnostic"
+                }
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelMember"
+                }
+              },
+              "file": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelMember"
+                }
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "valid"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "name",
+              "diagnostics",
+              "status"
+            ],
+            "properties": {
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelDiagnostic"
+                }
+              },
+              "file": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "invalid"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "An invalid file never exposes metadata from a previous successful load."
+      },
+      "ModelMember": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "data_type"
+        ],
+        "properties": {
+          "data_type": {
+            "type": "string",
+            "description": "Exact logical type, e.g. INT64, DECIMAL(18,2), TIMESTAMPTZ (instant)."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Direct dimension binding nullability. Null means not inferred for\ncomputed dimensions or metrics, whose result has not been executed."
+          }
+        }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "required": [
+          "project_status",
+          "models",
+          "diagnostics"
+        ],
+        "properties": {
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelDiagnostic"
+            }
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelFile"
+            }
+          },
+          "project_status": {
+            "$ref": "#/components/schemas/ProjectStatus"
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "required": [
@@ -537,6 +783,14 @@
             "description": "Problem type URI; `about:blank` means the HTTP status says it all."
           }
         }
+      },
+      "ProjectStatus": {
+        "type": "string",
+        "enum": [
+          "not_configured",
+          "ready",
+          "unavailable"
+        ]
       },
       "QueryRequest": {
         "type": "object",

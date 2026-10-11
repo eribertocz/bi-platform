@@ -91,12 +91,18 @@ async fn run() -> ExitCode {
         None => Analytics::disabled(),
     };
     let (metrics, metrics_provider) = metrics::from_env(analytics.clone()).await;
+    let mut models = bi_server::models::Models::new(config.project_dir);
+    if let Some(provider) = &metrics_provider {
+        use opentelemetry::metrics::MeterProvider as _;
+        models = models.with_meter(&provider.meter("bi-server"));
+    }
     let state = AppState {
         db: db.clone(),
         auth: config.auth,
         analytics,
         query_timeout: config.query_timeout,
         metrics,
+        models,
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
