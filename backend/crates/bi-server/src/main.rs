@@ -11,7 +11,8 @@ use tokio::net::TcpListener;
 
 const USAGE: &str =
     "usage: bi-server            run the API server (configured by BI_* environment variables)
-       bi-server openapi [PATH]  write the OpenAPI document to PATH or stdout";
+       bi-server openapi [PATH]  write the OpenAPI document to PATH or stdout
+       bi-server audit-verify [SEQUENCE HASH]  verify audit history (BI_DATABASE_URL; read-only)";
 
 fn main() -> ExitCode {
     install_tls_provider();
@@ -23,6 +24,15 @@ fn main() -> ExitCode {
         .as_slice()
     {
         [] => run(),
+        ["audit-verify"] => verify_audit(None),
+        ["audit-verify", sequence, hash] => {
+            if let Some(checkpoint) = parse_checkpoint(sequence, hash) {
+                verify_audit(Some(checkpoint))
+            } else {
+                eprintln!("audit_invalid_checkpoint");
+                ExitCode::from(2)
+            }
+        }
         ["openapi"] => {
             print!("{}", openapi::json());
             ExitCode::SUCCESS
@@ -37,6 +47,59 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn parse_checkpoint(sequence: &str, hash: &str) -> Option<bi_audit::Checkpoint> {
+    let sequence = sequence.parse::<u64>().ok()?;
+    if sequence > i64::MAX.cast_unsigned()
+        || hash.len() != 64
+        || !hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hash[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bi_audit::Checkpoint {
+        sequence,
+        hash: bytes,
+    })
+}
+
+#[tokio::main]
+async fn verify_audit(trusted: Option<bi_audit::Checkpoint>) -> ExitCode {
+    let Ok(url) = std::env::var("BI_DATABASE_URL") else {
+        eprintln!("audit_database_url_required");
+        return ExitCode::from(2);
+    };
+    let Ok(pool) = db::lazy_pool(&url) else {
+        eprintln!("audit_invalid_database_url");
+        return ExitCode::from(2);
+    };
+    // No server, migration, engine or telemetry side effects in this command.
+    let verified = bi_server::audit::verify(&pool, trusted).await;
+    pool.close().await;
+    match verified {
+        Ok(checkpoint) => {
+            use std::fmt::Write as _;
+            let mut hash = String::with_capacity(64);
+            for byte in checkpoint.hash {
+                write!(hash, "{byte:02x}").expect("String writing cannot fail");
+            }
+            println!(
+                "{}",
+                serde_json::json!({"schema_version": 1, "sequence": checkpoint.sequence.to_string(), "hash": hash})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -128,6 +191,19 @@ async fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checkpoint_arguments_are_bounded_and_redacted() {
+        assert!(super::parse_checkpoint("1", &"a".repeat(64)).is_some());
+        for (sequence, hash) in [
+            ("-1", "a".repeat(64)),
+            ("18446744073709551615", "a".repeat(64)),
+            ("1", "A".repeat(64)),
+            ("1", "private@example.test".into()),
+        ] {
+            assert!(super::parse_checkpoint(sequence, &hash).is_none());
+        }
+    }
+
     #[test]
     fn startup_installs_ring_before_constructing_http_clients() {
         super::install_tls_provider();

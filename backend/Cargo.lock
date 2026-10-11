@@ -398,6 +398,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "bi-audit"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "bi-fixtures"
 version = "0.1.0"
 dependencies = [
@@ -428,6 +439,7 @@ name = "bi-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bi-audit",
  "bi-fixtures",
  "bi-runtime",
  "getrandom 0.4.3",
@@ -628,6 +640,7 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
+ "serde",
  "windows-link",
 ]
 
