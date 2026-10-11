@@ -31,3 +31,16 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 - Dependencia nueva: una línea en el PR con problema, paquete y licencia, alternativa y motivo.
 - Rendimiento: en rutas críticas, medir antes y después (`docs/arquitectura/PERFORMANCE_DESDE_G0.md`).
 - Documentación nueva solo cuando algo no se pueda expresar en código, contrato o pruebas.
+
+### Nivel exigido (como para Apple, Google o Microsoft)
+
+Cada PR, de cualquiera de los dos, cumple esto o explica por qué no aplica:
+- Diseño justificado: problema, alternativas consideradas y motivo de la elección, contrastado con el módulo correspondiente.
+- Pruebas en todos los niveles que toque: unitarias, integración con PostgreSQL/DuckLake reales, e2e en navegador; exactitud contra el oráculo cuando hay datos.
+- Pruebas basadas en propiedades (`proptest`/`fast-check`) para parsers, compiladores de consultas y código de seguridad.
+- Piezas de seguridad: modelo de amenazas breve en el PR (qué se protege, de quién y cómo se prueba).
+- Observabilidad desde el diseño: `tracing` estructurado con `request_id` y métricas preparadas para OpenTelemetry (M15).
+- Contratos estables: un cambio incompatible de la API se versiona; nunca se rompe un cliente sin aviso.
+- UI: accesibilidad verificada (axe) y tamaño de bundle medido por pantalla.
+- Causas raíz, nunca parches que oculten síntomas; sin `TODO` ni código muerto al integrar.
+- Revisión cruzada: el revisor ejecuta las verificaciones y prueba el comportamiento, no solo lee el diff.
