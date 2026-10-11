@@ -271,3 +271,93 @@ mod lake {
         );
     }
 }
+
+/// An in-memory `lake` with the sales schema, filled by `rows` (SQL VALUES).
+async fn memory_lake_app(rows: &'static str) -> Router {
+    let runtime = bi_runtime::Bootstrap::open(bi_runtime::RuntimeConfig::in_memory(1))
+        .unwrap()
+        .finish()
+        .unwrap();
+    runtime
+        .run(move |conn| {
+            conn.execute_batch(&format!(
+                "ATTACH ':memory:' AS lake;
+                 CREATE TABLE lake.main.sales (order_id BIGINT, ordered_at TIMESTAMPTZ,
+                     region VARCHAR, quantity BIGINT, amount DECIMAL(18,2));
+                 INSERT INTO lake.main.sales VALUES {rows};"
+            ))
+        })
+        .await
+        .unwrap();
+    app(Analytics::ready(runtime), Duration::from_secs(10))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn results_over_the_byte_budget_are_refused() {
+    // One 2 MiB region answering a 78-byte request (the reviewed scenario).
+    let app = memory_lake_app(
+        "(9007199254740993, '2026-01-01T00:00:00Z', repeat('x', 2 * 1024 * 1024), 1, 1.00)",
+    )
+    .await;
+    let response = post(
+        &app,
+        r#"{"dataset":"sales","dimensions":["region"],"measures":["row_count"],"limit":1}"#,
+    )
+    .await;
+    assert_problem(
+        &response,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "result_too_large",
+    );
+
+    // A single value over the per-value limit, far below the total budget.
+    let app =
+        memory_lake_app("(1, '2026-01-01T00:00:00Z', repeat('y', 100 * 1024), 1, 1.00)").await;
+    assert_problem(
+        &post(
+            &app,
+            r#"{"dataset":"sales","dimensions":["region"],"measures":["row_count"]}"#,
+        )
+        .await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "result_too_large",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn results_within_budget_stay_exact_and_report_their_phases() {
+    let app = memory_lake_app(
+        "(9007199254740993, '2026-01-01T00:00:00Z', 'north', 5, 9999999999999999.99),
+         (9007199254740994, '2026-01-01T00:00:01Z', NULL, NULL, -0.01)",
+    )
+    .await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/queries")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"dataset":"sales","dimensions":["region"],"measures":["row_count","quantity_sum","amount_sum"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let timing = response.headers()["server-timing"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    for phase in ["plan;dur=", "queue;dur=", "execute;dur=", "serialize;dur="] {
+        assert!(timing.contains(phase), "{timing}");
+    }
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["rows"],
+        json!([
+            ["north", "1", "5", "9999999999999999.99"],
+            [null, "1", null, "-0.01"]
+        ])
+    );
+}

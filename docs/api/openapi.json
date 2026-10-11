@@ -188,7 +188,7 @@
         },
         "responses": {
           "200": {
-            "description": "Resultado tipado y exacto",
+            "description": "Resultado tipado y exacto; fases en la cabecera `Server-Timing` (plan, queue, execute, serialize; ms)",
             "content": {
               "application/json": {
                 "schema": {
@@ -208,7 +208,7 @@
             }
           },
           "422": {
-            "description": "Consulta fuera del catálogo o de los límites",
+            "description": "Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`)",
             "content": {
               "application/problem+json": {
                 "schema": {

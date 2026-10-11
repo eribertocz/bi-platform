@@ -1,11 +1,13 @@
 //! `POST /api/v1/queries`: typed aggregate queries over allowlisted datasets
 //! (M05). The server compiles SQL from the catalog, runs it on the DuckDB
-//! pool with a deadline and returns exact, typed values.
+//! pool with a deadline and a result-size budget, and returns exact, typed
+//! values. Each response reports its phases in a `Server-Timing` header.
 
 pub mod catalog;
 pub mod plan;
 
-use std::time::Instant;
+use std::fmt::Write as _;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
@@ -21,6 +23,11 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::problem::Problem;
 use plan::{Param, QueryRequest, ResultColumn};
+
+/// Total bytes of all values a result may carry.
+pub const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
+/// Bytes of any single value.
+pub const MAX_CELL_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct QueryResult {
@@ -42,9 +49,9 @@ pub struct QueryResult {
     summary = "Consulta agregada tipada sobre un dataset permitido; sin SQL del cliente.",
     request_body = QueryRequest,
     responses(
-        (status = 200, description = "Resultado tipado y exacto", body = QueryResult),
+        (status = 200, description = "Resultado tipado y exacto; fases en la cabecera `Server-Timing` (plan, queue, execute, serialize; ms)", body = QueryResult),
         (status = 400, description = "JSON inválido o campos desconocidos", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Consulta fuera del catálogo o de los límites", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Cola de consultas llena; reintentar", body = Problem, content_type = "application/problem+json"),
         (status = 500, description = "Fallo interno al ejecutar", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "Motor analítico no disponible", body = Problem, content_type = "application/problem+json"),
@@ -59,110 +66,233 @@ pub async fn run(
     let request_id = request_id
         .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
         .unwrap_or_default();
-    let problem = |status, code: &str, detail: Option<String>| {
-        Problem::new(status, code, detail, request_id.clone()).into_response()
-    };
+    match handle(&state, body).await {
+        Ok(response) => response,
+        Err(rejection) => rejection.into_response(&request_id),
+    }
+}
 
-    let request = match body {
-        Ok(Json(request)) => request,
-        Err(rejection) => {
-            return problem(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                Some(rejection.body_text()),
-            );
+/// Why a query request ends without a result; becomes a problem response.
+struct Rejection {
+    status: StatusCode,
+    code: &'static str,
+    detail: Option<String>,
+}
+
+impl Rejection {
+    fn new(status: StatusCode, code: &'static str, detail: Option<String>) -> Self {
+        Self {
+            status,
+            code,
+            detail,
         }
-    };
-    let plan = match plan::compile(&request) {
-        Ok(plan) => plan,
-        Err(invalid) => {
-            return problem(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid_query",
-                Some(invalid.0),
-            );
+    }
+
+    fn into_response(self, request_id: &str) -> Response {
+        let retry = self.status == StatusCode::TOO_MANY_REQUESTS;
+        let mut response =
+            Problem::new(self.status, self.code, self.detail, request_id).into_response();
+        if retry {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }
-    };
-    let Some(runtime) = state.analytics.runtime() else {
-        return problem(
+        response
+    }
+}
+
+/// Validates, plans, executes and serializes one query, timing each phase.
+async fn handle(
+    state: &AppState,
+    body: Result<Json<QueryRequest>, JsonRejection>,
+) -> Result<Response, Rejection> {
+    let Json(request) = body.map_err(|rejection| {
+        Rejection::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            Some(rejection.body_text()),
+        )
+    })?;
+    let planning = Instant::now();
+    let plan = plan::compile(&request).map_err(|invalid| {
+        Rejection::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_query",
+            Some(invalid.0),
+        )
+    })?;
+    let plan_time = planning.elapsed();
+    let runtime = state.analytics.runtime().ok_or_else(|| {
+        Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "analytics_unavailable",
             Some("El motor analítico no está listo.".to_owned()),
-        );
-    };
+        )
+    })?;
 
-    let started = Instant::now();
-    let columns = plan.columns.len();
     let fetch_limit = plan.limit + 1;
-    let (sql, params) = (plan.sql, plan.params);
-    // Dropping this future on timeout interrupts the query on its connection.
-    let execution = runtime.run(move |conn| fetch(conn, &sql, &params, columns, fetch_limit));
-    let outcome = tokio::time::timeout(state.query_timeout, execution).await;
-    let elapsed_ms = started.elapsed().as_millis();
-
-    let mut rows = match outcome {
-        Ok(Ok(rows)) => rows,
-        Err(_) => {
-            tracing::warn!(dataset = %request.dataset, elapsed_ms, "query timed out and was cancelled");
-            return problem(
+    let (fetched, queue_time, execute_time) = execute(
+        &runtime,
+        state.query_timeout,
+        plan.sql,
+        plan.params,
+        plan.columns.len(),
+        fetch_limit,
+    )
+    .await
+    .map_err(|failure| match failure {
+        Failure::Timeout => {
+            tracing::warn!(dataset = %request.dataset, "query timed out and was cancelled");
+            Rejection::new(
                 StatusCode::GATEWAY_TIMEOUT,
                 "query_timeout",
                 Some(format!(
                     "La consulta superó {} ms y se canceló.",
                     state.query_timeout.as_millis()
                 )),
-            );
+            )
         }
-        Ok(Err(error)) => {
-            let (status, code) = match &error {
-                RuntimeError::Busy => (StatusCode::TOO_MANY_REQUESTS, "too_many_queries"),
-                RuntimeError::Engine(_) | RuntimeError::Panicked => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "query_failed")
-                }
-                _ => (StatusCode::SERVICE_UNAVAILABLE, "analytics_unavailable"),
-            };
-            tracing::error!(%error, dataset = %request.dataset, elapsed_ms, "query failed");
-            let mut response = problem(status, code, None);
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                response
-                    .headers_mut()
-                    .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-            }
-            return response;
+        Failure::Runtime(error) => {
+            tracing::error!(%error, dataset = %request.dataset, "query failed");
+            let (status, code) = status_for(&error);
+            Rejection::new(status, code, None)
         }
+    })?;
+    let Fetched::Rows(mut rows) = fetched else {
+        tracing::warn!(dataset = %request.dataset, "query result over the byte budget");
+        return Err(Rejection::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "result_too_large",
+            Some(format!(
+                "El resultado supera {MAX_RESULT_BYTES} bytes (o {MAX_CELL_BYTES} en un solo valor). Añade filtros, menos dimensiones o un límite menor."
+            )),
+        ));
     };
-
     let truncated = rows.len() > fetch_limit - 1;
     rows.truncate(fetch_limit - 1);
-    tracing::info!(
-        dataset = %request.dataset,
-        rows = rows.len(),
-        truncated,
-        elapsed_ms,
-        "query executed"
-    );
-    let mut response = Json(QueryResult {
+    let row_count = rows.len();
+
+    let serializing = Instant::now();
+    let result = QueryResult {
         columns: plan.columns,
-        row_count: rows.len(),
+        row_count,
         rows,
         truncated,
-    })
-    .into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    };
+    let body = serde_json::to_vec(&result).map_err(|error| {
+        tracing::error!(%error, "cannot serialize a query result");
+        Rejection::new(StatusCode::INTERNAL_SERVER_ERROR, "query_failed", None)
+    })?;
+    let serialize_time = serializing.elapsed();
+
+    tracing::info!(
+        dataset = %request.dataset,
+        rows = row_count,
+        bytes = body.len(),
+        truncated,
+        plan_us = plan_time.as_micros(),
+        queue_us = queue_time.as_micros(),
+        execute_us = execute_time.as_micros(),
+        serialize_us = serialize_time.as_micros(),
+        "query executed"
+    );
+    Ok(json_response(
+        body,
+        &server_timing(&[
+            ("plan", plan_time),
+            ("queue", queue_time),
+            ("execute", execute_time),
+            ("serialize", serialize_time),
+        ]),
+    ))
+}
+
+enum Failure {
+    Timeout,
+    Runtime(RuntimeError),
+}
+
+/// Runs the compiled query on the pool within `deadline`; returns the rows
+/// with the time spent queued (waiting for a worker plus hand-off) and
+/// executing. Dropping the inner future on timeout interrupts the query.
+async fn execute(
+    runtime: &bi_runtime::Runtime,
+    deadline: Duration,
+    sql: String,
+    params: Vec<Param>,
+    columns: usize,
+    fetch_limit: usize,
+) -> Result<(Fetched, Duration, Duration), Failure> {
+    let submitted = Instant::now();
+    let execution = runtime.run(move |conn| {
+        let started = Instant::now();
+        let fetched = fetch(conn, &sql, &params, columns, fetch_limit)?;
+        Ok((fetched, started.elapsed()))
+    });
+    match tokio::time::timeout(deadline, execution).await {
+        Err(_) => Err(Failure::Timeout),
+        Ok(Err(error)) => Err(Failure::Runtime(error)),
+        Ok(Ok((fetched, execute_time))) => Ok((
+            fetched,
+            submitted.elapsed().saturating_sub(execute_time),
+            execute_time,
+        )),
+    }
+}
+
+/// Status and problem code for a runtime failure.
+fn status_for(error: &RuntimeError) -> (StatusCode, &'static str) {
+    match error {
+        RuntimeError::Busy => (StatusCode::TOO_MANY_REQUESTS, "too_many_queries"),
+        RuntimeError::Engine(_) | RuntimeError::Panicked => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "query_failed")
+        }
+        _ => (StatusCode::SERVICE_UNAVAILABLE, "analytics_unavailable"),
+    }
+}
+
+fn json_response(body: Vec<u8>, timing: &str) -> Response {
+    let mut response = (StatusCode::OK, body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if let Ok(value) = HeaderValue::from_str(timing) {
+        headers.insert("server-timing", value);
+    }
     response
 }
 
+enum Fetched {
+    Rows(Vec<Vec<Option<String>>>),
+    /// The result exceeded the byte budget; reading stopped there.
+    TooLarge,
+}
+
+/// W3C `Server-Timing` value, durations in milliseconds.
+fn server_timing(phases: &[(&str, Duration)]) -> String {
+    let mut value = String::new();
+    for (name, duration) in phases {
+        if !value.is_empty() {
+            value.push_str(", ");
+        }
+        let _ = write!(value, "{name};dur={:.3}", duration.as_secs_f64() * 1000.0);
+    }
+    value
+}
+
 /// Runs on a pool thread. Every selected column is already `VARCHAR`, so
-/// values leave DuckDB as exact text.
+/// values leave DuckDB as exact text. Stops as soon as the byte budget is
+/// exceeded instead of materializing the whole result.
 fn fetch(
     conn: &Connection,
     sql: &str,
     params: &[Param],
     columns: usize,
     limit: usize,
-) -> duckdb::Result<Vec<Vec<Option<String>>>> {
+) -> duckdb::Result<Fetched> {
     let values: Vec<Value> = params
         .iter()
         .map(|param| match param {
@@ -173,15 +303,38 @@ fn fetch(
     let mut statement = conn.prepare(sql)?;
     let mut rows = statement.query(duckdb::params_from_iter(values.iter()))?;
     let mut out = Vec::new();
+    let mut bytes = 0;
     while let Some(row) = rows.next()? {
         if out.len() == limit {
             break;
         }
-        out.push(
-            (0..columns)
-                .map(|i| row.get::<_, Option<String>>(i))
-                .collect::<duckdb::Result<_>>()?,
+        let mut values = Vec::with_capacity(columns);
+        for i in 0..columns {
+            let value: Option<String> = row.get(i)?;
+            let size = value.as_ref().map_or(0, String::len);
+            bytes += size;
+            if size > MAX_CELL_BYTES || bytes > MAX_RESULT_BYTES {
+                return Ok(Fetched::TooLarge);
+            }
+            values.push(value);
+        }
+        out.push(values);
+    }
+    Ok(Fetched::Rows(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_timing_lists_phases_in_milliseconds() {
+        assert_eq!(
+            server_timing(&[
+                ("plan", Duration::from_micros(120)),
+                ("execute", Duration::from_millis(15)),
+            ]),
+            "plan;dur=0.120, execute;dur=15.000"
         );
     }
-    Ok(out)
 }
