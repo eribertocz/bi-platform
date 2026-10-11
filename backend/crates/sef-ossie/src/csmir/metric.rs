@@ -21,17 +21,20 @@ use sef_model_ir::expressions::{
     AggregateFunction, AggregateNullSemantics, MetricExpr, MetricExprKind, ScalarExpr,
 };
 use sef_model_ir::grain::Grain;
+use sef_model_ir::grain::GrainAtom;
 use sef_model_ir::identity::StableId;
 use sef_model_ir::model::{
     AggregationClass, AggregationContract, AxisBehavior, AxisRule, Decomposition, Measure, Metric,
-    ObjectMetadata,
+    ObjectMetadata, TemporalAggregation, TemporalSelection, TemporalTies, WindowBehavior,
+    WindowFrame,
 };
 use sef_model_ir::time::IanaZoneId;
+use sef_model_ir::time::{NullPlacement, OrderTerm, SortDirection};
 use sef_model_ir::types::{ArithmeticOp, RoundingMode, ValueType, ZeroDivisionPolicy};
 use sef_model_ir::units::Unit;
 use sqlparser::ast::{
     BinaryOperator, CastKind, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments,
+    FunctionArgExpr, FunctionArguments, OrderBySort, WindowFrameBound, WindowType,
 };
 
 use super::scalar::{
@@ -41,8 +44,9 @@ use super::scalar::{
 use super::{Converter, compatible, field_ref, strip, unit};
 use crate::diagnostic::Code;
 use crate::extension::{
-    self, AggregationDeclaration, BehaviorDeclaration, ClassDeclaration, MetricExtension,
-    RoundingDeclaration, ZeroDivisionDeclaration,
+    self, AggregationDeclaration, BehaviorDeclaration, ClassDeclaration, MeasureDeclaration,
+    MetricExtension, OrderDeclaration, RoundingDeclaration, SelectionDeclaration, TiesDeclaration,
+    ZeroDivisionDeclaration,
 };
 use crate::ids;
 
@@ -93,6 +97,7 @@ pub(super) fn metrics(converter: &mut Converter<'_>) {
     let Some(order) = order(converter, &states, &names) else {
         return;
     };
+    dataset_measures(converter);
     let mut by_name: BTreeMap<String, Info> = BTreeMap::new();
     let mut by_id: BTreeMap<StableId, Info> = BTreeMap::new();
     for i in order {
@@ -128,6 +133,72 @@ pub(super) fn metrics(converter: &mut Converter<'_>) {
                 by_name.insert(name, info);
             }
             Err(failure) => converter.fail(&state.expression_path, failure),
+        }
+    }
+}
+
+/// Measures a dataset declares without a metric (its extension's
+/// `measures`): one aggregate over that dataset's own fields.
+fn dataset_measures(converter: &mut Converter<'_>) {
+    let declared: Vec<(usize, Vec<MeasureDeclaration>)> = converter
+        .datasets
+        .iter()
+        .enumerate()
+        .map(|(d, state)| (d, state.extension.measures.clone()))
+        .collect();
+    let (names, by_name) = (BTreeMap::new(), BTreeMap::new());
+    let mut by_id = BTreeMap::new();
+    for (d, measures) in declared {
+        let path = format!("{}/custom_extensions", converter.datasets[d].path);
+        for measure in measures {
+            let mut extension = MetricExtension::default();
+            extension.dataset = Some(converter.model.datasets[d].name.clone());
+            let state = MetricState {
+                segment: ids::segment(&measure.name),
+                description: None,
+                path: path.clone(),
+                expression_path: path.clone(),
+                extension,
+                ast: None,
+            };
+            let created = crate::expression::parse(&measure.expression)
+                .map_err(|diagnostic| Failure::new(diagnostic.code, diagnostic.message))
+                .and_then(|ast| match strip(&ast) {
+                    Expr::Function(function)
+                        if is_aggregate(function)
+                            && function.over.is_none()
+                            && function_name(function) != "AVG" =>
+                    {
+                        Builder {
+                            converter: &mut *converter,
+                            metric: &state,
+                            names: &names,
+                            by_name: &by_name,
+                            by_id: &mut by_id,
+                            synthesized: 0,
+                        }
+                        .measure(&state.segment, function, measure.aggregation.as_ref())
+                        .map(|_| ())
+                    }
+                    _ => Err(Failure::new(
+                        Code::NotRepresentable,
+                        "Una medida de dataset es un solo agregado (SUM, COUNT, MIN o MAX).",
+                    )),
+                });
+            if let Err(failure) = created {
+                converter.fail(&path, failure);
+            } else if converter.measures.last().map(|created| &created.dataset)
+                != Some(&converter.datasets[d].id)
+            {
+                converter.error(
+                    Code::UnknownReference,
+                    path.clone(),
+                    format!(
+                        "La medida {:?} lee otro dataset; se declara en el dataset que agrega.",
+                        measure.name
+                    ),
+                );
+            }
         }
     }
 }
@@ -246,6 +317,11 @@ impl Builder<'_, '_> {
         let segment = self.metric.segment.clone();
         let top = strip(ast);
         if let Expr::Function(function) = top
+            && function.over.is_some()
+        {
+            return self.window(function);
+        }
+        if let Expr::Function(function) = top
             && is_aggregate(function)
             && function.over.is_none()
             && function_name(function) != "AVG"
@@ -282,6 +358,7 @@ impl Builder<'_, '_> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let (time_behavior, allocation_bridge) = self.behaviors()?;
         let metadata = self.metadata("metric", &segment)?;
         let info = Info {
             id: metadata.id().clone(),
@@ -298,11 +375,11 @@ impl Builder<'_, '_> {
             intrinsic_filter: None,
             native_grain: grain,
             aggregation_contract: contract,
-            time_behavior: None,
+            time_behavior,
             window_behavior: None,
             dependencies,
             policy_refs: Vec::new(),
-            allocation_bridge: None,
+            allocation_bridge,
         });
         Ok(info)
     }
@@ -398,6 +475,11 @@ impl Builder<'_, '_> {
         unit: Option<Unit>,
     ) -> Result<Info, Failure> {
         let unit = unit.or(measure.unit);
+        let (time_behavior, allocation_bridge) = if segment == self.metric.segment {
+            self.behaviors()?
+        } else {
+            (None, None)
+        };
         let metadata = self.metadata("metric", segment)?;
         let info = Info {
             id: metadata.id().clone(),
@@ -418,11 +500,11 @@ impl Builder<'_, '_> {
             unit,
             native_grain: measure.grain,
             aggregation_contract: measure.contract,
-            time_behavior: None,
+            time_behavior,
             window_behavior: None,
             dependencies: vec![measure.id],
             policy_refs: Vec::new(),
-            allocation_bridge: None,
+            allocation_bridge,
         });
         Ok(info)
     }
@@ -622,6 +704,218 @@ impl Builder<'_, '_> {
             axis_rules,
             decomposition: None,
         })
+    }
+
+    /// The declared period selection and allocation bridge.
+    fn behaviors(&self) -> Result<(Option<TemporalAggregation>, Option<StableId>), Failure> {
+        let path = format!("{}/custom_extensions", self.metric.path);
+        let converter = &*self.converter;
+        let time_behavior = self
+            .metric
+            .extension
+            .time_behavior
+            .as_ref()
+            .map(|declared| -> Result<TemporalAggregation, Failure> {
+                let scope = &declared.selection_scope;
+                let selection_scope = scope
+                    .dimensions
+                    .iter()
+                    .map(|name| converter.atom(Some(name), None))
+                    .chain(
+                        scope
+                            .entities
+                            .iter()
+                            .map(|name| converter.atom(None, Some(name))),
+                    )
+                    .collect::<Result<Vec<_>, _>>()?;
+                let order = |orders: &[OrderDeclaration]| {
+                    orders
+                        .iter()
+                        .map(|order| converter.order_term(order))
+                        .collect::<Result<Vec<_>, _>>()
+                };
+                Ok(TemporalAggregation {
+                    axis: converter.atom(
+                        declared.axis.dimension.as_deref(),
+                        declared.axis.entity.as_deref(),
+                    )?,
+                    rule: match declared.rule {
+                        SelectionDeclaration::PeriodEnd => TemporalSelection::PeriodEnd,
+                        SelectionDeclaration::PeriodStart => TemporalSelection::PeriodStart,
+                    },
+                    order_by: order(&declared.order_by)?,
+                    selection_scope: Grain::new(selection_scope),
+                    ties: match &declared.ties {
+                        TiesDeclaration::UniqueByKey(key) => TemporalTies::UniqueByContract {
+                            key: converter.entity_key(key)?,
+                        },
+                        TiesDeclaration::Secondary(orders) => TemporalTies::SecondaryKey {
+                            fields: order(orders)?,
+                        },
+                        TiesDeclaration::Unspecified => TemporalTies::Unspecified,
+                    },
+                })
+            })
+            .transpose()
+            .map_err(|failure| failure.at(path.clone()))?;
+        let allocation_bridge = self
+            .metric
+            .extension
+            .allocation_bridge
+            .as_deref()
+            .map(|name| {
+                let segment = ids::segment(name);
+                converter
+                    .bridges
+                    .iter()
+                    .map(|bridge| bridge.metadata.id())
+                    .find(|id| id.as_str().rsplit('/').next() == Some(segment.as_str()))
+                    .cloned()
+                    .ok_or_else(|| {
+                        Failure::new(
+                            Code::UnknownReference,
+                            format!("No existe el puente {name:?}."),
+                        )
+                        .at(path.clone())
+                    })
+            })
+            .transpose()?;
+        Ok((time_behavior, allocation_bridge))
+    }
+
+    /// `SUM(metric) OVER (PARTITION BY … ORDER BY … [frame])`: a cumulative
+    /// metric over a base metric, ordered and partitioned by dimensions. The
+    /// frame must run from the start of the partition to the current row
+    /// (SQL's default with `ORDER BY`); at the window's grain each row is a
+    /// distinct ordering value, so `ROWS` and `RANGE` agree.
+    fn window(&mut self, function: &Function) -> Result<Info, Failure> {
+        let base = match (
+            function_name(function).as_str(),
+            arguments(function)?.as_slice(),
+        ) {
+            ("SUM", [Expr::Identifier(ident)]) => self
+                .by_name
+                .get(&normalize(ident))
+                .cloned()
+                .ok_or_else(window_shape)?,
+            _ => return Err(window_shape()),
+        };
+        let (order_by, partition) = self.window_spec(function)?;
+        let atom = |dimension: &StableId| GrainAtom::DimensionRef {
+            dimension: dimension.clone(),
+            roles: Vec::new(),
+        };
+        let grain = Grain::new(
+            order_by
+                .iter()
+                .map(|order| atom(&order.value))
+                .chain(partition.iter().map(atom)),
+        );
+        let mut expression = MetricExpr {
+            kind: MetricExprKind::Window {
+                base_metric: base.id.clone(),
+            },
+            value_type: base.value_type.clone(),
+            unit: base.unit.clone(),
+        };
+        if let Some(declared) = &self.metric.extension.unit {
+            expression.unit = Some(unit(declared));
+        }
+        let contract = AggregationContract {
+            classification: AggregationClass::OrderedWindow,
+            axis_rules: order_by
+                .iter()
+                .map(|order| AxisRule {
+                    axis: atom(&order.value),
+                    behavior: AxisBehavior::WindowDependent,
+                })
+                .collect(),
+            decomposition: None,
+        };
+        let segment = self.metric.segment.clone();
+        let metadata = self.metadata("metric", &segment)?;
+        let info = Info {
+            id: metadata.id().clone(),
+            value_type: expression.value_type.clone(),
+            unit: expression.unit.clone(),
+            grain: grain.clone(),
+            class: AggregationClass::OrderedWindow,
+        };
+        self.converter.metrics.push(Metric {
+            metadata,
+            value_type: expression.value_type.clone(),
+            unit: expression.unit.clone(),
+            expression,
+            intrinsic_filter: None,
+            native_grain: grain.clone(),
+            aggregation_contract: contract,
+            time_behavior: None,
+            window_behavior: Some(WindowBehavior::Cumulative {
+                base_metric: base.id.clone(),
+                prerequisite_grain: grain,
+                order_by,
+                partition_by: Grain::new(partition.iter().map(atom)),
+                frame: WindowFrame::UnboundedPrecedingToCurrent,
+            }),
+            dependencies: vec![base.id],
+            policy_refs: Vec::new(),
+            allocation_bridge: None,
+        });
+        Ok(info)
+    }
+
+    /// The ordering and partitioning dimensions of a cumulative window,
+    /// whose frame runs from the partition's start to the current row.
+    fn window_spec(&self, function: &Function) -> Result<(Vec<OrderTerm>, Vec<StableId>), Failure> {
+        let Some(WindowType::WindowSpec(spec)) = &function.over else {
+            return Err(window_shape());
+        };
+        if spec.window_name.is_some() || spec.order_by.is_empty() {
+            return Err(window_shape());
+        }
+        if let Some(frame) = &spec.window_frame {
+            let to_current = matches!(frame.end_bound, None | Some(WindowFrameBound::CurrentRow));
+            if !matches!(frame.start_bound, WindowFrameBound::Preceding(None)) || !to_current {
+                return Err(window_shape());
+            }
+        }
+        let dimension = |expr: &Expr| -> Result<StableId, Failure> {
+            let Expr::Identifier(ident) = strip(expr) else {
+                return Err(window_shape());
+            };
+            match self.converter.atom(Some(&ident.value), None)? {
+                GrainAtom::DimensionRef { dimension, .. } => Ok(dimension),
+                GrainAtom::EntityKeyRef(_) | GrainAtom::TimeBucketRef(_) => Err(window_shape()),
+            }
+        };
+        let mut order_by = Vec::with_capacity(spec.order_by.len());
+        for order in &spec.order_by {
+            let descending = match order.options.sort {
+                None | Some(OrderBySort::Asc) => false,
+                Some(OrderBySort::Desc) => true,
+                Some(OrderBySort::Using(_)) => return Err(window_shape()),
+            };
+            order_by.push(OrderTerm {
+                value: dimension(&order.expr)?,
+                direction: if descending {
+                    SortDirection::Descending
+                } else {
+                    SortDirection::Ascending
+                },
+                // Engines disagree on the default for DESC: state it.
+                nulls: if order.options.nulls_first.unwrap_or(false) {
+                    NullPlacement::First
+                } else {
+                    NullPlacement::Last
+                },
+            });
+        }
+        let partition = spec
+            .partition_by
+            .iter()
+            .map(dimension)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((order_by, partition))
     }
 
     fn rounding(&self) -> RoundingMode {
@@ -987,4 +1281,8 @@ fn measure_type(
         }
         (None, false) => return Err(not_representable(&format!("{name}(*)"))),
     })
+}
+
+fn window_shape() -> Failure {
+    not_representable("Una ventana distinta de SUM(métrica) OVER (ORDER BY dimensión…) acumulada")
 }
