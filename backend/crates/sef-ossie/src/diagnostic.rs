@@ -39,7 +39,8 @@ pub enum Code {
     ColumnArity,
     /// `to_columns` covers none of the declared keys of the `to` dataset.
     KeyNotCovered,
-    /// A portable expression does not parse as exactly one expression.
+    /// A portable expression does not parse as exactly one expression or
+    /// exceeds the parser's token/recursion budget.
     ExpressionSyntax,
     /// A construct outside `OSSIE_SQL_2026` (subquery, vendor syntax…).
     UnsupportedConstruct,

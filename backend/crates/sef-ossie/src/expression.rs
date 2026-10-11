@@ -15,15 +15,20 @@
 use std::collections::BTreeSet;
 
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, DuplicateTreatment, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, UnaryOperator, Value, WindowType,
+    BinaryOperator, CastKind, CeilFloorKind, DataType, DateTimeField, DuplicateTreatment, Expr,
+    Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value,
+    WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use sqlparser::tokenizer::Token;
+use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::diagnostic::{Code, Diagnostic};
-use crate::validate::normalize_identifier;
+use crate::validate::MAX_IDENTIFIER_CHARS;
+
+/// Maximum significant tokens before constructing an AST. This bounds even
+/// left-deep operator chains, including their recursive walk and destruction.
+pub const MAX_EXPRESSION_TOKENS: usize = 256;
 
 /// Where an expression appears: field expressions are row-level scalars;
 /// metric expressions aggregate.
@@ -55,12 +60,22 @@ pub enum AggregateClass {
     Sketch,
 }
 
-/// One aggregate inside an expression.
+/// The SQL evaluation phase of an aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregatePhase {
+    /// Reduces rows to the query grain.
+    Group,
+    /// Operates over rows after grouping; never a grain reduction.
+    Window,
+}
+
+/// One aggregate inside an expression, with its evaluation phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Aggregate {
     /// Upper-cased function name.
     pub function: String,
     pub class: AggregateClass,
+    pub phase: AggregatePhase,
     pub distinct: bool,
     /// Duplicated input rows cannot change the result.
     pub fanout_safe: bool,
@@ -87,7 +102,8 @@ pub fn analyze(text: &str, context: Context) -> Result<Analysis, Diagnostic> {
     let mut walker = Walker {
         context,
         analysis: Analysis::default(),
-        aggregate: None,
+        aggregates: Vec::new(),
+        inside_window: false,
     };
     walker.expr(&expr)?;
     Ok(walker.analysis)
@@ -96,9 +112,31 @@ pub fn analyze(text: &str, context: Context) -> Result<Analysis, Diagnostic> {
 fn parse(text: &str) -> Result<Expr, Diagnostic> {
     let syntax = |message: String| Diagnostic::error(Code::ExpressionSyntax, "", message);
     let dialect = GenericDialect {};
-    let mut parser = Parser::new(&dialect)
-        .try_with_sql(text)
+    if text.len() > crate::load::MAX_DOCUMENT_BYTES {
+        return Err(syntax(
+            "La expresión supera el presupuesto de bytes.".to_owned(),
+        ));
+    }
+    let tokens = Tokenizer::new(&dialect, text)
+        .tokenize()
         .map_err(|e| syntax(format!("Expresión no válida: {e}")))?;
+    let tokens: Vec<_> = tokens
+        .into_iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    if tokens.len() > MAX_EXPRESSION_TOKENS {
+        return Err(syntax(format!(
+            "La expresión supera {MAX_EXPRESSION_TOKENS} tokens."
+        )));
+    }
+    for token in &tokens {
+        if let Token::Word(word) = token {
+            validate_identifier(&word.value, word.quote_style)?;
+        }
+    }
+    let mut parser = Parser::new(&dialect)
+        .with_recursion_limit(16)
+        .with_tokens(tokens);
     let expr = parser
         .parse_expr()
         .map_err(|e| syntax(format!("Expresión no válida: {e}")))?;
@@ -115,8 +153,9 @@ fn parse(text: &str) -> Result<Expr, Diagnostic> {
 struct Walker {
     context: Context,
     analysis: Analysis,
-    /// The aggregate being walked, collecting its references.
-    aggregate: Option<Aggregate>,
+    /// Active aggregate scopes, collecting dependencies at both phases.
+    aggregates: Vec<Aggregate>,
+    inside_window: bool,
 }
 
 fn unsupported(what: &str) -> Diagnostic {
@@ -129,7 +168,7 @@ fn unsupported(what: &str) -> Diagnostic {
 
 impl Walker {
     fn reference(&mut self, reference: Reference) {
-        if let Some(aggregate) = &mut self.aggregate {
+        for aggregate in &mut self.aggregates {
             aggregate.references.insert(reference.clone());
         }
         self.analysis.references.insert(reference);
@@ -172,6 +211,19 @@ impl Walker {
                 Value::Placeholder(_) => Err(unsupported("Un parámetro (`?`, `$1`)")),
                 _ => Err(unsupported("Ese tipo de literal")),
             },
+            Expr::TypedString(literal)
+                if !literal.uses_odbc_syntax
+                    && matches!(literal.value.value, Value::SingleQuotedString(_))
+                    && matches!(
+                        literal.data_type,
+                        DataType::Date
+                            | DataType::Time(None, _)
+                            | DataType::Timestamp(None, _)
+                            | DataType::TimestampNtz(None)
+                    ) =>
+            {
+                Ok(())
+            }
             Expr::Nested(inner)
             | Expr::IsNull(inner)
             | Expr::IsNotNull(inner)
@@ -248,9 +300,18 @@ impl Walker {
                 }
                 self.expr(expr)
             }
-            Expr::Extract { expr, .. } | Expr::Ceil { expr, .. } | Expr::Floor { expr, .. } => {
+            Expr::Extract { expr, field, .. } => {
+                validate_date_part(&field.to_string(), EXTRACTION_PARTS)?;
                 self.expr(expr)
             }
+            Expr::Ceil {
+                expr,
+                field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+            }
+            | Expr::Floor {
+                expr,
+                field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+            } => self.expr(expr),
             Expr::Position { expr, r#in } => {
                 self.expr(expr)?;
                 self.expr(r#in)
@@ -259,8 +320,12 @@ impl Walker {
                 expr,
                 substring_from,
                 substring_for,
+                shorthand: false,
                 ..
             } => {
+                if substring_from.is_none() || substring_for.is_none() {
+                    return Err(unsupported("SUBSTRING exige origen, inicio y longitud"));
+                }
                 self.expr(expr)?;
                 if let Some(from) = substring_from {
                     self.expr(from)?;
@@ -271,7 +336,10 @@ impl Walker {
                 Ok(())
             }
             Expr::Trim {
-                expr, trim_what, ..
+                expr,
+                trim_what,
+                trim_characters: None,
+                ..
             } => {
                 self.expr(expr)?;
                 if let Some(what) = trim_what {
@@ -313,15 +381,13 @@ impl Walker {
                 (list.args.iter().collect(), distinct)
             }
         };
+        validate_signature(function, &name, &args, distinct)?;
         let window = match &function.over {
             None => None,
             Some(WindowType::WindowSpec(spec)) => Some(spec),
             Some(WindowType::NamedWindow(_)) => return Err(unsupported("Una ventana con nombre")),
         };
         let class = aggregate_class(&name, distinct);
-        if window.is_none() && !function.within_group.is_empty() && !is_ordered_set(&name) {
-            return Err(unsupported(&format!("`WITHIN GROUP` en `{name}`")));
-        }
         if let Some(spec) = window {
             if self.context == Context::Field {
                 return Err(Diagnostic::error(
@@ -335,22 +401,29 @@ impl Walker {
             if class.is_none() && !WINDOW_FUNCTIONS.contains(&name.as_str()) {
                 return Err(unknown_function(&name));
             }
-            self.analysis.windowed = true;
-            self.arguments(&name, &args)?;
-            self.all(&spec.partition_by)?;
-            for order in &spec.order_by {
-                self.expr(&order.expr)?;
+            if self.inside_window || !self.aggregates.is_empty() {
+                return Err(Diagnostic::error(
+                    Code::NestedAggregate,
+                    "",
+                    "Una ventana no puede estar dentro de un agregado ni de otra ventana.",
+                ));
             }
-            return Ok(());
+            self.analysis.windowed = true;
+            self.inside_window = true;
+            let result = if let Some(class) = class {
+                self.aggregate(function, &name, class, distinct, &args)
+            } else {
+                self.arguments(&name, &args)
+                    .and_then(|()| self.window_spec(spec))
+            };
+            self.inside_window = false;
+            return result;
         }
         if let Some(class) = class {
             return self.aggregate(function, &name, class, distinct, &args);
         }
         if WINDOW_FUNCTIONS.contains(&name.as_str()) {
             return Err(unsupported(&format!("`{name}` sin `OVER (…)`")));
-        }
-        if !SCALAR_FUNCTIONS.contains(&name.as_str()) {
-            return Err(unknown_function(&name));
         }
         self.arguments(&name, &args)
     }
@@ -372,7 +445,16 @@ impl Walker {
                 ),
             ));
         }
-        if self.aggregate.is_some() {
+        let phase = if function.over.is_some() {
+            AggregatePhase::Window
+        } else {
+            AggregatePhase::Group
+        };
+        if self
+            .aggregates
+            .last()
+            .is_some_and(|aggregate| aggregate.phase == AggregatePhase::Group)
+        {
             return Err(Diagnostic::error(
                 Code::NestedAggregate,
                 "",
@@ -380,31 +462,110 @@ impl Walker {
             ));
         }
         let fanout_safe = distinct || FANOUT_SAFE_AGGREGATES.contains(&name);
-        self.aggregate = Some(Aggregate {
+        self.aggregates.push(Aggregate {
             function: name.to_owned(),
             class,
+            phase,
             distinct,
             fanout_safe,
             references: BTreeSet::new(),
         });
-        let walked = self.arguments(name, args).and_then(|()| {
-            function
-                .within_group
-                .iter()
-                .try_for_each(|order| self.expr(&order.expr))
-        });
-        let aggregate = self.aggregate.take();
+        let walked = self
+            .arguments(name, args)
+            .and_then(|()| {
+                function
+                    .within_group
+                    .iter()
+                    .try_for_each(|order| self.expr(&order.expr))
+            })
+            .and_then(|()| match &function.over {
+                Some(WindowType::WindowSpec(spec)) => self.window_spec(spec),
+                _ => Ok(()),
+            });
+        let aggregate = self.aggregates.pop();
         walked?;
         self.analysis.aggregates.extend(aggregate);
         Ok(())
     }
 
     fn arguments(&mut self, name: &str, args: &[&FunctionArg]) -> Result<(), Diagnostic> {
-        for arg in args {
+        for (index, arg) in args.iter().enumerate() {
+            if index == 0 && matches!(name, "DATEADD" | "DATEDIFF" | "DATE_PART" | "DATE_TRUNC") {
+                let parts = match name {
+                    "DATE_PART" => EXTRACTION_PARTS,
+                    _ => ARITHMETIC_PARTS,
+                };
+                let part = match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))
+                        if matches!(name, "DATEADD" | "DATEDIFF")
+                            && ident.quote_style.is_none() =>
+                    {
+                        &ident.value
+                    }
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) => {
+                        match &value.value {
+                            Value::SingleQuotedString(part) => part,
+                            _ => return Err(unsupported("La unidad temporal debe ser constante")),
+                        }
+                    }
+                    _ => return Err(unsupported("La unidad temporal debe ser constante")),
+                };
+                validate_date_part(part, parts)?;
+                continue;
+            }
             match arg {
                 FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => self.expr(expr)?,
                 FunctionArg::Unnamed(FunctionArgExpr::Wildcard) if name == "COUNT" => {}
                 _ => return Err(unsupported(&format!("Ese argumento de `{name}`"))),
+            }
+        }
+        Ok(())
+    }
+
+    fn window_spec(&mut self, spec: &WindowSpec) -> Result<(), Diagnostic> {
+        if spec.window_name.is_some() {
+            return Err(unsupported("Una ventana heredada con nombre"));
+        }
+        self.all(&spec.partition_by)?;
+        for order in &spec.order_by {
+            self.expr(&order.expr)?;
+        }
+        if let Some(frame) = &spec.window_frame {
+            if !matches!(
+                frame.units,
+                WindowFrameUnits::Rows | WindowFrameUnits::Range
+            ) {
+                return Err(unsupported("La unidad de marco GROUPS"));
+            }
+            self.window_bound(&frame.start_bound)?;
+            if let Some(end) = &frame.end_bound {
+                self.window_bound(end)?;
+            }
+            let end = frame
+                .end_bound
+                .as_ref()
+                .unwrap_or(&WindowFrameBound::CurrentRow);
+            if matches!(frame.start_bound, WindowFrameBound::Following(None))
+                || matches!(end, WindowFrameBound::Preceding(None))
+                || bound_order(&frame.start_bound) > bound_order(end)
+            {
+                return Err(unsupported("Los límites del marco están invertidos"));
+            }
+        }
+        Ok(())
+    }
+
+    fn window_bound(&mut self, bound: &WindowFrameBound) -> Result<(), Diagnostic> {
+        if let WindowFrameBound::Preceding(Some(expr)) | WindowFrameBound::Following(Some(expr)) =
+            bound
+        {
+            // Visit first so forbidden nodes cannot hide in a frame offset.
+            self.expr(expr)?;
+            if !matches!(expr.as_ref(), Expr::Value(value) if matches!(&value.value, Value::Number(n, false) if n.parse::<u64>().is_ok()))
+            {
+                return Err(unsupported(
+                    "El desplazamiento del marco debe ser un entero no negativo",
+                ));
             }
         }
         Ok(())
@@ -415,8 +576,111 @@ fn normalize(ident: &sqlparser::ast::Ident) -> String {
     match ident.quote_style {
         // A quoted identifier keeps its exact spelling.
         Some('"') => ident.value.clone(),
-        _ => normalize_identifier(&ident.value),
+        _ => ident.value.to_uppercase(),
     }
+}
+
+fn validate_identifier(value: &str, quote: Option<char>) -> Result<(), Diagnostic> {
+    let valid = match quote {
+        Some('"') => !value.is_empty(),
+        None => {
+            let mut chars = value.chars();
+            chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && chars.all(|c| c.is_alphanumeric() || c == '_')
+        }
+        _ => {
+            return Err(unsupported(
+                "Un identificador delimitado sin comillas dobles ANSI",
+            ));
+        }
+    };
+    if !valid || value.chars().count() > MAX_IDENTIFIER_CHARS {
+        return Err(Diagnostic::error(
+            Code::InvalidIdentifier,
+            "",
+            "Cada parte debe ser un identificador ANSI de 1 a 128 caracteres.",
+        ));
+    }
+    Ok(())
+}
+
+fn bound_order(bound: &WindowFrameBound) -> i128 {
+    match bound {
+        WindowFrameBound::CurrentRow => 0,
+        WindowFrameBound::Preceding(None) => i128::MIN,
+        WindowFrameBound::Following(None) => i128::MAX,
+        WindowFrameBound::Preceding(Some(expr)) | WindowFrameBound::Following(Some(expr)) => {
+            let n = match expr.as_ref() {
+                Expr::Value(value) => match &value.value {
+                    Value::Number(n, _) => i128::from(n.parse::<u64>().unwrap_or_default()),
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            if matches!(bound, WindowFrameBound::Preceding(_)) {
+                -n
+            } else {
+                n
+            }
+        }
+    }
+}
+
+const ARITHMETIC_PARTS: &[&str] = &[
+    "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "HOUR", "MINUTE", "SECOND",
+];
+const EXTRACTION_PARTS: &[&str] = &[
+    "YEAR",
+    "QUARTER",
+    "MONTH",
+    "WEEK",
+    "DAY",
+    "DAYOFWEEK",
+    "DAYOFYEAR",
+    "HOUR",
+    "MINUTE",
+    "SECOND",
+    "MILLISECOND",
+];
+
+fn validate_date_part(part: &str, allowed: &[&str]) -> Result<(), Diagnostic> {
+    if allowed.contains(&part.to_uppercase().as_str()) {
+        Ok(())
+    } else {
+        Err(unsupported(&format!("La unidad temporal `{part}`")))
+    }
+}
+
+fn validate_signature(
+    function: &Function,
+    name: &str,
+    args: &[&FunctionArg],
+    distinct: bool,
+) -> Result<(), Diagnostic> {
+    let (min, max) = arity(name).ok_or_else(|| unknown_function(name))?;
+    if !(min..=max).contains(&args.len()) {
+        return Err(unsupported(&format!("La aridad de `{name}`")));
+    }
+    if distinct && !matches!(name, "SUM" | "COUNT") {
+        return Err(unsupported(&format!("DISTINCT en `{name}`")));
+    }
+    for arg in args {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(_)) => {}
+            FunctionArg::Unnamed(FunctionArgExpr::Wildcard) if name == "COUNT" && !distinct => {}
+            _ => return Err(unsupported(&format!("Ese argumento de `{name}`"))),
+        }
+    }
+    if is_ordered_set(name) {
+        if function.within_group.len() != 1 {
+            return Err(unsupported(
+                "Un percentil exige WITHIN GROUP con una expresión de orden",
+            ));
+        }
+    } else if !function.within_group.is_empty() {
+        return Err(unsupported(&format!("WITHIN GROUP en `{name}`")));
+    }
+    Ok(())
 }
 
 fn function_name(function: &Function) -> Result<String, Diagnostic> {
@@ -476,6 +740,7 @@ fn allowed_cast_target(data_type: &DataType) -> bool {
         "BOOLEAN",
         "DATE",
         "TIMESTAMP",
+        "TIMESTAMP_NTZ",
         "TIME",
     ]
     .contains(&base)
@@ -521,87 +786,74 @@ const WINDOW_FUNCTIONS: &[&str] = &[
     "NTH_VALUE",
 ];
 
-/// REQUIRED and RECOMMENDED scalar functions. `EXTRACT`, `POSITION`,
-/// `SUBSTRING`, `TRIM`, `CEIL`/`FLOOR` and `CAST` arrive as their own syntax.
-const SCALAR_FUNCTIONS: &[&str] = &[
-    // Date and time.
-    "CURRENT_DATE",
-    "CURRENT_TIMESTAMP",
-    "CURRENT_TIME",
-    "YEAR",
-    "QUARTER",
-    "MONTH",
-    "DAY",
-    "DAYOFYEAR",
-    "HOUR",
-    "MINUTE",
-    "SECOND",
-    "DATE_PART",
-    "DATE_TRUNC",
-    "DATEADD",
-    "DATEDIFF",
-    "TO_DATE",
-    "TO_TIMESTAMP",
-    // Strings.
-    "CONCAT",
-    "LENGTH",
-    "LOWER",
-    "UPPER",
-    "TRIM",
-    "LTRIM",
-    "RTRIM",
-    "LEFT",
-    "RIGHT",
-    "SUBSTRING",
-    "REPLACE",
-    "SPLIT_PART",
-    "POSITION",
-    "CHARINDEX",
-    "CONTAINS",
-    "STARTSWITH",
-    "ENDSWITH",
-    "REGEXP_LIKE",
-    "REGEXP_EXTRACT",
-    "REGEXP_REPLACE",
-    "REGEXP_COUNT",
-    // Mathematics.
-    "ABS",
-    "ROUND",
-    "FLOOR",
-    "CEIL",
-    "CEILING",
-    "TRUNC",
-    "TRUNCATE",
-    "MOD",
-    "SIGN",
-    "POWER",
-    "SQRT",
-    "EXP",
-    "LN",
-    "LOG",
-    "LOG10",
-    "SIN",
-    "COS",
-    "TAN",
-    "ASIN",
-    "ACOS",
-    "ATAN",
-    "ATAN2",
-    "RADIANS",
-    "DEGREES",
-    "PI",
-    "GREATEST",
-    "LEAST",
-    // Conditionals.
-    "IF",
-    "IFF",
-    "NULLIF",
-    "COALESCE",
-    "IFNULL",
-    "NVL",
-    "NVL2",
-    "ZEROIFNULL",
-    "NULLIFZERO",
-    // Conversion.
-    "TRY_CAST",
-];
+/// Portable signatures. Optional SQL arguments are bounded; vendor format
+/// models for `TO_DATE`/`TO_TIMESTAMP` remain outside this language.
+fn arity(name: &str) -> Option<(usize, usize)> {
+    Some(match name {
+        "CURRENT_DATE" | "CURRENT_TIMESTAMP" | "CURRENT_TIME" | "PI" | "ROW_NUMBER" | "RANK"
+        | "DENSE_RANK" | "PERCENT_RANK" | "CUME_DIST" => (0, 0),
+        "SUM"
+        | "COUNT"
+        | "AVG"
+        | "MIN"
+        | "MAX"
+        | "STDDEV"
+        | "STDDEV_POP"
+        | "STDDEV_SAMP"
+        | "VARIANCE"
+        | "VAR_POP"
+        | "VAR_SAMP"
+        | "MEDIAN"
+        | "PERCENTILE_CONT"
+        | "PERCENTILE_DISC"
+        | "APPROX_COUNT_DISTINCT"
+        | "YEAR"
+        | "QUARTER"
+        | "MONTH"
+        | "DAY"
+        | "DAYOFYEAR"
+        | "HOUR"
+        | "MINUTE"
+        | "SECOND"
+        | "TO_DATE"
+        | "TO_TIMESTAMP"
+        | "LENGTH"
+        | "LOWER"
+        | "UPPER"
+        | "TRIM"
+        | "LTRIM"
+        | "RTRIM"
+        | "ABS"
+        | "FLOOR"
+        | "CEIL"
+        | "CEILING"
+        | "SIGN"
+        | "SQRT"
+        | "EXP"
+        | "LN"
+        | "LOG10"
+        | "SIN"
+        | "COS"
+        | "TAN"
+        | "ASIN"
+        | "ACOS"
+        | "ATAN"
+        | "RADIANS"
+        | "DEGREES"
+        | "ZEROIFNULL"
+        | "NULLIFZERO"
+        | "NTILE"
+        | "FIRST_VALUE"
+        | "LAST_VALUE" => (1, 1),
+        "APPROX_PERCENTILE" | "DATE_PART" | "DATE_TRUNC" | "LEFT" | "RIGHT" | "POSITION"
+        | "CHARINDEX" | "CONTAINS" | "STARTSWITH" | "ENDSWITH" | "REGEXP_LIKE"
+        | "REGEXP_EXTRACT" | "REGEXP_COUNT" | "MOD" | "POWER" | "LOG" | "ATAN2" | "NULLIF"
+        | "IFNULL" | "NVL" | "NTH_VALUE" => (2, 2),
+        "DATEADD" | "DATEDIFF" | "SUBSTRING" | "REPLACE" | "SPLIT_PART" | "REGEXP_REPLACE"
+        | "IF" | "IFF" | "NVL2" => (3, 3),
+        "ROUND" | "TRUNC" | "TRUNCATE" => (1, 2),
+        "LAG" | "LEAD" => (1, 3),
+        "CONCAT" | "GREATEST" | "LEAST" | "COALESCE" => (2, usize::MAX),
+        _ => return None,
+    })
+}
