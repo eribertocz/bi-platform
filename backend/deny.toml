@@ -48,6 +48,8 @@ allow-wildcard-paths = true
 # transport, storage and engine crates, and no module may depend on an
 # adapter. A crate added here without its wrapper fails the build.
 deny = [
+    { crate = "aws-lc-rs", reason = "rustls uses ring exclusively; a second provider adds native compilation and ambiguous TLS initialization (#55)." },
+    { crate = "aws-lc-sys", reason = "AWS-LC C/assembly must not return through transitive TLS features; ring is the selected rustls provider (#55)." },
     # HTTP transport and its contract generator: the server only.
     { crate = "axum", wrappers = ["bi-server"] },
     { crate = "utoipa", wrappers = ["bi-server"] },

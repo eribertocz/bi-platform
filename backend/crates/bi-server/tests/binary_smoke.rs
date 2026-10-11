@@ -85,14 +85,24 @@ fn rejects_invalid_configuration() {
 
 #[test]
 fn invalid_optional_metrics_configuration_does_not_prevent_startup() {
+    starts_with_optional_metrics("http://[invalid", false);
+}
+
+#[test]
+fn https_optional_metrics_does_not_panic_at_startup() {
+    starts_with_optional_metrics("https://127.0.0.1:1", true);
+}
+
+fn starts_with_optional_metrics(endpoint: &str, valid: bool) {
     let port = free_port();
+    let log = tempfile::NamedTempFile::new().unwrap();
     let child = Command::new(BINARY)
         .env("BI_BIND_ADDR", format!("127.0.0.1:{port}"))
         .env("BI_DATABASE_URL", "postgres://bi:bi@127.0.0.1:1/bi")
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://[invalid")
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("RUST_LOG", "warn")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log.as_file().try_clone().unwrap()))
+        .stderr(Stdio::from(log.as_file().try_clone().unwrap()))
         .spawn()
         .unwrap();
     let _server = Server(child);
@@ -108,6 +118,13 @@ fn invalid_optional_metrics_configuration_does_not_prevent_startup() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    let log = std::fs::read_to_string(log.path()).unwrap();
+    assert!(!log.contains("panicked"), "{log}");
+    assert_eq!(
+        log.contains("metrics_exporter_setup_failed"),
+        !valid,
+        "{log}"
+    );
 }
 
 #[test]
