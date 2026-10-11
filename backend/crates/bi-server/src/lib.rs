@@ -1,9 +1,11 @@
 //! bi-platform API server: Axum HTTP layer over the modular monolith.
 
+pub mod auth;
 pub mod config;
 pub mod db;
 pub mod health;
 pub mod openapi;
+pub mod problem;
 mod static_files;
 pub mod telemetry;
 
@@ -24,6 +26,17 @@ use crate::db::Database;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
+    pub auth: auth::AuthConfig,
+}
+
+impl AppState {
+    #[must_use]
+    pub fn new(db: Database) -> Self {
+        Self {
+            db,
+            auth: auth::AuthConfig::default(),
+        }
+    }
 }
 
 /// Builds the HTTP application: routes plus request-id and tracing layers.
@@ -34,34 +47,38 @@ pub fn router(state: AppState) -> Router {
 /// Builds the same-origin application, optionally serving a frontend build.
 pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let app = Router::new()
+        .merge(auth::routes())
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
-        .with_state(state);
+        .with_state(state.clone());
     let app = if let Some(directory) = static_dir {
         app.fallback(move |request| static_files::serve(directory.clone(), request))
     } else {
         app
     };
-    app
-        // Layers run bottom-up on requests: the id is set before the trace span
-        // reads it, and copied to the response on the way out.
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(
-            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
-                let request_id = request
-                    .extensions()
-                    .get::<RequestId>()
-                    .and_then(|id| id.header_value().to_str().ok())
-                    .unwrap_or_default();
-                tracing::info_span!(
-                    "http_request",
-                    method = %request.method(),
-                    path = %request.uri().path(),
-                    request_id,
-                )
-            }),
-        )
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+    app.layer(axum::middleware::from_fn_with_state(
+        state,
+        auth::enforce_session,
+    ))
+    // Layers run bottom-up on requests: the id is set before the trace span
+    // reads it, and copied to the response on the way out.
+    .layer(PropagateRequestIdLayer::x_request_id())
+    .layer(
+        TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+            let request_id = request
+                .extensions()
+                .get::<RequestId>()
+                .and_then(|id| id.header_value().to_str().ok())
+                .unwrap_or_default();
+            tracing::info_span!(
+                "http_request",
+                method = %request.method(),
+                path = %request.uri().path(),
+                request_id,
+            )
+        }),
+    )
+    .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
 
 /// Serves `app` on `listener` until `shutdown` resolves, then lets in-flight

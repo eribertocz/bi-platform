@@ -21,7 +21,7 @@ fn fixture() -> (TempDir, Router) {
         std::fs::write(path, contents).unwrap();
     }
     let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
-    let app = router_with_static(AppState { db }, Some(directory.path().to_owned()));
+    let app = router_with_static(AppState::new(db), Some(directory.path().to_owned()));
     (directory, app)
 }
 
@@ -203,7 +203,7 @@ async fn health_stays_json_with_frontend_enabled() {
 async fn missing_build_does_not_synthesize_a_shell() {
     let (directory, _app) = fixture();
     let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
-    let app = router_with_static(AppState { db }, Some(directory.path().join("missing")));
+    let app = router_with_static(AppState::new(db), Some(directory.path().join("missing")));
     let response = app
         .oneshot(
             Request::get("/estado")

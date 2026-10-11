@@ -74,7 +74,13 @@ async fn run() -> ExitCode {
     };
     tracing::info!(addr = %config.bind_addr, "listening");
 
-    let app = router_with_static(AppState { db: db.clone() }, config.static_dir);
+    let app = router_with_static(
+        AppState {
+            db: db.clone(),
+            auth: config.auth,
+        },
+        config.static_dir,
+    );
     let result = serve(listener, app, shutdown_signal()).await;
     db.pool().close().await;
 

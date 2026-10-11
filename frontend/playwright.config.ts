@@ -8,7 +8,7 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 15_000 },
   use: {
-    baseURL: 'http://127.0.0.1:8080',
+    baseURL: process.env.BI_E2E_BASE_URL ?? 'http://127.0.0.1:8080',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },

@@ -6,6 +6,214 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/dev/login": {
+      "post": {
+        "tags": [
+          "development"
+        ],
+        "description": "Solo feature dev-auth. Requiere Origin configurado; selecciona identidad sintética sin contraseña. Rota la sesión anterior.",
+        "operationId": "devLogin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevLogin"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Sesión creada; cookie HttpOnly SameSite=Strict y Secure con HTTPS",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud JSON inválida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Usuario no configurado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin ausente o distinto al configurado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Login de desarrollo deshabilitado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No se pudo crear la sesión",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/dev/users": {
+      "get": {
+        "tags": [
+          "development"
+        ],
+        "description": "Solo feature dev-auth con BI_DEV_USERS configurado; únicamente fixtures sintéticos.",
+        "operationId": "getDevUsers",
+        "responses": {
+          "200": {
+            "description": "Identidades sintéticas configuradas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/User"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Login de desarrollo deshabilitado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/logout": {
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "Sesión revocada y cookie eliminada"
+          },
+          "401": {
+            "description": "Sin sesión válida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin ausente o distinto al configurado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "PostgreSQL no disponible",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "operationId": "getSession",
+        "responses": {
+          "200": {
+            "description": "Sesión verificada por el servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión válida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "PostgreSQL no disponible",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/health/live": {
       "get": {
         "tags": [
@@ -61,6 +269,25 @@
   },
   "components": {
     "schemas": {
+      "DataScope": {
+        "type": "string",
+        "enum": [
+          "synthetic"
+        ]
+      },
+      "DevLogin": {
+        "type": "object",
+        "required": [
+          "user_id"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "description": "Selects a configured synthetic identity; this is not password authentication."
+          }
+        },
+        "additionalProperties": false
+      },
       "Health": {
         "type": "object",
         "required": [
@@ -107,7 +334,92 @@
           "degraded",
           "unavailable"
         ]
+      },
+      "Problem": {
+        "type": "object",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]+$"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "maximum": 599,
+            "minimum": 400
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "user",
+          "data_scope",
+          "expires_at"
+        ],
+        "properties": {
+          "data_scope": {
+            "$ref": "#/components/schemas/DataScope",
+            "description": "Server-derived restriction. This session grants no access to real sources."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "additionalProperties": false
+      },
+      "User": {
+        "type": "object",
+        "required": [
+          "id",
+          "display_name"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "bi_session"
       }
     }
-  }
+  },
+  "security": []
 }

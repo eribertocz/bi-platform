@@ -3,7 +3,7 @@
 
 use utoipa::OpenApi;
 
-use crate::health;
+use crate::{auth, health};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -12,9 +12,28 @@ use crate::health;
         description = "Contrato HTTP vigente. Única fuente de tipos para servidor y cliente.",
         version = "0.1.0"
     ),
-    paths(health::live, health::ready)
+    paths(health::live, health::ready, auth::current, auth::logout, auth::dev_login, auth::dev_users),
+    components(schemas(crate::problem::Problem)),
+    security(),
+    modifiers(&SessionSecurity)
 )]
 struct ApiDoc;
+
+struct SessionSecurity;
+
+impl utoipa::Modify for SessionSecurity {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
+        openapi
+            .components
+            .as_mut()
+            .expect("schemas exist")
+            .add_security_scheme(
+                "sessionCookie",
+                SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new("bi_session"))),
+            );
+    }
+}
 
 /// The `OpenAPI` document served by this crate.
 #[must_use]

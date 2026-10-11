@@ -39,7 +39,7 @@ fn health(status: HealthStatus, postgres: HealthStatus, migrations: HealthStatus
 #[sqlx::test(migrations = false)]
 async fn ready_after_migrations_are_applied(pool: PgPool) {
     let db = migrated_database(pool.clone()).await;
-    let (status, body) = get_health(&router(AppState { db }), "/health/ready").await;
+    let (status, body) = get_health(&router(AppState::new(db)), "/health/ready").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
@@ -66,14 +66,14 @@ async fn migrations_are_idempotent_across_restarts(pool: PgPool) {
     migrated_database(pool.clone()).await;
     // A restarted API finds every migration applied and becomes ready.
     let db = migrated_database(pool).await;
-    let (status, _) = get_health(&router(AppState { db }), "/health/ready").await;
+    let (status, _) = get_health(&router(AppState::new(db)), "/health/ready").await;
     assert_eq!(status, StatusCode::OK);
 }
 
 #[sqlx::test(migrations = false)]
 async fn ready_turns_unavailable_when_database_is_lost(pool: PgPool) {
     let db = migrated_database(pool.clone()).await;
-    let app = router(AppState { db });
+    let app = router(AppState::new(db));
     pool.close().await;
 
     let (status, body) = get_health(&app, "/health/ready").await;
