@@ -1,0 +1,28 @@
+[package]
+name = "sef-model-ir"
+description = "Engine-neutral canonical semantic model (CSMIR) of the Semantic Execution Fabric"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+# Canonical hashing pins its encoder and digest: changing them changes every
+# semantic fingerprint (docs/semantica/adr/0001-sef-canonical-value-v1.md).
+[dependencies]
+ciborium = "=0.2.2"
+semver = "=1.0.27"
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+proptest = "1.12.0"
+
+# SEF's original lint policy, kept while the code is imported unchanged.
+# Aligning it with the workspace's pedantic set is a separate change.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
