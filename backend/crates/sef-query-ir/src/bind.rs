@@ -80,16 +80,30 @@ struct Binder<'m> {
     roles: BTreeSet<&'m str>,
 }
 
-/// A name's match against one object.
-fn matches(metadata: &ObjectMetadata, name: &str) -> bool {
-    let id = metadata.id().as_str();
+/// The objects a name designates (§14.3): an exact stable ID wins outright
+/// and never competes with labels; only a name that is no ID is looked up
+/// by label (case-insensitive) or by the ID's final segment.
+fn resolve<'m>(
+    objects: impl Iterator<Item = &'m ObjectMetadata> + Clone,
+    name: &str,
+) -> BTreeSet<&'m StableId> {
+    if let Some(exact) = objects
+        .clone()
+        .find(|metadata| metadata.id().as_str() == name)
+    {
+        return BTreeSet::from([exact.id()]);
+    }
     let lowered = name.to_lowercase();
-    id == name
-        || metadata
-            .label
-            .as_deref()
-            .is_some_and(|label| label.to_lowercase() == lowered)
-        || id.rsplit('/').next() == Some(lowered.as_str())
+    objects
+        .filter(|metadata| {
+            metadata
+                .label
+                .as_deref()
+                .is_some_and(|label| label.to_lowercase() == lowered)
+                || metadata.id().as_str().rsplit('/').next() == Some(lowered.as_str())
+        })
+        .map(ObjectMetadata::id)
+        .collect()
 }
 
 impl Binder<'_> {
@@ -268,23 +282,23 @@ impl Binder<'_> {
                     None => None,
                 };
                 let calendar = match calendar {
-                    Some(name) => {
-                        let found = self
-                            .model
-                            .calendars
-                            .iter()
-                            .find(|candidate| matches(&candidate.metadata, name))
-                            .map(|candidate| candidate.metadata.id().clone());
-                        if found.is_none() {
-                            self.error(
-                                Code::InvalidLiteral,
-                                format!("{path}/calendar"),
-                                format!("El modelo no declara el calendario {name:?}."),
-                            );
-                            return None;
-                        }
-                        found
-                    }
+                    // A label two calendars share is ambiguous: their weeks
+                    // differ, so picking one would change the answer.
+                    Some(name) => Some(
+                        self.one(
+                            resolve(
+                                self.model
+                                    .calendars
+                                    .iter()
+                                    .map(|calendar| &calendar.metadata),
+                                name,
+                            ),
+                            name,
+                            &format!("{path}/calendar"),
+                            Code::InvalidLiteral,
+                            "el calendario",
+                        )?,
+                    ),
                     None => None,
                 };
                 Some(SelectionItem::TimeDimension(TimeDimensionSelection {
@@ -298,14 +312,11 @@ impl Binder<'_> {
     }
 
     fn metric(&mut self, name: &str, path: &str) -> Option<StableId> {
-        let found: BTreeSet<&StableId> = self
-            .model
-            .metrics
-            .iter()
-            .filter(|metric| matches(&metric.metadata, name))
-            .map(|metric| metric.metadata.id())
-            .collect();
-        self.one(found, name, path, Code::UnknownMetric, "métrica")
+        let found = resolve(
+            self.model.metrics.iter().map(|metric| &metric.metadata),
+            name,
+        );
+        self.one(found, name, path, Code::UnknownMetric, "la métrica")
     }
 
     fn dimension(
@@ -313,19 +324,19 @@ impl Binder<'_> {
         dimension: &UnboundDimension,
         path: &str,
     ) -> Option<QualifiedDimensionRef> {
-        let found: BTreeSet<&StableId> = self
-            .model
-            .dimensions
-            .iter()
-            .filter(|candidate| matches(&candidate.metadata, &dimension.name))
-            .map(|candidate| candidate.metadata.id())
-            .collect();
+        let found = resolve(
+            self.model
+                .dimensions
+                .iter()
+                .map(|candidate| &candidate.metadata),
+            &dimension.name,
+        );
         let id = self.one(
             found,
             &dimension.name,
             path,
             Code::UnknownDimension,
-            "dimensión",
+            "la dimensión",
         )?;
         let mut roles = Vec::with_capacity(dimension.roles.len());
         for (r, role) in dimension.roles.iter().enumerate() {
@@ -368,7 +379,7 @@ impl Binder<'_> {
                 self.error(
                     unknown,
                     path,
-                    format!("El modelo no tiene la {what} {name:?}."),
+                    format!("El modelo no tiene {what} {name:?}."),
                 );
                 None
             }
@@ -377,7 +388,7 @@ impl Binder<'_> {
                     Code::AmbiguousName,
                     path,
                     format!(
-                        "{name:?} nombra varias {what}s ({first}, {second}…); usa su \
+                        "{name:?} nombra más de un objeto ({first}, {second}…); usa su \
                          identificador estable."
                     ),
                 );
@@ -561,12 +572,7 @@ fn typed(value: &Value, value_type: &ValueType) -> Result<Literal, (Code, String
         (Value::Number(text), ValueType::Decimal(decimal)) => {
             decimal_at(text, *decimal).map_err(invalid)
         }
-        (Value::Number(text), ValueType::Float { .. }) => text
-            .parse::<f64>()
-            .ok()
-            .and_then(|value| FiniteFloat::new(value).ok())
-            .map(Literal::Float)
-            .ok_or_else(|| invalid(format!("{text:?} no es un número finito."))),
+        (Value::Number(text), ValueType::Float { bits }) => float(text, *bits).map_err(invalid),
         (_, ValueType::Timestamp { .. }) => Err(invalid(
             "Los filtros por fecha y hora llegarán con su contrato de zona horaria; filtra por \
              una dimensión de fecha."
@@ -601,29 +607,72 @@ fn integer(text: &str, signed: bool, bits: u16) -> Result<Literal, String> {
     }
     let digits = if integer.is_empty() { "0" } else { integer };
     let out_of_range = || format!("{text} no cabe en un entero de {bits} bits.");
+    // A CSMIR literal holds 64 bits (`Literal::SignedInteger(i64)`,
+    // `UnsignedInteger(u64)`): a value that fits a wider destination but not
+    // 64 bits is refused, never narrowed.
+    let wider = || {
+        format!(
+            "{text} cabe en su destino de {bits} bits, pero un literal de CSMIR tiene 64 bits:              ese valor no se puede usar como filtro."
+        )
+    };
     if signed {
         let value: i128 = format!("{}{digits}", if negative { "-" } else { "" })
             .parse()
             .map_err(|_| out_of_range())?;
-        let limit = 1_i128 << (bits.min(64) - 1);
-        if value < -limit || value >= limit {
-            return Err(out_of_range());
+        if bits < 128 {
+            let limit = 1_i128 << (bits - 1);
+            if value < -limit || value >= limit {
+                return Err(out_of_range());
+            }
         }
         i64::try_from(value)
             .map(Literal::SignedInteger)
-            .map_err(|_| out_of_range())
+            .map_err(|_| wider())
     } else {
         if negative && digits.bytes().any(|b| b != b'0') {
             return Err(out_of_range());
         }
         let value: u128 = digits.parse().map_err(|_| out_of_range())?;
-        if bits < 128 && value >> bits.min(64) != 0 {
+        if bits < 128 && value >> bits != 0 {
             return Err(out_of_range());
         }
         u64::try_from(value)
             .map(Literal::UnsignedInteger)
-            .map_err(|_| out_of_range())
+            .map_err(|_| wider())
     }
+}
+
+/// A literal compared with a float column means the value of the column's
+/// width nearest to it, as `CAST(literal AS FLOAT)` would: rounded to the
+/// nearest of that width. A value that overflows to infinity, or a non-zero
+/// value that underflows to zero, would change the comparison and is
+/// refused; NaN and infinities are never literals.
+fn float(text: &str, bits: u16) -> Result<Literal, String> {
+    let value = text
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("{text:?} no es un número finito."))?;
+    let value = if bits == 32 {
+        #[allow(clippy::cast_possible_truncation)] // the narrowing is the point
+        let narrowed = value as f32;
+        if narrowed.is_infinite() {
+            return Err(format!(
+                "{text} desborda un número de coma flotante de 32 bits."
+            ));
+        }
+        if narrowed == 0.0 && value != 0.0 {
+            return Err(format!(
+                "{text} es demasiado pequeño para un número de 32 bits: se volvería 0."
+            ));
+        }
+        f64::from(narrowed)
+    } else {
+        value
+    };
+    FiniteFloat::new(value)
+        .map(Literal::Float)
+        .map_err(|_| format!("{text:?} no es un número finito."))
 }
 
 fn decimal_at(text: &str, decimal: DecimalType) -> Result<Literal, String> {
@@ -649,4 +698,106 @@ fn decimal_at(text: &str, decimal: DecimalType) -> Result<Literal, String> {
                 decimal.scale()
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic)]
+
+    use super::{Literal, float, integer};
+
+    fn widths() -> impl Iterator<Item = u16> {
+        [8_u16, 16, 32, 64, 128].into_iter()
+    }
+
+    /// Every width and sign accepts exactly its range: the extremes bind,
+    /// one step beyond is out of range. Above 64 bits a value that fits its
+    /// destination is refused explicitly, because a CSMIR literal has 64.
+    #[test]
+    fn integers_bind_exactly_the_declared_range() {
+        for bits in widths() {
+            let (min, max) = if bits == 128 {
+                (i128::MIN, i128::MAX)
+            } else {
+                (-(1_i128 << (bits - 1)), (1_i128 << (bits - 1)) - 1)
+            };
+            for (text, fits_64) in [
+                (min.to_string(), i64::try_from(min).is_ok()),
+                (max.to_string(), i64::try_from(max).is_ok()),
+            ] {
+                match integer(&text, true, bits) {
+                    Ok(Literal::SignedInteger(value)) => {
+                        assert!(fits_64, "INT{bits} {text}");
+                        assert_eq!(value.to_string(), text);
+                    }
+                    Err(message) => {
+                        assert!(
+                            !fits_64 && message.contains("cabe en su destino"),
+                            "{message}"
+                        );
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            if bits < 128 {
+                for outside in [min - 1, max + 1] {
+                    let message = integer(&outside.to_string(), true, bits).expect_err("outside");
+                    assert!(
+                        message.contains("no cabe"),
+                        "INT{bits} {outside}: {message}"
+                    );
+                }
+            }
+            let umax = if bits == 128 {
+                u128::MAX
+            } else {
+                (1_u128 << bits) - 1
+            };
+            match integer(&umax.to_string(), false, bits) {
+                Ok(Literal::UnsignedInteger(value)) => assert_eq!(u128::from(value), umax),
+                Err(message) => assert!(
+                    bits == 128 && message.contains("cabe en su destino"),
+                    "{message}"
+                ),
+                other => panic!("{other:?}"),
+            }
+            if bits < 128 {
+                let message = integer(&(umax + 1).to_string(), false, bits).expect_err("outside");
+                assert!(message.contains("no cabe"), "UINT{bits}: {message}");
+            }
+            assert!(integer("-1", false, bits).is_err(), "UINT{bits} -1");
+        }
+        // The reviewer's values: they fit 128 bits, so the refusal says why.
+        for (text, signed) in [
+            ("9223372036854775808", true),
+            ("18446744073709551616", false),
+        ] {
+            let message = integer(text, signed, 128).expect_err("wider than a literal");
+            assert!(message.contains("64 bits"), "{message}");
+        }
+        assert!(integer("340282366920938463463374607431768211456", false, 128).is_err());
+    }
+
+    #[test]
+    fn a_float32_literal_is_its_nearest_float32_or_refused() {
+        // Rounded as `CAST(0.1 AS FLOAT)`: the column's own value.
+        let Ok(Literal::Float(value)) = float("0.1", 32) else {
+            panic!("0.1 is a float32");
+        };
+        assert_eq!(value.value(), f64::from(0.1_f32));
+        let Ok(Literal::Float(value)) = float("0.1", 64) else {
+            panic!("0.1 is a float64");
+        };
+        assert!((value.value() - 0.1).abs() < f64::EPSILON);
+        let largest = f64::from(f32::MAX).to_string();
+        assert!(float(&largest, 32).is_ok(), "FLOAT32 max");
+        for refused in ["1e100", "-1e100", "1e-50", "NaN", "inf", "-inf"] {
+            assert!(float(refused, 32).is_err(), "FLOAT32 {refused}");
+        }
+        assert!(float("1e100", 64).is_ok(), "FLOAT64 holds 1e100");
+        assert!(float("0", 32).is_ok() && float("-0.0", 32).is_ok());
+        for refused in ["NaN", "inf", "1e400"] {
+            assert!(float(refused, 64).is_err(), "FLOAT64 {refused}");
+        }
+    }
 }

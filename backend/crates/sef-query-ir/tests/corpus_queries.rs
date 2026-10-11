@@ -35,6 +35,10 @@ fn dimension(name: &str) -> UnboundSelection {
 }
 
 fn bucket(selection: &str, name: &str, grain: TimeGrain) -> UnboundSelection {
+    zoned(selection, name, grain, None)
+}
+
+fn zoned(selection: &str, name: &str, grain: TimeGrain, zone: Option<&str>) -> UnboundSelection {
     UnboundSelection {
         selection_id: selection.to_owned(),
         item: UnboundItem::TimeDimension {
@@ -43,7 +47,7 @@ fn bucket(selection: &str, name: &str, grain: TimeGrain) -> UnboundSelection {
                 roles: Vec::new(),
             },
             grain,
-            timezone: None,
+            timezone: zone.map(str::to_owned),
             calendar: None,
         },
         output_label: None,
@@ -109,7 +113,12 @@ fn request(case: u8) -> UnboundQuerySet {
             dimension("region"),
         ]),
         11 => query(vec![metric("allocated_revenue"), dimension("campaign")]),
-        12 => query(vec![metric("revenue"), dimension("month")]),
+        // The month and business-day dimensions are the corpus's governed
+        // time dimensions; the request buckets them, stating its zone.
+        12 => query(vec![
+            metric("revenue"),
+            zoned("month", "month", TimeGrain::Month, Some("UTC")),
+        ]),
         13 => query(vec![metric("revenue"), dimension("historical_region")]),
         14 => query(vec![
             metric("amount_sum"),
@@ -125,7 +134,15 @@ fn request(case: u8) -> UnboundQuerySet {
             dimension("month"),
             dimension("category"),
         ]),
-        19 => query(vec![metric("revenue"), dimension("business_day")]),
+        19 => query(vec![
+            metric("revenue"),
+            zoned(
+                "day",
+                "business_day",
+                TimeGrain::Day,
+                Some("America/La_Paz"),
+            ),
+        ]),
         // Collapsing the snapshot axis is a temporal rejection of the
         // correctness engine, not of binding.
         20 => query(vec![metric("balance")]),
@@ -193,6 +210,34 @@ fn a_time_bucket_is_part_of_the_requested_grain() {
         atom,
         RequestedAtom::TimeBucket(time) if time.grain == TimeGrain::Month
     )));
+}
+
+#[test]
+fn time_conversion_requests_bucket_with_their_zone() {
+    // §17: CASE-012 asks for calendar months in UTC; CASE-019 for days in
+    // America/La_Paz. Both are time buckets with an explicit zone, so the
+    // correctness engine sees the requested zone, not a prederived column.
+    for (case, grain, zone) in [
+        (12, TimeGrain::Month, "UTC"),
+        (19, TimeGrain::Day, "America/La_Paz"),
+    ] {
+        let query = bound(case);
+        let atoms = query.blocks[0].requested_grain();
+        assert!(
+            matches!(atoms.as_slice(), [RequestedAtom::TimeBucket(time)]
+                if time.grain == grain
+                    && time.timezone.as_ref().map(|zone| zone.as_str()) == Some(zone)),
+            "CASE-{case:03}: {atoms:?}"
+        );
+    }
+    // The governed dimensions still bind as plain dimensions too.
+    for (case, name) in [(12, "month"), (19, "business_day")] {
+        bind(
+            &query(vec![metric("revenue"), dimension(name)]),
+            &common::model(case),
+        )
+        .unwrap_or_else(|errors| panic!("CASE-{case:03}: {errors:#?}"));
+    }
 }
 
 #[test]

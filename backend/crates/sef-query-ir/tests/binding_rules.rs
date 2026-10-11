@@ -6,9 +6,9 @@ mod common;
 
 use proptest::prelude::*;
 use sef_model_ir::expressions::ComparisonOp;
-use sef_model_ir::identity::StableId;
-use sef_model_ir::model::ModelDefinition;
-use sef_model_ir::time::TimeGrain;
+use sef_model_ir::identity::{ObjectIdentity, StableId};
+use sef_model_ir::model::{CalendarDefinition, ModelDefinition, ObjectMetadata};
+use sef_model_ir::time::{CalendarProfile, TimeGrain};
 use sef_model_ir::types::Literal;
 use sef_query_ir::query::{FilterExpr, SelectionItem, SemanticQuerySet};
 use sef_query_ir::unbound::{
@@ -156,6 +156,94 @@ fn unknown_and_ambiguous_names_are_rejected() {
         &model,
         Code::AmbiguousName,
         "/blocks/0/selections/0",
+    );
+}
+
+#[test]
+fn an_exact_stable_id_never_competes_with_labels() {
+    // Another metric labelled with revenue's stable ID (§14.3).
+    let mut model = common::model(1);
+    let revenue = model
+        .metrics
+        .iter()
+        .find(|metric| metric.metadata.id().as_str() == "corpus/metric/revenue")
+        .expect("revenue")
+        .clone();
+    let mut impostor = revenue.clone();
+    impostor.metadata.identity.stable_id = StableId::new("corpus/metric/other").expect("id");
+    impostor.metadata.label = Some("corpus/metric/revenue".to_owned());
+    model.metrics.push(impostor);
+    for name in ["corpus/metric/revenue", "revenue"] {
+        let query = one(UnboundBlock {
+            block_id: "result".to_owned(),
+            selections: vec![metric(name)],
+            ..UnboundBlock::default()
+        });
+        let bound = bound(&query, &model);
+        assert!(
+            matches!(&bound.blocks[0].selections[0].item,
+                SelectionItem::Metric(id) if id.as_str() == "corpus/metric/revenue"),
+            "{name}"
+        );
+    }
+    // A name that is no ID still sees both: the other metric's final segment.
+    let query = one(UnboundBlock {
+        block_id: "result".to_owned(),
+        selections: vec![metric("other")],
+        ..UnboundBlock::default()
+    });
+    bound(&query, &model);
+}
+
+#[test]
+fn a_calendar_label_two_calendars_share_is_ambiguous() {
+    let mut model = common::model(7);
+    let version = model.metrics[0].metadata.identity.semantic_version.clone();
+    for (id, profile) in [
+        ("corpus/calendar/a", CalendarProfile::Gregorian),
+        ("corpus/calendar/b", CalendarProfile::IsoWeek),
+    ] {
+        let mut metadata = ObjectMetadata::new(ObjectIdentity {
+            stable_id: StableId::new(id).expect("id"),
+            semantic_version: version.clone(),
+        });
+        metadata.label = Some("business".to_owned());
+        model
+            .calendars
+            .push(CalendarDefinition { metadata, profile });
+    }
+    let weekly = |calendar: &str| {
+        one(UnboundBlock {
+            block_id: "result".to_owned(),
+            selections: vec![
+                metric("balance"),
+                UnboundSelection {
+                    selection_id: "week".to_owned(),
+                    item: UnboundItem::TimeDimension {
+                        dimension: dimension("snapshot_date"),
+                        grain: TimeGrain::Week,
+                        timezone: None,
+                        calendar: Some(calendar.to_owned()),
+                    },
+                    output_label: None,
+                },
+            ],
+            ..UnboundBlock::default()
+        })
+    };
+    rejects(
+        &weekly("business"),
+        &model,
+        Code::AmbiguousName,
+        "/blocks/0/selections/1/calendar",
+    );
+    let bound = bound(&weekly("corpus/calendar/b"), &model);
+    let SelectionItem::TimeDimension(time) = &bound.blocks[0].selections[1].item else {
+        panic!("time bucket");
+    };
+    assert_eq!(
+        time.calendar.as_ref().map(StableId::as_str),
+        Some("corpus/calendar/b")
     );
 }
 
