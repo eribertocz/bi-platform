@@ -5,6 +5,8 @@
 
 pub mod catalog;
 pub mod plan;
+#[cfg(test)]
+mod properties;
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
