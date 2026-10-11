@@ -702,7 +702,7 @@ fn decimal_at(text: &str, decimal: DecimalType) -> Result<Literal, String> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::panic)]
+    #![allow(clippy::expect_used, clippy::panic)]
 
     use super::{Literal, float, integer};
 
