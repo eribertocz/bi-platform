@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod health;
+pub mod metrics;
 pub mod openapi;
 pub mod problem;
 pub mod query;
@@ -37,6 +38,7 @@ pub struct AppState {
     pub auth: auth::AuthConfig,
     pub analytics: Analytics,
     pub query_timeout: Duration,
+    pub metrics: metrics::QueryMetrics,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
             auth: auth::AuthConfig::default(),
             analytics: Analytics::disabled(),
             query_timeout: config::DEFAULT_QUERY_TIMEOUT,
+            metrics: metrics::QueryMetrics::default(),
         }
     }
 }

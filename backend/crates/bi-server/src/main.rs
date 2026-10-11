@@ -3,7 +3,9 @@ use std::process::ExitCode;
 use bi_server::analytics::Analytics;
 use bi_server::config::Config;
 use bi_server::db::{self, Database};
-use bi_server::{AppState, openapi, router_with_static, serve, shutdown_signal, telemetry};
+use bi_server::{
+    AppState, metrics, openapi, router_with_static, serve, shutdown_signal, telemetry,
+};
 use sqlx::postgres::PgConnectOptions;
 use tokio::net::TcpListener;
 
@@ -79,15 +81,29 @@ async fn run() -> ExitCode {
         Some(runtime_config) => Analytics::start(runtime_config, config.dev_fixture),
         None => Analytics::disabled(),
     };
+    let (metrics, metrics_provider) = metrics::from_env(analytics.clone()).await;
     let state = AppState {
         db: db.clone(),
         auth: config.auth,
         analytics,
         query_timeout: config.query_timeout,
+        metrics,
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
     db.pool().close().await;
+    if let Some(provider) = metrics_provider {
+        tokio::task::spawn_blocking(move || {
+            if provider.shutdown().is_err() {
+                tracing::warn!(
+                    event_code = "metrics_shutdown_failed",
+                    "optional metrics could not flush at shutdown"
+                );
+            }
+        })
+        .await
+        .ok();
+    }
 
     match result {
         Ok(()) => {

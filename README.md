@@ -45,6 +45,19 @@ Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de
 `compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG` y `BI_STATIC_DIR`
 (directorio del build; sin esta variable, Rust sirve solo la API).
 
+Métricas de consulta M15: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`
+habilita exportación OTLP/HTTP protobuf a `/v1/metrics`. Sin la variable, la
+instrumentación es no-op y no inicia el SDK ni hilos de exportación.
+`OTEL_METRIC_EXPORT_INTERVAL` controla el intervalo en milisegundos (por defecto
+60 000). El exportador tiene un plazo de 2 segundos y sus fallos no cambian
+la respuesta de consulta ni readiness. Los tiempos OTel usan unidad `s`;
+Prometheus agrega `_seconds` y los contadores `_total` según M15 §10.
+Solo se exportan atributos de conjuntos cerrados; nunca SQL, valores ni IDs.
+El tiempo de ejecución llega hasta la finalización o el deadline de la petición;
+el gauge `bi_query_inflight` sigue contando trabajo nativo y recuperación hasta
+liberar el worker. `bi_query_queued` incluye slots cancelados aún sin retirar;
+`bi_query_queue_capacity` y `bi_query_capacity` muestran cola máxima y workers vivos.
+
 ## Lago de datos (DuckLake)
 
 DuckDB embebido con un DuckLake cuyo catálogo vive en la base `bi_lake_catalog` del mismo PostgreSQL (se crea con volúmenes nuevos; en uno existente: `podman compose exec postgres createdb -U bi bi_lake_catalog`) y cuyos datos son Parquet en `BI_LAKE_DATA_PATH` (por defecto `data/lake`).
