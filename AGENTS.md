@@ -33,7 +33,7 @@ Cada capacidad sigue cinco pasos: **el propietario define el objetivo → un age
 - Tipos exactos: `DECIMAL` e `INT64` no se redondean en JS; se preservan `TIMESTAMPTZ` y `NULL`.
 - Seguridad: autorización en el servidor; nunca secretos en Git, logs ni comentarios.
 - Dependencia nueva: una línea en el PR con problema, paquete y licencia, alternativa y motivo.
-- **Módulos desacoplados (ADR 0008):** cada módulo define qué recibe y qué entrega, sin saber quién lo llama. Los núcleos (`sef-*`…) no dependen de HTTP, almacenamiento, motores ni de otros módulos; solo los adaptadores (`bi-server`, `bi-runtime`) lo hacen. CI lo vigila (`deny.toml` y `backend.yml`).
+- **Módulos desacoplados (ADR 0008):** cada módulo define qué recibe y qué entrega, sin saber quién lo llama. Los núcleos (`sef-*` salvo `sef-adapter-*`…) no dependen de HTTP, almacenamiento, motores ni de otros módulos; solo los adaptadores (`bi-server`, `bi-runtime`, `sef-adapter-<motor>`) lo hacen. CI lo vigila (`deny.toml` y `backend.yml`).
 - Rendimiento: en rutas críticas, medir antes y después (`docs/arquitectura/PERFORMANCE_DESDE_G0.md`).
 - Documentación nueva solo cuando algo no se pueda expresar en código, contrato o pruebas.
 

@@ -63,12 +63,22 @@ jobs:
           DATABASE_URL: postgres://bi:bi@localhost:5432/bi
           BI_TEST_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
       - name: Layering - the semantic engine stays independent (ADR 0008)
-        # sef-* crates are reusable by other BI tools: no async runtime,
-        # transport, storage, engine or bi-platform crate in their graph.
+        # SEF cores (every sef-* except sef-adapter-*) are reusable by other
+        # BI tools: with every feature on, no async runtime, transport,
+        # storage, engine, adapter or bi-platform crate in their graph.
+        # Adapters may use their engine, never the HTTP server or bi-* crates.
+        # A failing cargo or jq fails the step instead of passing silently.
+        shell: bash
         run: |
-          for crate in $(cargo metadata --format-version 1 --no-deps | jq -r '.packages[].name | select(startswith("sef-"))'); do
-            if cargo tree --locked -p "$crate" -e normal --prefix none --format '{p}' | grep -E '^(tokio|axum|tower|hyper|sqlx|duckdb|opentelemetry|bi-[a-z]+) '; then
-              echo "::error::$crate depends on a platform or infrastructure crate (ADR 0008)"
+          core='^(tokio|axum|tower|hyper|reqwest|sqlx|duckdb|libduckdb-sys|clickhouse|opentelemetry|bi|sef-adapter)([-_][[:alnum:]_-]+)? '
+          adapter='^(axum|utoipa|bi)([-_][[:alnum:]_-]+)? '
+          crates=$(cargo metadata --locked --format-version 1 --no-deps | jq -r '.packages[].name | select(startswith("sef-"))')
+          test -n "$crates"
+          for crate in $crates; do
+            case "$crate" in sef-adapter-*) forbidden=$adapter ;; *) forbidden=$core ;; esac
+            graph=$(cargo tree --locked -p "$crate" --all-features --target all -e normal --prefix none --format '{p}')
+            if grep -E "$forbidden" <<<"$graph"; then
+              echo "::error::$crate depends on a crate its layer forbids (ADR 0008)"
               exit 1
             fi
           done
