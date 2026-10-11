@@ -1,0 +1,7 @@
+# Executables embedding DuckDB export its C API on Windows, which loadable
+# extensions (ducklake, postgres) need to resolve. Without these flags the MSVC
+# linker also writes an import library named after the crate into
+# target/*/deps, and rustc then mistakes it for the crate itself
+# ("can't find crate", "invalid metadata files").
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/NOIMPLIB", "-C", "link-arg=/NOEXP"]
