@@ -117,7 +117,7 @@ Lista de comprobación viva de lo que el motor entiende de Ossie 0.2.0.dev0.
 - 🔄 **En curso.**
 - ⏳ **Pendiente,** con su Issue.
 
-**Formatos:** YAML y JSON, en lectura y en escritura (`sef_ossie::load`, `to_yaml`, `to_json`; YAML 1.2 contiene JSON). La prueba `tests/conformance.rs` valida cada documento emitido contra `ossie-schema.json` y comprueba que vuelve igual desde YAML y desde JSON.
+**Formatos:** YAML y JSON, en lectura y en escritura (`sef_ossie::load`, `to_yaml`, `to_json`; YAML 1.2 contiene JSON). La prueba `backend/crates/sef-ossie/tests/conformance.rs` valida cada documento emitido contra `ossie-schema.json` y comprueba que vuelve igual desde YAML y desde JSON.
 
 | Fase | Capacidad | Estado |
 |---|---|---|
@@ -133,6 +133,6 @@ Lista de comprobación viva de lo que el motor entiende de Ossie 0.2.0.dev0.
 | Avanzada | SQL sobre métricas (estilo Rill/MetricFlow) | ⏳ se compila a SQIR (#73) |
 | Avanzada | Exportación e importación (MetricFlow, Cube, LookML…) | ⏳ CSMIR → Ossie (#48, parte 4) y, después, los conversores del proyecto Ossie |
 | Completa | Seguridad por filas | ✅ en el modelo (#72). ⏳ Aplicada con #69 (ADR 0010). |
-| Completa | Linaje, frescura y confianza | ✅ dependencias tipadas en CSMIR. ⏳ Frescura por instantánea de DuckLake y certificación (M10). |
+| Completa | Linaje, frescura y confianza | ✅ Linaje: dependencias tipadas en CSMIR. ⏳ Frescura (por instantánea de DuckLake) y confianza (certificación, M10): pendientes. |
 | Completa | Pre-agregaciones | ⏳ G4 (medidas de *rollup* ya modelables, caso 018) |
 | Completa | Lenguaje de expresiones completo, varios modelos y ontología | ⏳ cuando el estándar lo publique; se seguirá su hoja de ruta (tabla anterior) |

@@ -224,7 +224,8 @@ Es la parte más relevante para nuestro motor de corrección (#45). Busca que **
   - de agregados mal situados: `E_AGGREGATE_IN_WHERE`, `E_AGGREGATE_IN_FIELD`, `E_NON_AGGREGATE_IN_HAVING`;
   - de ventanas: `E_WINDOW_IN_WHERE`, `E_WINDOWED_METRIC_COMPOSITION`, `E_WINDOW_OVER_FANOUT_REWRITE`;
   - de nombres: `E_NAME_COLLISION`, `E_NAME_NOT_FOUND`;
-  - de funciones aplazadas: `E_DEFERRED_*`.
+  - de forma de la consulta: `E_AGGREGATE_IN_SCALAR_QUERY`, `E_EMPTY_AGGREGATION_QUERY`, `E_EMPTY_SCALAR_QUERY`, `E_MIXED_PREDICATE_LEVEL`, `E_MIXED_QUERY_SHAPE`, `E_PRIMARY_KEY_REQUIRED`;
+  - familia diferida (capacidades aplazadas): `E_DEFERRED_*`, por ejemplo `E_NESTED_AGGREGATION_DEFERRED`, `E_DEFERRED_FRAME_MODE`, `E_DEFERRED_KEY_REJECTED` y `E_AGGREGATE_IN_FIELD`.
 - **Fuera de alcance por ahora:**
   - INNER por integridad referencial declarada;
   - elegir un tipo de *join* por métrica;
@@ -295,7 +296,7 @@ Es la parte más relevante para nuestro motor de corrección (#45). Busca que **
 | Metadatos extendidos (`display_format`, `default_aggregation`, `desired_direction`, `default_sort`, `semantic_type`…) | PR | #287, issue #100 |
 | IA: consultas verificadas, controlar qué ve la IA, guías de `ai_context` | Esfuerzo futuro | discusiones #82, #14, #32 y #9 |
 | IDs estables, certificación, gobierno, LinkML y versionado del esquema | Esfuerzo futuro | discusiones #31, #53, #13, #67 y #35; issues #102 y #87 |
-| Catálogo y registro semántico (Polaris) | Grupo de trabajo activo | issue #107 |
+| Catálogo y registro semántico | Grupo de trabajo activo (Catálogo, Atlan) | `docs/working_groups.md` |
 | Geoespacial, audiencias y segmentos | Mejora | discusiones #69, #114 y #51 |
 | Batería de conformidad | Vacía | `compliance/` |
 
@@ -311,12 +312,12 @@ Es la parte más relevante para nuestro motor de corrección (#45). Busca que **
 |---|---|---|
 | Lectura, escritura y validación de la capa 1 (YAML y JSON, esquema, unicidad, referencias, aridad, sintaxis) | Hecho (#54) | — |
 | `ANSI_SQL` como lengua común de facto (ejemplos, conversores) | Solo se calcula `OSSIE_SQL_2026` | #74 |
-| **Funciones REQUIRED** (texto, matemáticas, extracción y aritmética de fechas, estadísticos, percentiles, ventanas de ranking y desplazamiento, `SUM(DISTINCT)`, `%`) | El validador las acepta, pero la conversión a CSMIR las rechaza (`not_representable`) | #77: ampliar CSMIR y el planificador para cumplir el **MUST** |
+| **Funciones REQUIRED** (texto, matemáticas, extracción y aritmética de fechas, estadísticos, percentiles, ventanas de ranking y desplazamiento, `SUM(DISTINCT)`, `%`) | El validador las acepta, pero la conversión a CSMIR las rechaza con `not_representable`; por ejemplo, `UPPER`, `MOD` y `SUM(DISTINCT)` | #77: ampliar CSMIR y el planificador para cumplir el **MUST** |
 | `is_time`, descripciones y `ai_context` | Validados; no llegan a la API ni a la UI | #75 |
 | Referencias métrica → métrica (`ingresos / pedidos`) | Las admitimos; #486 las deja "para más adelante" y #246 las usa | Es **extensión nuestra**: al exportar a herramientas sin soporte, expandirlas (parte 4 de #48) |
 | Semántica de consulta y errores de #246 | Nuestro motor de corrección (#45) cubre lo mismo | **Adoptar sus códigos de error** junto a los nuestros, para ser compatibles |
 | `custom_extensions` como objeto (#522, ruptura) | Leemos `data` como string | Aceptar string y objeto cuando se integre |
 | Dialecto `CLICKHOUSE` (#558) | ClickHouse es nuestra segunda fuente en vivo (ADR 0002) | Usarlo cuando se publique |
 | Orígenes de tipo archivo (#338) | Encaja con "consultar sin copiar" (ADR 0009) | Seguir la propuesta |
-| `MEASURE()` (#354) y la capa 3 (#246, #529, #568) | Nuestra SQIR (#73) es una consulta estructurada como la capa 3 | El SQL sobre métricas se compila a SQIR; vigilar los contratos MCP y Arrow |
+| `MEASURE()` (#354) y la capa 3 (#246, #529, #568) | Consulta semántica estructurada compilada a SQIR (#73); no ofrece una interfaz SQL | Si llega una entrada SQL con `MEASURE()`, también se compilará a SQIR; vigilar los contratos MCP y Arrow |
 | Batería de conformidad (vacía en Ossie) | Tenemos el corpus de 21 casos con resultado exacto | Oportunidad: aportarlo (decisión del propietario, ver `ossie.md`) |
