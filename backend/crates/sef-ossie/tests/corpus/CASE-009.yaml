@@ -84,3 +84,6 @@ metrics:
       dialects:
         - dialect: OSSIE_SQL_2026
           expression: 'gross_revenue - refunds'
+    custom_extensions:
+      - vendor_name: bi-platform
+        data: '{"version": 1, "aggregation": {"class": "fully_additive"}}'

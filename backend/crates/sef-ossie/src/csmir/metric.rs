@@ -23,7 +23,8 @@ use sef_model_ir::expressions::{
 use sef_model_ir::grain::Grain;
 use sef_model_ir::identity::StableId;
 use sef_model_ir::model::{
-    AggregationClass, AggregationContract, Decomposition, Measure, Metric, ObjectMetadata,
+    AggregationClass, AggregationContract, AxisBehavior, AxisRule, Decomposition, Measure, Metric,
+    ObjectMetadata,
 };
 use sef_model_ir::time::IanaZoneId;
 use sef_model_ir::types::{ArithmeticOp, RoundingMode, ValueType, ZeroDivisionPolicy};
@@ -39,7 +40,10 @@ use super::scalar::{
 };
 use super::{Converter, compatible, field_ref, strip, unit};
 use crate::diagnostic::Code;
-use crate::extension::{self, MetricExtension, RoundingDeclaration, ZeroDivisionDeclaration};
+use crate::extension::{
+    self, AggregationDeclaration, BehaviorDeclaration, ClassDeclaration, MetricExtension,
+    RoundingDeclaration, ZeroDivisionDeclaration,
+};
 use crate::ids;
 
 /// What other metrics need to know about a converted one.
@@ -246,7 +250,16 @@ impl Builder<'_, '_> {
             && function.over.is_none()
             && function_name(function) != "AVG"
         {
-            let measure = self.measure(&segment, function)?;
+            if self.metric.extension.grain.is_some() {
+                return Err(Failure::new(
+                    Code::InvalidExtension,
+                    "\"grain\" se declara en métricas compuestas: el grano de una métrica de un \
+                     solo agregado es el de su dataset.",
+                )
+                .at(format!("{}/custom_extensions", self.metric.path)));
+            }
+            let declared = self.metric.extension.aggregation.clone();
+            let measure = self.measure(&segment, function, declared.as_ref())?;
             let unit = self.metric.extension.unit.as_ref().map(unit);
             return self.measured_metric(&segment, measure, unit);
         }
@@ -260,43 +273,8 @@ impl Builder<'_, '_> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let inputs = components
-            .iter()
-            .filter_map(|id| self.by_id.get(id))
-            .collect::<Vec<_>>();
-        let grain = if let Some(declared) = &self.metric.extension.grain {
-            let path = format!("{}/custom_extensions", self.metric.path);
-            self.converter.grain(declared, &path).ok_or_else(|| {
-                Failure::new(Code::UnknownReference, "El grano declarado no es válido.")
-            })?
-        } else {
-            let mut grains = inputs.iter().map(|info| &info.grain);
-            let first = grains.next().cloned().unwrap_or_default();
-            if grains.any(|grain| *grain != first) {
-                return Err(Failure::new(
-                    Code::GrainRequired,
-                    "Las métricas que combina tienen granos distintos: declara el grano de \
-                     esta en la extensión (\"grain\": {\"dimensions\": […]}).",
-                ));
-            }
-            first
-        };
-        let additive = only_sums(&expression)
-            && inputs
-                .iter()
-                .all(|info| info.class == AggregationClass::FullyAdditive);
-        let contract = if additive {
-            AggregationContract::fully_additive()
-        } else {
-            AggregationContract {
-                classification: AggregationClass::Recomputable,
-                axis_rules: Vec::new(),
-                decomposition: Some(Decomposition {
-                    components: components.clone(),
-                    recomposition: expression.clone(),
-                }),
-            }
-        };
+        let grain = self.composite_grain(&components)?;
+        let contract = self.composite_contract(&expression, &components)?;
         let dependencies = expression
             .measure_refs()
             .into_iter()
@@ -327,6 +305,76 @@ impl Builder<'_, '_> {
             allocation_bridge: None,
         });
         Ok(info)
+    }
+
+    /// The grain all inputs share, or the declared one.
+    fn composite_grain(&self, components: &[StableId]) -> Result<Grain, Failure> {
+        let path = format!("{}/custom_extensions", self.metric.path);
+        if let Some(declared) = &self.metric.extension.grain {
+            let atoms = declared
+                .dimensions
+                .iter()
+                .map(|name| self.converter.atom(Some(name), None))
+                .chain(
+                    declared
+                        .entities
+                        .iter()
+                        .map(|name| self.converter.atom(None, Some(name))),
+                )
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|failure| failure.at(path))?;
+            return Ok(Grain::new(atoms));
+        }
+        let mut grains = components
+            .iter()
+            .filter_map(|id| self.by_id.get(id))
+            .map(|info| &info.grain);
+        let first = grains.next().cloned().unwrap_or_default();
+        if grains.any(|grain| *grain != first) {
+            return Err(Failure::new(
+                Code::GrainRequired,
+                "Las métricas que combina tienen granos distintos: declara el grano de esta en                  la extensión (\"grain\": {\"dimensions\": […]}).",
+            ));
+        }
+        Ok(first)
+    }
+
+    /// A combination is recomputed from its components unless the author
+    /// declares it fully additive, which is only accepted for sums and
+    /// differences of fully additive metrics: `a + b` summed per group
+    /// differs from the total when a group leaves a component NULL.
+    fn composite_contract(
+        &self,
+        expression: &MetricExpr,
+        components: &[StableId],
+    ) -> Result<AggregationContract, Failure> {
+        let Some(declared) = &self.metric.extension.aggregation else {
+            return Ok(AggregationContract {
+                classification: AggregationClass::Recomputable,
+                axis_rules: Vec::new(),
+                decomposition: Some(Decomposition {
+                    components: components.to_vec(),
+                    recomposition: expression.clone(),
+                }),
+            });
+        };
+        let summable = components.iter().all(|id| {
+            self.by_id
+                .get(id)
+                .is_some_and(|info| info.class == AggregationClass::FullyAdditive)
+        });
+        if declared.class == ClassDeclaration::FullyAdditive
+            && declared.axes.is_empty()
+            && only_sums(expression)
+            && summable
+        {
+            return Ok(AggregationContract::fully_additive());
+        }
+        Err(Failure::new(
+            Code::InvalidExtension,
+            "Una métrica compuesta solo puede declararse fully_additive, y solo si suma o resta              métricas totalmente aditivas.",
+        )
+        .at(format!("{}/custom_extensions", self.metric.path)))
     }
 
     fn metadata(&mut self, kind: &str, segment: &str) -> Result<ObjectMetadata, Failure> {
@@ -383,7 +431,7 @@ impl Builder<'_, '_> {
     fn synthesize(&mut self, function: &Function) -> Result<MetricExpr, Failure> {
         self.synthesized += 1;
         let segment = format!("{}.m{}", self.metric.segment, self.synthesized);
-        let measure = self.measure(&segment, function)?;
+        let measure = self.measure(&segment, function, None)?;
         let info = self.measured_metric(&segment, measure, None)?;
         let reference = metric_ref(&info);
         self.by_id.insert(info.id.clone(), info);
@@ -512,6 +560,70 @@ impl Builder<'_, '_> {
         })
     }
 
+    /// The aggregation contract of a measure: declared, or the default of its
+    /// aggregate. Only `SUM` and `COUNT` re-aggregate by summing partial
+    /// results (SEF's additive partition property); `MIN`/`MAX` and exact
+    /// distinct counts are recomputed from rows at every grain.
+    fn contract(
+        &self,
+        aggregation: AggregateFunction,
+        declared: Option<&AggregationDeclaration>,
+    ) -> Result<AggregationContract, Failure> {
+        let summable = matches!(
+            aggregation,
+            AggregateFunction::Sum | AggregateFunction::CountRows | AggregateFunction::CountNonNull
+        );
+        let Some(declared) = declared else {
+            return Ok(if summable {
+                AggregationContract::fully_additive()
+            } else {
+                AggregationContract {
+                    classification: AggregationClass::NonAdditive,
+                    axis_rules: Vec::new(),
+                    decomposition: None,
+                }
+            });
+        };
+        let path = format!("{}/custom_extensions", self.metric.path);
+        if declared.class != ClassDeclaration::NonAdditive && !summable {
+            return Err(Failure::new(
+                Code::InvalidExtension,
+                "Solo SUM y COUNT se suman entre grupos; MIN, MAX y COUNT(DISTINCT) son \
+                 non_additive.",
+            )
+            .at(path));
+        }
+        let axis_rules = declared
+            .axes
+            .iter()
+            .map(|axis| {
+                Ok(AxisRule {
+                    axis: self
+                        .converter
+                        .atom(axis.dimension.as_deref(), axis.entity.as_deref())?,
+                    behavior: match axis.behavior {
+                        BehaviorDeclaration::Additive => AxisBehavior::Additive,
+                        BehaviorDeclaration::Recompute => AxisBehavior::Recompute,
+                        BehaviorDeclaration::DistinctRecompute => AxisBehavior::DistinctRecompute,
+                        BehaviorDeclaration::PeriodEnd => AxisBehavior::PeriodEnd,
+                        BehaviorDeclaration::PeriodStart => AxisBehavior::PeriodStart,
+                        BehaviorDeclaration::Forbidden => AxisBehavior::Forbidden,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, Failure>>()
+            .map_err(|failure| failure.at(path.clone()))?;
+        Ok(AggregationContract {
+            classification: match declared.class {
+                ClassDeclaration::FullyAdditive => AggregationClass::FullyAdditive,
+                ClassDeclaration::SemiAdditive => AggregationClass::SemiAdditive,
+                ClassDeclaration::NonAdditive => AggregationClass::NonAdditive,
+            },
+            axis_rules,
+            decomposition: None,
+        })
+    }
+
     fn rounding(&self) -> RoundingMode {
         match self.metric.extension.rounding {
             None | Some(RoundingDeclaration::HalfEven) => RoundingMode::HalfEven,
@@ -616,7 +728,12 @@ impl Builder<'_, '_> {
         }
     }
 
-    fn measure(&mut self, segment: &str, function: &Function) -> Result<MeasureInfo, Failure> {
+    fn measure(
+        &mut self,
+        segment: &str,
+        function: &Function,
+        declared: Option<&AggregationDeclaration>,
+    ) -> Result<MeasureInfo, Failure> {
         let name = function_name(function);
         let (distinct, wildcard) = match &function.args {
             FunctionArguments::List(list) => (
@@ -651,15 +768,7 @@ impl Builder<'_, '_> {
         let used = scope.used;
         let d = self.measure_dataset(&used, &name)?;
         let (value_type, unit) = measure_type(aggregation, scalar.as_ref(), &name)?;
-        let contract = if aggregation == AggregateFunction::CountDistinct {
-            AggregationContract {
-                classification: AggregationClass::NonAdditive,
-                axis_rules: Vec::new(),
-                decomposition: None,
-            }
-        } else {
-            AggregationContract::fully_additive()
-        };
+        let contract = self.contract(aggregation, declared)?;
         let grain = self.converter.datasets[d].grain.clone();
         let metadata = self.metadata("measure", segment)?;
         let id = metadata.id().clone();

@@ -219,6 +219,7 @@ impl<'a> Converter<'a> {
     }
 
     fn fail(&mut self, path: &str, failure: Failure) {
+        let path = failure.path.unwrap_or_else(|| path.to_owned());
         self.found
             .push(Diagnostic::error(failure.code, path, failure.message));
     }
@@ -691,10 +692,26 @@ impl<'a> Converter<'a> {
                     continue;
                 };
                 let timezone = self.timezone(d, f);
-                if let Err(failure) = self.row_expression(d, &ast, timezone) {
-                    self.fail(&path, failure);
+                match self.row_expression(d, &ast, timezone) {
+                    Ok(expression) => self.check_datatype(d, f, &expression.value_type),
+                    Err(failure) => self.fail(&path, failure),
                 }
             }
+        }
+    }
+
+    /// A declared `datatype` must describe the computed value.
+    fn check_datatype(&mut self, d: usize, f: usize, value_type: &ValueType) {
+        let field = &self.datasets[d].fields[f];
+        if let Some(datatype) = field.ossie.datatype
+            && !compatible(datatype, value_type)
+        {
+            let path = format!("{}/datatype", field.path);
+            let message = format!(
+                "El campo dice {datatype:?}, pero su expresión da {}.",
+                describe(value_type)
+            );
+            self.error(Code::DatatypeMismatch, path, message);
         }
     }
 
@@ -776,6 +793,7 @@ impl<'a> Converter<'a> {
                 return;
             }
         };
+        self.check_datatype(d, f, &expression.value_type);
         let time_semantics = match self.time_semantics(d, f, &expression, tzdb) {
             Ok(semantics) => semantics,
             Err(failure) => {
@@ -871,34 +889,62 @@ impl<'a> Converter<'a> {
     }
 
     fn grain(&mut self, declared: &GrainDeclaration, path: &str) -> Option<Grain> {
-        let mut atoms = Vec::new();
-        for name in &declared.dimensions {
-            let Some(state) = self.dimensions.get(&ids::segment(name)) else {
-                self.error(
-                    Code::UnknownReference,
-                    path,
-                    format!("El grano nombra la dimensión {name:?}, que no existe."),
-                );
-                return None;
-            };
-            atoms.push(GrainAtom::DimensionRef {
-                dimension: state.metadata.id().clone(),
-                roles: Vec::new(),
-            });
+        let atoms = declared
+            .dimensions
+            .iter()
+            .map(|name| self.atom(Some(name), None))
+            .chain(
+                declared
+                    .entities
+                    .iter()
+                    .map(|name| self.atom(None, Some(name))),
+            )
+            .collect::<Result<Vec<_>, _>>();
+        match atoms {
+            Ok(atoms) => Some(Grain::new(atoms)),
+            Err(failure) => {
+                self.fail(path, failure);
+                None
+            }
         }
-        for name in &declared.entities {
-            let entity = ids::segment(name);
-            let Some(key) = self.entities.get(&entity).and_then(|keys| keys.first()) else {
-                self.error(
-                    Code::UnknownReference,
-                    path,
-                    format!("El grano nombra la entidad {name:?}, que ninguna clave declara."),
-                );
-                return None;
-            };
-            atoms.push(GrainAtom::EntityKeyRef(key.metadata.id().clone()));
+    }
+
+    /// One grain atom: exactly one of a dimension or an entity name.
+    pub(crate) fn atom(
+        &self,
+        dimension: Option<&str>,
+        entity: Option<&str>,
+    ) -> Result<GrainAtom, Failure> {
+        match (dimension, entity) {
+            (Some(name), None) => self
+                .dimensions
+                .get(&ids::segment(name))
+                .map(|state| GrainAtom::DimensionRef {
+                    dimension: state.metadata.id().clone(),
+                    roles: Vec::new(),
+                })
+                .ok_or_else(|| {
+                    Failure::new(
+                        Code::UnknownReference,
+                        format!("No existe la dimensión {name:?}."),
+                    )
+                }),
+            (None, Some(name)) => self
+                .entities
+                .get(&ids::segment(name))
+                .and_then(|keys| keys.first())
+                .map(|key| GrainAtom::EntityKeyRef(key.metadata.id().clone()))
+                .ok_or_else(|| {
+                    Failure::new(
+                        Code::UnknownReference,
+                        format!("Ninguna clave declara la entidad {name:?}."),
+                    )
+                }),
+            _ => Err(Failure::new(
+                Code::InvalidExtension,
+                "Cada eje nombra exactamente una dimensión o una entidad.",
+            )),
         }
-        Some(Grain::new(atoms))
     }
 
     fn finish(self, options: &Options) -> Result<(ModelDefinition, Paths), Failure> {
@@ -1068,15 +1114,20 @@ impl Names for RowScope<'_, '_> {
         {
             return Ok(field_ref(field));
         }
-        // An implicit field named after the column, unless an Ossie field
-        // already uses that name for something else.
+        // An implicit field named after the column. Computed fields have no
+        // CSMIR ID (`region: TRIM(region)` is fine); a column field with this
+        // name is bound to another column (the same one was found above).
         let segment = ids::encode(&column.name.to_uppercase());
-        if state.fields.iter().any(|field| field.segment == segment) {
+        if state
+            .fields
+            .iter()
+            .any(|field| field.segment == segment && field.column.is_some())
+        {
             return Err(Failure::new(
                 Code::AmbiguousReference,
                 format!(
-                    "La columna {:?} tiene el nombre de un campo calculado; declara un campo \
-                     propio para la columna.",
+                    "La columna {:?} tiene el nombre de un campo que lee otra columna; renombra \
+                     ese campo o declara uno para esta columna.",
                     column.name
                 ),
             ));

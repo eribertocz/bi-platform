@@ -160,6 +160,50 @@ pub struct MetricExtension {
     pub rounding: Option<RoundingDeclaration>,
     /// What a zero denominator yields (`NULL` if absent).
     pub zero_division: Option<ZeroDivisionDeclaration>,
+    /// How the metric re-aggregates along each axis. If absent, `SUM` and
+    /// `COUNT` are fully additive; `MIN`, `MAX` and `COUNT(DISTINCT)` are
+    /// recomputed from rows; a composite metric is recomputed from its
+    /// components. Declaring a composite `fully_additive` is the author's
+    /// claim that summing its partial results is exact: no group may leave
+    /// one of its components `NULL`.
+    pub aggregation: Option<AggregationDeclaration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AggregationDeclaration {
+    pub class: ClassDeclaration,
+    #[serde(default)]
+    pub axes: Vec<AxisDeclaration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassDeclaration {
+    FullyAdditive,
+    SemiAdditive,
+    NonAdditive,
+}
+
+/// How the metric behaves along one axis: exactly one of `dimension` and
+/// `entity`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AxisDeclaration {
+    pub dimension: Option<String>,
+    pub entity: Option<String>,
+    pub behavior: BehaviorDeclaration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorDeclaration {
+    Additive,
+    Recompute,
+    DistinctRecompute,
+    PeriodEnd,
+    PeriodStart,
+    Forbidden,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

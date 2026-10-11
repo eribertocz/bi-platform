@@ -30,6 +30,8 @@ use crate::diagnostic::Code;
 pub(crate) struct Failure {
     pub code: Code,
     pub message: String,
+    /// Where the problem is, when not at the expression being translated.
+    pub path: Option<String>,
 }
 
 impl Failure {
@@ -37,7 +39,13 @@ impl Failure {
         Self {
             code,
             message: message.into(),
+            path: None,
         }
+    }
+
+    pub(crate) fn at(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 }
 
@@ -424,7 +432,12 @@ impl<N: Names> Translator<'_, N> {
         }
         let operand = match self.typed(inner)? {
             Typed::Expr(scalar) => scalar,
-            Typed::Number(text) => return number(&text, Some(&target), true),
+            // A numeric target types the literal exactly; any other target
+            // converts the literal's own value (`CAST(123 AS VARCHAR)`).
+            Typed::Number(text) if target.is_numeric() => {
+                return number(&text, Some(&target), true);
+            }
+            Typed::Number(text) => number(&text, None, false)?,
             Typed::Null => return Ok(literal(Literal::Null(target))),
         };
         Ok(cast(operand, target))
@@ -800,6 +813,9 @@ fn rescale(value: &DecimalValue, target: DecimalType) -> Result<DecimalValue, Fa
 /// (a `CASE` branch, a comparison); without it, its own minimal type, so
 /// `amount * 2` does not inflate the result's precision.
 fn number(text: &str, like: Option<&ValueType>, exact: bool) -> Result<ScalarExpr, Failure> {
+    // Beside text or a date, a number keeps its own type and the comparison
+    // reports the mismatch.
+    let like = like.filter(|like| like.is_numeric());
     let (negative, digits) = match text.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, text),
@@ -904,7 +920,13 @@ pub(crate) fn cast_target(data_type: &DataType) -> Result<ValueType, Failure> {
         bits: Some(bits),
     };
     Ok(match data_type {
-        DataType::Varchar(_) | DataType::String(_) | DataType::Text => ValueType::Utf8,
+        DataType::Varchar(None) | DataType::String(None) | DataType::Text => ValueType::Utf8,
+        DataType::Varchar(Some(_)) | DataType::String(Some(_)) => {
+            return Err(not_representable(
+                "CAST a VARCHAR(n) (CSMIR no conserva la longitud, y truncar o rechazar los \
+                 valores largos cambiaría el dominio de la dimensión)",
+            ));
+        }
         DataType::Int(_) | DataType::Integer(_) => integer(32),
         DataType::BigInt(_) => integer(64),
         DataType::Decimal(info) | DataType::Numeric(info) => {
@@ -924,9 +946,25 @@ pub(crate) fn cast_target(data_type: &DataType) -> Result<ValueType, Failure> {
                 .map(ValueType::Decimal)
                 .ok_or_else(|| type_mismatch("DECIMAL(p, s) admite 1 ≤ p ≤ 76 y 0 ≤ s ≤ p."))?
         }
-        DataType::Float(_) | DataType::Real => ValueType::Float { bits: 32 },
-        DataType::Double(_) | DataType::DoublePrecision | DataType::Float64 => {
-            ValueType::Float { bits: 64 }
+        // FLOAT(p) keeps p binary digits: up to 24 fit in 32 bits, up to 53
+        // in 64. A bare FLOAT is 32 bits in DuckDB and 64 in PostgreSQL.
+        DataType::Float(ExactNumberInfo::Precision(1..=24)) | DataType::Real => {
+            ValueType::Float { bits: 32 }
+        }
+        DataType::Float(ExactNumberInfo::Precision(25..=53))
+        | DataType::Double(ExactNumberInfo::None)
+        | DataType::DoublePrecision
+        | DataType::Float64 => ValueType::Float { bits: 64 },
+        DataType::Float(ExactNumberInfo::None) => {
+            return Err(type_mismatch(
+                "FLOAT sin precisión es de 32 bits en unos motores y de 64 en otros: usa REAL, \
+                 DOUBLE o FLOAT(p).",
+            ));
+        }
+        DataType::Float(_) | DataType::Double(_) => {
+            return Err(type_mismatch(
+                "FLOAT(p) admite 1 ≤ p ≤ 53 dígitos binarios, sin escala.",
+            ));
         }
         DataType::Boolean | DataType::Bool => ValueType::Boolean,
         DataType::Date => ValueType::Date,
