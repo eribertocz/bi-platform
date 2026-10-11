@@ -56,3 +56,23 @@ jobs:
         run: cargo test --locked --all-features
         env:
           DATABASE_URL: postgres://bi:bi@localhost:5432/bi
+
+  bench:
+    # Records a baseline (G0.13); no thresholds, shared runners are noisy.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Benchmark sales fixture (200k rows)
+        run: cargo run --locked --release -p bi-fixtures -- bench --rows 200000 --iterations 5 --out bench-report.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-report
+          path: backend/bench-report.json

@@ -1,0 +1,2 @@
+# Product and technology names used in docs; ".." keeps clippy's defaults.
+doc-valid-idents = ["DuckDB", "DuckLake", "PostgreSQL", "OpenAPI", "SvelteKit", ".."]
