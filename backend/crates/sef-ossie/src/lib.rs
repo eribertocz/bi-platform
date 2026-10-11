@@ -2,12 +2,16 @@
 //!
 //! Ossie is the interchange format of `metrics/*.yaml` (ADR 0003); it is
 //! never the internal model (CSMIR is). This crate reads and writes Ossie
-//! documents and applies the official validator's checks; compiling them
-//! to CSMIR comes next (Issue #48).
+//! documents, applies the official validator's checks and converts them to
+//! CSMIR with the exact source types a [`catalog::Catalog`] provides.
 
+pub mod catalog;
+pub mod csmir;
 pub mod diagnostic;
 pub mod document;
 pub mod expression;
+pub mod extension;
+pub mod ids;
 pub mod load;
 pub mod validate;
 

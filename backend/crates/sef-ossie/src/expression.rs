@@ -117,7 +117,7 @@ pub fn analyze(text: &str, context: Context) -> Result<Analysis, Diagnostic> {
     Ok(walker.analysis)
 }
 
-fn parse(text: &str) -> Result<Expr, Diagnostic> {
+pub(crate) fn parse(text: &str) -> Result<Expr, Diagnostic> {
     let syntax = |message: String| Diagnostic::error(Code::ExpressionSyntax, "", message);
     let dialect = GenericDialect {};
     if text.len() > crate::load::MAX_DOCUMENT_BYTES {
