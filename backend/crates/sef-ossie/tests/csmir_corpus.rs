@@ -97,8 +97,14 @@ fn golden(case: u8) -> String {
     line.split_once(' ').expect("case and hash").1.to_owned()
 }
 
-fn assert_same_fingerprint(case: u8) {
-    let loaded = sef_ossie::load(&corpus(&format!("CASE-{case:03}.yaml")))
+fn assert_same_fingerprint(case: u8, ansi: bool) {
+    let text = corpus(&format!("CASE-{case:03}.yaml"));
+    let text = if ansi {
+        text.replace("dialect: OSSIE_SQL_2026", "dialect: ANSI_SQL")
+    } else {
+        text
+    };
+    let loaded = sef_ossie::load(&text)
         .unwrap_or_else(|errors| panic!("CASE-{case:03} must load: {errors:#?}"));
     // An as-of relationship cannot point at a unique key of its history:
     // Ossie warns, and our temporal extension states the match instead.
@@ -134,9 +140,16 @@ macro_rules! corpus_case {
     ($($name:ident => $case:literal),+ $(,)?) => {$(
         #[test]
         fn $name() {
-            assert_same_fingerprint($case);
+            assert_same_fingerprint($case, false);
         }
     )+};
+}
+
+#[test]
+fn all_21_ansi_sql_documents_match_the_same_csmir_oracle() {
+    for case in 1..=21 {
+        assert_same_fingerprint(case, true);
+    }
 }
 
 corpus_case!(

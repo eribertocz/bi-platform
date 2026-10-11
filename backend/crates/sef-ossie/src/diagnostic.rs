@@ -33,6 +33,10 @@ pub enum Code {
     /// Two datasets, fields of one dataset, metrics or relationships share a
     /// name, compared as normalized identifiers.
     DuplicateName,
+    /// An expression declares the same dialect more than once.
+    DuplicateDialect,
+    /// `OSSIE_SQL_2026` wins over a different `ANSI_SQL` expression.
+    DialectPrecedence,
     /// A relationship names a dataset the model does not declare.
     UnknownDataset,
     /// `from_columns` and `to_columns` differ in length.
@@ -43,7 +47,7 @@ pub enum Code {
     ExpressionSyntax,
     /// An expression exceeds its byte, token, structural or parser recursion budget.
     ExpressionTooLarge,
-    /// A construct outside `OSSIE_SQL_2026` (subquery, vendor syntax…).
+    /// A construct outside the computable subset (subquery, vendor syntax…).
     UnsupportedConstruct,
     /// A function that is neither REQUIRED nor RECOMMENDED.
     UnknownFunction,
@@ -67,7 +71,7 @@ pub enum Code {
     DatatypeMismatch,
     /// Operand or result types that CSMIR does not combine implicitly.
     TypeMismatch,
-    /// Valid `OSSIE_SQL_2026` the engine cannot yet compute exactly.
+    /// Valid computable-dialect SQL the engine cannot yet compute exactly.
     NotRepresentable,
     /// A metric combining inputs of different grains without declaring its own.
     GrainRequired,
@@ -90,6 +94,8 @@ impl Code {
             Self::EmptyList => "empty_list",
             Self::InvalidIdentifier => "invalid_identifier",
             Self::DuplicateName => "duplicate_name",
+            Self::DuplicateDialect => "duplicate_dialect",
+            Self::DialectPrecedence => "dialect_precedence",
             Self::UnknownDataset => "unknown_dataset",
             Self::ColumnArity => "column_arity",
             Self::KeyNotCovered => "key_not_covered",

@@ -212,6 +212,20 @@ pub struct Expression {
 }
 
 impl Expression {
+    /// The expression this engine can compute: Ossie's defined language,
+    /// then ANSI SQL restricted to the same allowlist. Document order never
+    /// changes that priority. Callers validate dialect uniqueness first.
+    pub(crate) fn executable(&self) -> Option<(usize, &DialectExpression)> {
+        [Dialect::OssieSql2026, Dialect::AnsiSql]
+            .into_iter()
+            .find_map(|dialect| {
+                self.dialects
+                    .iter()
+                    .enumerate()
+                    .find(|(_, candidate)| candidate.dialect == dialect)
+            })
+    }
+
     /// The portable expression, when declared. `OSSIE_SQL_2026` is the
     /// language whose semantics the specification defines.
     #[must_use]

@@ -84,8 +84,11 @@ pub(super) fn metrics(converter: &mut Converter<'_>) {
                 MetricExtension::default()
             }
         };
-        let (ast, expression_path) =
-            converter.portable(&metric.expression, &format!("{path}/expression"));
+        let (ast, expression_path) = converter.portable(
+            &metric.expression,
+            &format!("{path}/expression"),
+            crate::expression::Context::Metric,
+        );
         names.insert(crate::validate::normalize_identifier(&metric.name), i);
         states.push(MetricState {
             segment: ids::segment(&metric.name),

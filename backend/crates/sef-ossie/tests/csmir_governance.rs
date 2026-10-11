@@ -309,15 +309,19 @@ fn malformed_policies_are_rejected() {
 
 #[test]
 fn context_values_belong_to_policies_only() {
-    let mut model = document(15);
-    // Bypass load(): its validator already rejects the parameter.
-    model.metrics[0].expression =
-        portable("SUM(CASE WHEN sales.tenant_id = :tenant_id THEN sales.amount END)");
-    rejects(
-        convert(15, &model),
-        Code::NotRepresentable,
-        "/metrics/0/expression/dialects/0/expression",
-    );
+    // Direct conversion applies the same allowlist as load(): parameters
+    // are confined to the dedicated policy translator, in either dialect.
+    for dialect in [Dialect::OssieSql2026, Dialect::AnsiSql] {
+        let mut model = document(15);
+        model.metrics[0].expression =
+            portable("SUM(CASE WHEN sales.tenant_id = :tenant_id THEN sales.amount END)");
+        model.metrics[0].expression.dialects[0].dialect = dialect;
+        rejects(
+            convert(15, &model),
+            Code::UnsupportedConstruct,
+            "/metrics/0/expression/dialects/0/expression",
+        );
+    }
 }
 
 // ---- Rollup measures (CASE-018) ---------------------------------------------------

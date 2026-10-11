@@ -330,8 +330,11 @@ impl<'a> Converter<'a> {
             }
         };
         let segment = ids::segment(&field.name);
-        let (ast, expression_path) =
-            self.portable(&field.expression, &format!("{path}/expression"));
+        let (ast, expression_path) = self.portable(
+            &field.expression,
+            &format!("{path}/expression"),
+            crate::expression::Context::Field,
+        );
         let mut column = None;
         if let (Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)), Some(relation)) =
             (ast.as_ref().map(strip), state.relation)
@@ -400,27 +403,29 @@ impl<'a> Converter<'a> {
         });
     }
 
-    /// The portable expression, parsed (validation already accepted it).
+    /// Validates even for callers that construct a typed model directly,
+    /// then parses the selected expression with the same resource budget.
     fn portable(
         &mut self,
         expression: &document::Expression,
         path: &str,
+        context: crate::expression::Context,
     ) -> (Option<Expr>, String) {
-        let Some(k) = expression
-            .dialects
-            .iter()
-            .position(|candidate| candidate.dialect == document::Dialect::OssieSql2026)
-        else {
+        let first = self.found.len();
+        crate::validate::expression(&mut self.found, path, expression, context);
+        if self.found[first..].iter().any(Diagnostic::is_error) {
+            return (None, path.to_owned());
+        }
+        let Some((k, selected)) = expression.executable() else {
             self.error(
                 Code::NotRepresentable,
                 format!("{path}/dialects"),
-                "Falta la expresión OSSIE_SQL_2026: los otros dialectos no definen su \
-                 significado y el motor no los interpreta.",
+                "Falta OSSIE_SQL_2026 o ANSI_SQL: el motor no interpreta los dialectos de proveedor.",
             );
             return (None, path.to_owned());
         };
         let path = format!("{path}/dialects/{k}/expression");
-        match crate::expression::parse(&expression.dialects[k].expression) {
+        match crate::expression::parse(&selected.expression) {
             Ok(ast) => (Some(ast), path),
             Err(mut diagnostic) => {
                 diagnostic.path.clone_from(&path);
