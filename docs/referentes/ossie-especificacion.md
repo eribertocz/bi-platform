@@ -311,7 +311,7 @@ Es la parte más relevante para nuestro motor de corrección (#45). Busca que **
 |---|---|---|
 | Lectura, escritura y validación de la capa 1 (YAML y JSON, esquema, unicidad, referencias, aridad, sintaxis) | Hecho (#54) | — |
 | `ANSI_SQL` como lengua común de facto (ejemplos, conversores) | Solo se calcula `OSSIE_SQL_2026` | #74 |
-| **Funciones REQUIRED** (texto, matemáticas, extracción y aritmética de fechas, estadísticos, percentiles, ventanas de ranking y desplazamiento, `SUM(DISTINCT)`, `%`) | El validador las acepta, pero la conversión a CSMIR las rechaza (`not_representable`) | Issue nuevo: ampliar CSMIR y el planificador para cumplir el **MUST** |
+| **Funciones REQUIRED** (texto, matemáticas, extracción y aritmética de fechas, estadísticos, percentiles, ventanas de ranking y desplazamiento, `SUM(DISTINCT)`, `%`) | El validador las acepta, pero la conversión a CSMIR las rechaza (`not_representable`) | #77: ampliar CSMIR y el planificador para cumplir el **MUST** |
 | `is_time`, descripciones y `ai_context` | Validados; no llegan a la API ni a la UI | #75 |
 | Referencias métrica → métrica (`ingresos / pedidos`) | Las admitimos; #486 las deja "para más adelante" y #246 las usa | Es **extensión nuestra**: al exportar a herramientas sin soporte, expandirlas (parte 4 de #48) |
 | Semántica de consulta y errores de #246 | Nuestro motor de corrección (#45) cubre lo mismo | **Adoptar sus códigos de error** junto a los nuestros, para ser compatibles |
