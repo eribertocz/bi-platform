@@ -62,6 +62,8 @@ struct Info {
 
 struct MetricState {
     segment: String,
+    /// The name as written in the document.
+    name: String,
     description: Option<String>,
     path: String,
     expression_path: String,
@@ -87,6 +89,7 @@ pub(super) fn metrics(converter: &mut Converter<'_>) {
         names.insert(crate::validate::normalize_identifier(&metric.name), i);
         states.push(MetricState {
             segment: ids::segment(&metric.name),
+            name: metric.name.clone(),
             description: metric.description.clone(),
             path,
             expression_path,
@@ -155,6 +158,7 @@ fn dataset_measures(converter: &mut Converter<'_>) {
             extension.dataset = Some(converter.model.datasets[d].name.clone());
             let state = MetricState {
                 segment: ids::segment(&measure.name),
+                name: measure.name.clone(),
                 description: None,
                 path: path.clone(),
                 expression_path: path.clone(),
@@ -462,6 +466,11 @@ impl Builder<'_, '_> {
             .ok_or_else(|| {
                 Failure::new(Code::InvalidIdentifier, "Nombre sin identificador estable.")
             })?;
+        // `<metric>.m<k>` keeps its suffix after the metric's written name.
+        let suffix = segment
+            .strip_prefix(self.metric.segment.as_str())
+            .unwrap_or_default();
+        metadata.label = Some(format!("{}{suffix}", self.metric.name));
         if segment == self.metric.segment {
             metadata.description.clone_from(&self.metric.description);
         }

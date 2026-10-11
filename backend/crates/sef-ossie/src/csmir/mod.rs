@@ -782,6 +782,12 @@ impl<'a> Converter<'a> {
             || format!("{}.{}", self.datasets[d].segment, field.segment),
             ids::segment,
         );
+        // People see the name as written; the ID segment is internal.
+        let label = field
+            .extension
+            .dimension
+            .clone()
+            .unwrap_or_else(|| format!("{}.{}", self.model.datasets[d].name, field.ossie.name));
         let semantic_role = field.extension.semantic_role.clone();
         let tzdb = field
             .extension
@@ -819,9 +825,10 @@ impl<'a> Converter<'a> {
                 return;
             }
         };
-        let Some(metadata) = self.metadata("dimension", &name, &path) else {
+        let Some(mut metadata) = self.metadata("dimension", &name, &path) else {
             return;
         };
+        metadata.label = Some(label);
         let binding = DimensionBinding {
             dataset: self.datasets[d].id.clone(),
             expression: expression.clone(),
