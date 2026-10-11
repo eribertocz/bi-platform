@@ -59,6 +59,9 @@ jobs:
         run: psql postgres://bi:bi@localhost:5432/bi -c "CREATE DATABASE bi_lake_catalog"
       - name: Tests (including PostgreSQL and DuckLake integration)
         run: cargo test --locked --all-features
+        env:
+          DATABASE_URL: postgres://bi:bi@localhost:5432/bi
+          BI_TEST_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
       - name: Layering - the semantic engine stays independent (ADR 0008)
         # sef-* crates are reusable by other BI tools: no async runtime,
         # transport, storage, engine or bi-platform crate in their graph.
@@ -69,9 +72,6 @@ jobs:
               exit 1
             fi
           done
-        env:
-          DATABASE_URL: postgres://bi:bi@localhost:5432/bi
-          BI_TEST_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
 
   bench:
     # Records a baseline (G0.13); no thresholds, shared runners are noisy.
