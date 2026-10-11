@@ -39,9 +39,10 @@ pub enum Code {
     ColumnArity,
     /// `to_columns` covers none of the declared keys of the `to` dataset.
     KeyNotCovered,
-    /// A portable expression does not parse as exactly one expression or
-    /// exceeds the parser's token/recursion budget.
+    /// A portable expression does not parse as exactly one expression.
     ExpressionSyntax,
+    /// An expression exceeds its byte, token, structural or parser recursion budget.
+    ExpressionTooLarge,
     /// A construct outside `OSSIE_SQL_2026` (subquery, vendor syntax…).
     UnsupportedConstruct,
     /// A function that is neither REQUIRED nor RECOMMENDED.
@@ -68,6 +69,7 @@ impl Code {
             Self::ColumnArity => "column_arity",
             Self::KeyNotCovered => "key_not_covered",
             Self::ExpressionSyntax => "expression_syntax",
+            Self::ExpressionTooLarge => "expression_too_large",
             Self::UnsupportedConstruct => "unsupported_construct",
             Self::UnknownFunction => "unknown_function",
             Self::AggregateInField => "aggregate_in_field",

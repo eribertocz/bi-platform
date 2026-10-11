@@ -19,16 +19,23 @@ use sqlparser::ast::{
     Function, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator, Value,
     WindowFrameBound, WindowFrameUnits, WindowSpec, WindowType,
 };
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
+use sqlparser::dialect::{Dialect, GenericDialect};
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::validate::MAX_IDENTIFIER_CHARS;
 
-/// Maximum significant tokens before constructing an AST. This bounds even
-/// left-deep operator chains, including their recursive walk and destruction.
-pub const MAX_EXPRESSION_TOKENS: usize = 256;
+/// Maximum significant tokens, including the width of CASE and IN lists.
+pub const MAX_EXPRESSION_TOKENS: usize = 4096;
+
+/// Conservative depth budget, checked before constructing any AST. Only
+/// certified shallow mappings/literal lists receive a width discount.
+pub const MAX_EXPRESSION_STRUCTURAL_TOKENS: usize = 256;
+
+/// Parser call depth, independent of the depth of left-deep operator trees.
+pub const MAX_EXPRESSION_RECURSION: usize = 16;
 
 /// Where an expression appears: field expressions are row-level scalars;
 /// metric expressions aggregate.
@@ -96,7 +103,8 @@ pub struct Analysis {
 ///
 /// # Errors
 /// [`Code::ExpressionSyntax`] when it does not parse as exactly one
-/// expression; otherwise the first construct the language does not allow.
+/// expression; [`Code::ExpressionTooLarge`] when a resource budget is exceeded;
+/// otherwise the first construct the language does not allow.
 pub fn analyze(text: &str, context: Context) -> Result<Analysis, Diagnostic> {
     let expr = parse(text)?;
     let mut walker = Walker {
@@ -113,9 +121,7 @@ fn parse(text: &str) -> Result<Expr, Diagnostic> {
     let syntax = |message: String| Diagnostic::error(Code::ExpressionSyntax, "", message);
     let dialect = GenericDialect {};
     if text.len() > crate::load::MAX_DOCUMENT_BYTES {
-        return Err(syntax(
-            "La expresión supera el presupuesto de bytes.".to_owned(),
-        ));
+        return Err(too_large(crate::load::MAX_DOCUMENT_BYTES, "bytes"));
     }
     let tokens = Tokenizer::new(&dialect, text)
         .tokenize()
@@ -125,29 +131,213 @@ fn parse(text: &str) -> Result<Expr, Diagnostic> {
         .filter(|token| !matches!(token, Token::Whitespace(_)))
         .collect();
     if tokens.len() > MAX_EXPRESSION_TOKENS {
-        return Err(syntax(format!(
-            "La expresión supera {MAX_EXPRESSION_TOKENS} tokens."
-        )));
+        return Err(too_large(MAX_EXPRESSION_TOKENS, "tokens significativos"));
     }
+    check_structure_budget(&tokens)?;
     for token in &tokens {
         if let Token::Word(word) = token {
             validate_identifier(&word.value, word.quote_style)?;
         }
     }
     let mut parser = Parser::new(&dialect)
-        .with_recursion_limit(16)
+        .with_recursion_limit(MAX_EXPRESSION_RECURSION)
         .with_tokens(tokens);
-    let expr = parser
-        .parse_expr()
-        .map_err(|e| syntax(format!("Expresión no válida: {e}")))?;
+    let expr = parser.parse_expr().map_err(|e| match e {
+        ParserError::RecursionLimitExceeded => {
+            too_large(MAX_EXPRESSION_RECURSION, "niveles de recursión del parser")
+        }
+        other => syntax_diagnostic(text, format!("Expresión no válida: {other}")),
+    })?;
     if parser.peek_token().token != Token::EOF {
-        return Err(syntax(
+        return Err(syntax_diagnostic(
+            text,
             "Después de la expresión sobra texto: una expresión es un solo valor, no varias \
              sentencias."
                 .to_owned(),
         ));
     }
     Ok(expr)
+}
+
+/// `GenericDialect` may recover from a recursion error by treating CASE/NOT as
+/// identifiers, then report trailing text instead. Probe only failed parses,
+/// disabling that recovery. The probe never admits an expression or changes
+/// the successful `GenericDialect` path, and uses the same prechecked input and
+/// recursion cap. A typed resource error takes precedence over syntax.
+fn syntax_diagnostic(text: &str, message: String) -> Diagnostic {
+    let dialect = RecursionDiagnosticDialect;
+    if let Ok(tokens) = Tokenizer::new(&GenericDialect {}, text).tokenize()
+        && matches!(
+            Parser::new(&dialect)
+                .with_recursion_limit(MAX_EXPRESSION_RECURSION)
+                .with_tokens(tokens)
+                .parse_expr(),
+            Err(ParserError::RecursionLimitExceeded)
+        )
+    {
+        return too_large(MAX_EXPRESSION_RECURSION, "niveles de recursión del parser");
+    }
+    Diagnostic::error(Code::ExpressionSyntax, "", message)
+}
+
+#[derive(Debug)]
+struct RecursionDiagnosticDialect;
+
+impl Dialect for RecursionDiagnosticDialect {
+    fn dialect(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<GenericDialect>()
+    }
+
+    fn is_identifier_start(&self, ch: char) -> bool {
+        GenericDialect {}.is_identifier_start(ch)
+    }
+
+    fn is_identifier_part(&self, ch: char) -> bool {
+        GenericDialect {}.is_identifier_part(ch)
+    }
+
+    fn is_reserved_for_identifier(&self, _keyword: Keyword) -> bool {
+        true
+    }
+}
+
+fn too_large(limit: usize, unit: &str) -> Diagnostic {
+    Diagnostic::error(
+        Code::ExpressionTooLarge,
+        "",
+        format!(
+            "La expresión supera el límite de {limit} {unit}. Divídela en varios campos o mueve el mapeo a una tabla."
+        ),
+    )
+}
+
+/// Keep the original 256-token depth guarantee, discounting only complete
+/// shallow forms. Replacing a flat CASE by its widest branch, or a literal IN
+/// list by its widest literal, cannot decrease the longest AST path. All other
+/// tokens (including malformed forms and unsupported SQL) pay their full cost.
+/// No generic comma/keyword resets: those could hide deep trees in subqueries
+/// or expressions using keyword identifiers. The original tokens reach the
+/// SQL parser and allowlist unchanged; this is admission, not language parsing.
+fn check_structure_budget(tokens: &[Token]) -> Result<(), Diagnostic> {
+    let mut position = 0;
+    let mut cost = 0;
+    while position < tokens.len() {
+        let shallow =
+            shallow_mapping(tokens, position).or_else(|| literal_in_list(tokens, position));
+        if let Some((end, width_cost)) = shallow {
+            cost += width_cost;
+            position = end;
+        } else {
+            cost += 1;
+            position += 1;
+        }
+        if cost > MAX_EXPRESSION_STRUCTURAL_TOKENS {
+            return Err(too_large(
+                MAX_EXPRESSION_STRUCTURAL_TOKENS,
+                "tokens estructurales (presupuesto de profundidad)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn keyword(tokens: &[Token], position: usize, expected: Keyword) -> bool {
+    matches!(tokens.get(position), Some(Token::Word(word))
+        if word.quote_style.is_none() && word.keyword == expected)
+}
+
+/// Only leaves, signed numbers and at most two-part references. In particular,
+/// no function, parenthesis, CASE, operator chain or reserved keyword identifier
+/// can acquire a width discount through this recognizer.
+fn atom_end(tokens: &[Token], position: usize, references: bool) -> Option<usize> {
+    match tokens.get(position)? {
+        Token::Number(..) | Token::SingleQuotedString(_) => Some(position + 1),
+        Token::Plus | Token::Minus
+            if matches!(tokens.get(position + 1), Some(Token::Number(..))) =>
+        {
+            Some(position + 2)
+        }
+        Token::Word(word)
+            if word.quote_style.is_none()
+                && matches!(word.keyword, Keyword::TRUE | Keyword::FALSE | Keyword::NULL) =>
+        {
+            Some(position + 1)
+        }
+        Token::Word(word)
+            if references && (word.quote_style.is_some() || word.keyword == Keyword::NoKeyword) =>
+        {
+            if tokens.get(position + 1) == Some(&Token::Period) {
+                match tokens.get(position + 2) {
+                    Some(Token::Word(part))
+                        if part.quote_style.is_some() || part.keyword == Keyword::NoKeyword =>
+                    {
+                        Some(position + 3)
+                    }
+                    _ => None,
+                }
+            } else {
+                Some(position + 1)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn literal_in_list(tokens: &[Token], start: usize) -> Option<(usize, usize)> {
+    if !keyword(tokens, start, Keyword::IN) || tokens.get(start + 1) != Some(&Token::LParen) {
+        return None;
+    }
+    let mut position = start + 2;
+    let mut widest = 0;
+    loop {
+        let end = atom_end(tokens, position, false)?;
+        widest = widest.max(end - position);
+        position = end;
+        match tokens.get(position)? {
+            Token::Comma => position += 1,
+            Token::RParen => return Some((position + 1, widest + 3)),
+            _ => return None,
+        }
+    }
+}
+
+/// Certifies simple and searched mappings with atomic results and conditions
+/// that are atoms or single comparisons. More complex CASE expressions remain
+/// supported, but consume the full conservative token budget.
+fn shallow_mapping(tokens: &[Token], start: usize) -> Option<(usize, usize)> {
+    if !keyword(tokens, start, Keyword::CASE) {
+        return None;
+    }
+    let mut position = start + 1;
+    if !keyword(tokens, position, Keyword::WHEN) {
+        position = atom_end(tokens, position, true)?;
+    }
+    let base = position - start + 1; // CASE, operand and END.
+    let mut widest = 0;
+    while keyword(tokens, position, Keyword::WHEN) {
+        let branch = position;
+        position = atom_end(tokens, position + 1, true)?;
+        if matches!(
+            tokens.get(position),
+            Some(Token::Eq | Token::Neq | Token::Lt | Token::Gt | Token::LtEq | Token::GtEq)
+        ) {
+            position = atom_end(tokens, position + 1, true)?;
+        }
+        if !keyword(tokens, position, Keyword::THEN) {
+            return None;
+        }
+        position = atom_end(tokens, position + 1, true)?;
+        widest = widest.max(position - branch);
+    }
+    if widest == 0 {
+        return None;
+    }
+    if keyword(tokens, position, Keyword::ELSE) {
+        let otherwise = position;
+        position = atom_end(tokens, position + 1, true)?;
+        widest = widest.max(position - otherwise);
+    }
+    keyword(tokens, position, Keyword::END).then_some((position + 1, base + widest))
 }
 
 struct Walker {

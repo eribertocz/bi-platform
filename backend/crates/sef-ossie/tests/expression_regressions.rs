@@ -6,7 +6,7 @@ use std::process::Command;
 
 use proptest::prelude::*;
 use sef_ossie::expression::{
-    AggregateClass, AggregatePhase, Context, MAX_EXPRESSION_TOKENS, Reference, analyze,
+    AggregateClass, AggregatePhase, Context, MAX_EXPRESSION_STRUCTURAL_TOKENS, Reference, analyze,
 };
 use sef_ossie::{Code, load, to_json};
 
@@ -43,6 +43,7 @@ fn token_budget_protects_parse_walk_and_drop_in_an_isolated_process() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
+            .env_remove("RUST_MIN_STACK")
             .output()
             .unwrap();
         assert!(
@@ -56,15 +57,15 @@ fn token_budget_protects_parse_walk_and_drop_in_an_isolated_process() {
     }
     for (term, op) in [("1", " + "), ("TRUE", " AND "), ("'x'", " || ")] {
         eprintln!("isolated token budget: {op}");
-        rejected(&vec![term; 10_000].join(op), Code::ExpressionSyntax);
+        rejected(&vec![term; 10_000].join(op), Code::ExpressionTooLarge);
         // Exercise the maximum accepted left-deep AST and its destruction.
         accepted(
-            &vec![term; MAX_EXPRESSION_TOKENS / 2].join(op),
+            &vec![term; MAX_EXPRESSION_STRUCTURAL_TOKENS / 2].join(op),
             Context::Field,
         );
         rejected(
-            &vec![term; MAX_EXPRESSION_TOKENS / 2 + 1].join(op),
-            Code::ExpressionSyntax,
+            &vec![term; MAX_EXPRESSION_STRUCTURAL_TOKENS / 2 + 1].join(op),
+            Code::ExpressionTooLarge,
         );
     }
     for text in [
@@ -72,7 +73,7 @@ fn token_budget_protects_parse_walk_and_drop_in_an_isolated_process() {
         format!("{}TRUE", "NOT ".repeat(10_000)),
         format!("{}1{}", "ABS(".repeat(40), ")".repeat(40)),
     ] {
-        rejected(&text, Code::ExpressionSyntax);
+        rejected(&text, Code::ExpressionTooLarge);
     }
     // The budget is lexical: operators inside strings/comments do not count.
     accepted(
@@ -578,6 +579,6 @@ proptest! {
         let term = match operator { " AND " => "TRUE", " || " => "'x'", _ => "1" };
         let text = vec![term; terms].join(operator);
         let result = analyze(&text, Context::Field);
-        prop_assert_eq!(result.is_ok(), terms * 2 - 1 <= MAX_EXPRESSION_TOKENS);
+        prop_assert_eq!(result.is_ok(), terms * 2 - 1 <= MAX_EXPRESSION_STRUCTURAL_TOKENS);
     }
 }
