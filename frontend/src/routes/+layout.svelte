@@ -19,6 +19,12 @@
   <nav aria-label="Navegación principal">
     <ul class="nav-list">
       <li>
+        <a
+          href={resolve('/explorar')}
+          aria-current={page.url.pathname === '/explorar' ? 'page' : undefined}>Exploración</a
+        >
+      </li>
+      <li>
         <a href={resolve('/')} aria-current={page.url.pathname === '/' ? 'page' : undefined}
           >Inicio</a
         >

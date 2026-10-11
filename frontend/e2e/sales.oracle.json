@@ -1,0 +1,100 @@
+{
+  "fixture": "sales",
+  "schema_version": 1,
+  "seed": "42",
+  "rows": "1000000",
+  "columns": [
+    {
+      "name": "order_id",
+      "type": "BIGINT",
+      "nullable": false
+    },
+    {
+      "name": "ordered_at",
+      "type": "TIMESTAMP WITH TIME ZONE",
+      "nullable": false
+    },
+    {
+      "name": "region",
+      "type": "VARCHAR",
+      "nullable": true
+    },
+    {
+      "name": "quantity",
+      "type": "BIGINT",
+      "nullable": true
+    },
+    {
+      "name": "amount",
+      "type": "DECIMAL(18,2)",
+      "nullable": true
+    }
+  ],
+  "totals": {
+    "row_count": "1000000",
+    "order_id": {
+      "count": "1000000",
+      "null_count": "0",
+      "sum": "9007199255240992500000",
+      "min": "9007199254740993",
+      "max": "9007199255740992"
+    },
+    "ordered_at": {
+      "min": "2026-01-01T00:00:28.096788Z",
+      "max": "2026-12-31T23:59:43.255597Z"
+    },
+    "region_null_count": "29866",
+    "quantity": {
+      "count": "980145",
+      "null_count": "19855",
+      "sum": "24999533",
+      "min": "1",
+      "max": "50"
+    },
+    "amount": {
+      "count": "980189",
+      "null_count": "19811",
+      "sum": "10000048029323989.26",
+      "min": "-99994.07",
+      "max": "9999999999999999.99"
+    }
+  },
+  "by_region": [
+    {
+      "region": "central",
+      "row_count": "194066",
+      "quantity_sum": "4848934",
+      "amount_sum": "9334131559.72"
+    },
+    {
+      "region": "east",
+      "row_count": "193650",
+      "quantity_sum": "4841854",
+      "amount_sum": "10000009275125921.28"
+    },
+    {
+      "region": "north",
+      "row_count": "194180",
+      "quantity_sum": "4858875",
+      "amount_sum": "9316665435.13"
+    },
+    {
+      "region": "south",
+      "row_count": "194156",
+      "quantity_sum": "4863219",
+      "amount_sum": "9339814159.21"
+    },
+    {
+      "region": "west",
+      "row_count": "194082",
+      "quantity_sum": "4843457",
+      "amount_sum": "9325016931.32"
+    },
+    {
+      "region": null,
+      "row_count": "29866",
+      "quantity_sum": "743194",
+      "amount_sum": "1438569982.60"
+    }
+  ]
+}

@@ -17,6 +17,7 @@
   "scripts": {
     "dev": "vite dev --host 127.0.0.1",
     "build": "vite build",
+    "measure:explore": "node scripts/measure-explore-bundle.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "prepare": "svelte-kit sync",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -52,5 +53,8 @@
     "typescript-eslint": "8.71.1",
     "vite": "8.3.4",
     "vitest": "5.0.3"
+  },
+  "dependencies": {
+    "echarts": "6.1.0"
   }
 }
