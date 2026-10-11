@@ -1,6 +1,6 @@
 # 0005 — Modelos SQL estilo SQLMesh: motor de cálculo y destino separados
 
-**Estado:** aprobada por el propietario, 2026-10-11. Corregida ese mismo día para separar el motor que calcula del lugar donde se guarda el resultado. **Amplía:** 0001 (un modelo puede calcularse en ClickHouse si el usuario lo elige) y M02 (formato de `ModelDefinition`). **Referentes:** SQLMesh (formato y plan), dbt (pruebas, linaje), Rill (`connector` de entrada frente a `output.connector` y `stage`, en `models.md` v0.90.5).
+**Estado:** aprobada por el propietario, 2026-10-11. Corregida ese mismo día para separar el motor que calcula del lugar donde se guarda el resultado. **Amplía:** 0001 (un modelo puede calcularse en ClickHouse si el usuario lo elige) y M02 (formato de `ModelDefinition`). **Referentes:** SQLMesh (formato y plan), dbt (pruebas, linaje), Rill (`connector` de entrada frente a `output.connector` y `stage`, en `models.md` v0.90.5). **Matizada por:** [0009](0009-modos-de-datos-y-persistencia-opcional.md) (`cron` pasa a `pipelines/`; capas opcionales).
 
 ## Contexto
 El propietario prefiere cómo SQLMesh declara los modelos: SQL con una cabecera declarativa y capas staging → intermediate → mart que se referencian por nombre. También exige separar **quién transforma** de **dónde se almacena**, principio del lakehouse. Ejemplo: calcula DuckDB y guarda en DuckLake (catálogo en PostgreSQL, datos en S3) o en ClickHouse. dbt y SQLMesh son Python y no pueden embeberse en el servidor Rust; M02 desaconseja mezclar su runtime y su programador con el núcleo.

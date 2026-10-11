@@ -37,16 +37,32 @@ confidence-threshold = 0.93
 ignore = true
 
 [bans]
-deny = [
-    { crate = "aws-lc-rs", reason = "rustls uses ring exclusively; a second provider adds native compilation and ambiguous TLS initialization (#55)." },
-    { crate = "aws-lc-sys", reason = "AWS-LC C/assembly must not return through transitive TLS features; ring is the selected rustls provider (#55)." },
-]
 # Duplicate versions come from upstream crates (sqlx, arrow, ureq…); they
 # cost build time, not safety, so they are not a policy failure.
 multiple-versions = "allow"
 wildcards = "deny"
 # Path dependencies between our own private crates.
 allow-wildcard-paths = true
+
+# Layering (ADR 0008): only the edge adapters may depend directly on
+# transport, storage and engine crates, and no module may depend on an
+# adapter. A crate added here without its wrapper fails the build.
+deny = [
+    { crate = "aws-lc-rs", reason = "rustls uses ring exclusively; a second provider adds native compilation and ambiguous TLS initialization (#55)." },
+    { crate = "aws-lc-sys", reason = "AWS-LC C/assembly must not return through transitive TLS features; ring is the selected rustls provider (#55)." },
+    # HTTP transport and its contract generator: the server only.
+    { crate = "axum", wrappers = ["bi-server"] },
+    { crate = "utoipa", wrappers = ["bi-server"] },
+    # Metadata store and telemetry export: the server only.
+    { crate = "sqlx", wrappers = ["bi-server"] },
+    { crate = "opentelemetry-otlp", wrappers = ["bi-server"] },
+    # The embedded engine: its runtime adapter only.
+    { crate = "duckdb", wrappers = ["bi-runtime"] },
+    # Adapters are composed by the server only; the semantic engine (sef-*)
+    # never depends on them (also checked in backend.yml).
+    { crate = "bi-runtime", wrappers = ["bi-server"] },
+    { crate = "bi-fixtures", wrappers = ["bi-runtime", "bi-server"] },
+]
 
 [sources]
 unknown-registry = "deny"

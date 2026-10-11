@@ -1,6 +1,6 @@
 # 0003 — Definiciones como archivos de un proyecto en Git
 
-**Estado:** aprobada por el propietario, 2026-10-11 (Issue #28). El propietario mostró el explorador de proyecto de Rill Developer como modelo. **Concreta:** M10 §0, puntos 1–3.
+**Estado:** aprobada por el propietario, 2026-10-11 (Issue #28). El propietario mostró el explorador de proyecto de Rill Developer como modelo. **Concreta:** M10 §0, puntos 1–3. **Matizada por:** [0009](0009-modos-de-datos-y-persistencia-opcional.md) (carpeta `pipelines/`; `sources/` sin programación).
 
 ## Contexto
 M10 pide definiciones declarativas, portables y versionables, con "archivos legibles y Git como flujo principal", y PostgreSQL como repositorio multiusuario opcional. Rill, Cube, Lightdash, dbt y Evidence guardan el proyecto como código. Power BI se ha movido en la misma dirección con PBIP/TMDL, y Looker con LookML.
