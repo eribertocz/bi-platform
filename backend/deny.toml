@@ -44,6 +44,24 @@ wildcards = "deny"
 # Path dependencies between our own private crates.
 allow-wildcard-paths = true
 
+# Layering (ADR 0008): only the edge adapters may depend directly on
+# transport, storage and engine crates, and no module may depend on an
+# adapter. A crate added here without its wrapper fails the build.
+deny = [
+    # HTTP transport and its contract generator: the server only.
+    { crate = "axum", wrappers = ["bi-server"] },
+    { crate = "utoipa", wrappers = ["bi-server"] },
+    # Metadata store and telemetry export: the server only.
+    { crate = "sqlx", wrappers = ["bi-server"] },
+    { crate = "opentelemetry-otlp", wrappers = ["bi-server"] },
+    # The embedded engine: its runtime adapter only.
+    { crate = "duckdb", wrappers = ["bi-runtime"] },
+    # Adapters are composed by the server only; the semantic engine (sef-*)
+    # never depends on them (also checked in backend.yml).
+    { crate = "bi-runtime", wrappers = ["bi-server"] },
+    { crate = "bi-fixtures", wrappers = ["bi-runtime", "bi-server"] },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

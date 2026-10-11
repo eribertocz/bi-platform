@@ -13,5 +13,6 @@ Cada registro contiene: contexto, decisión, alternativas descartadas, consecuen
 | [0005](0005-modelos-sql-estilo-sqlmesh.md) | Modelos SQL estilo SQLMesh (staging → intermediate → mart) con motor de cálculo (`engine`) y destino (`output`) separados | Aprobada 2026-10-11 | Amplía 0001 y el formato de modelos de M02 |
 | [0006](0006-motor-semantico-sef.md) | El motor semántico es SEF (CSMIR/SQIR/SEIR, corpus de 21 casos), integrado en bi-platform | Aprobada 2026-10-11 | Diseño semántico de M04 y la parte semántica de M05 |
 | [0007](0007-construccion-propia-por-capa.md) | Construcción propia por capa al nivel de Atlas BI (sin integrar Cube, SQLMesh, Airflow…); sí motores, librerías y estándares | Aprobada 2026-10-11 | Estrategia de producto |
+| [0008](0008-modulos-desacoplados-por-contratos.md) | Módulos desacoplados por contratos (puertos y adaptadores), vigilado en CI | Aprobada 2026-10-11 | Refuerza SEF 02/08 y M12/M13 |
 
 Plantilla: copiar un registro existente y numerar con el siguiente número libre.

@@ -59,6 +59,16 @@ jobs:
         run: psql postgres://bi:bi@localhost:5432/bi -c "CREATE DATABASE bi_lake_catalog"
       - name: Tests (including PostgreSQL and DuckLake integration)
         run: cargo test --locked --all-features
+      - name: Layering - the semantic engine stays independent (ADR 0008)
+        # sef-* crates are reusable by other BI tools: no async runtime,
+        # transport, storage, engine or bi-platform crate in their graph.
+        run: |
+          for crate in $(cargo metadata --format-version 1 --no-deps | jq -r '.packages[].name | select(startswith("sef-"))'); do
+            if cargo tree --locked -p "$crate" -e normal --prefix none --format '{p}' | grep -E '^(tokio|axum|tower|hyper|sqlx|duckdb|opentelemetry|bi-[a-z]+) '; then
+              echo "::error::$crate depends on a platform or infrastructure crate (ADR 0008)"
+              exit 1
+            fi
+          done
         env:
           DATABASE_URL: postgres://bi:bi@localhost:5432/bi
           BI_TEST_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
