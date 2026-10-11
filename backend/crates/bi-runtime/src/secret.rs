@@ -192,6 +192,86 @@ mod tests {
         }
     }
 
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::super::{passwords, scrub};
+
+        /// Any text but the mask's own character: a password made of `*`
+        /// cannot be told apart from the mask that replaces it.
+        fn password() -> impl Strategy<Value = String> {
+            "[^*]{1,24}"
+        }
+
+        fn escaped(password: &str, escape: impl Fn(char) -> bool) -> String {
+            password
+                .chars()
+                .flat_map(|c| escape(c).then_some('\\').into_iter().chain([c]))
+                .collect()
+        }
+
+        fn percent_encoded(password: &str) -> String {
+            password
+                .bytes()
+                .map(|b| {
+                    if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                        char::from(b).to_string()
+                    } else {
+                        format!("%{b:02X}")
+                    }
+                })
+                .collect()
+        }
+
+        /// A libpq connection string in one of its four forms, and the
+        /// password as written in it.
+        fn conninfo(password: &str, form: u8) -> (String, String) {
+            let written = match form {
+                0 => format!("'{}'", escaped(password, |c| c == '\'' || c == '\\')),
+                1 => escaped(password, |c| c.is_whitespace() || c == '\'' || c == '\\'),
+                _ => percent_encoded(password),
+            };
+            let conninfo = match form {
+                0 => format!("host=db dbname=lake password={written} user=bi"),
+                1 => format!("password = {written} host=db"),
+                2 => format!("postgresql://bi:{written}@db:5432/lake"),
+                _ => format!("postgres://db/lake?user=bi&password={written}&sslmode=require"),
+            };
+            (conninfo, written)
+        }
+
+        proptest! {
+            #[test]
+            fn every_form_yields_the_password(password in password(), form in 0..4_u8) {
+                let (conninfo, written) = conninfo(&password, form);
+                let found = passwords(&conninfo).expect("a well-formed connection string");
+                prop_assert!(found.contains(&password), "{conninfo:?} → {found:?}");
+                prop_assert!(found.contains(&written), "{conninfo:?} → {found:?}");
+            }
+
+            #[test]
+            fn messages_never_keep_the_password(
+                password in password(),
+                form in 0..4_u8,
+                around in prop::collection::vec(any::<String>(), 3),
+            ) {
+                let (conninfo, written) = conninfo(&password, form);
+                // A driver error may echo the connection string and the password.
+                let message = format!(
+                    "{}{conninfo}{}{password}{}", around[0], around[1], around[2]
+                );
+                let scrubbed = scrub(&message, &conninfo);
+                prop_assert!(!scrubbed.contains(&password), "{scrubbed:?}");
+                prop_assert!(!scrubbed.contains(&written), "{scrubbed:?}");
+            }
+
+            #[test]
+            fn arbitrary_input_never_panics(message in any::<String>(), conninfo in any::<String>()) {
+                let _ = scrub(&message, &conninfo);
+            }
+        }
+    }
+
     #[test]
     fn strings_without_passwords_are_left_alone() {
         assert_eq!(

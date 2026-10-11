@@ -39,6 +39,7 @@ opentelemetry-proto.workspace = true
 prost.workspace = true
 sysinfo.workspace = true
 http-body-util.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 tower.workspace = true
 

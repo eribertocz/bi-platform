@@ -1,4 +1,4 @@
-# Dependency policy checked by `cargo deny check`:
+# Dependency policy checked by `cargo deny check` in CI (backend.yml):
 # known vulnerabilities and yanked versions fail the build, only permissive
 # licenses are accepted, and crates come only from crates.io.
 

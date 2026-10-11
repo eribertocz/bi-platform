@@ -377,6 +377,7 @@ version = "0.1.0"
 dependencies = [
  "bi-fixtures",
  "duckdb",
+ "proptest",
  "tempfile",
  "tokio",
  "tracing",
@@ -395,6 +396,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry-proto",
  "opentelemetry_sdk",
+ "proptest",
  "prost",
  "serde",
  "serde_json",
