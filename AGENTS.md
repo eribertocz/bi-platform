@@ -5,8 +5,8 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 ## Referencia técnica
 
 - Arquitectura: `LEER_PRIMERO.md`, `docs/arquitectura/INDICE_17_MODULOS.md`, `docs/arquitectura/DECISIONES_TECNICAS_RC2.md`, `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`; consultar el módulo pertinente a cada tarea.
-- No inventar una arquitectura alternativa. Toda desviación se justifica en el Issue o PR.
-- `docs/arquitectura/` es la documentación original: no se modifica (hashes en `INVENTARIO.md`).
+- **Decisiones vigentes: `docs/decisiones/` (ADR). Prevalecen sobre `docs/arquitectura/` donde la contradigan.** Toda desviación de la base se registra como ADR; las de producto, con la aprobación del propietario.
+- `docs/arquitectura/` es la base histórica original: no se modifica (hashes en `INVENTARIO.md`).
 - Contrato HTTP vigente: `docs/api/openapi.json`. Los archivos de `contratos_referencia/` son solo muestras.
 
 ## Flujo
@@ -43,4 +43,5 @@ Cada PR, de cualquiera de los dos, cumple esto o explica por qué no aplica:
 - Contratos estables: un cambio incompatible de la API se versiona; nunca se rompe un cliente sin aviso.
 - UI: accesibilidad verificada (axe) y tamaño de bundle medido por pantalla.
 - Causas raíz, nunca parches que oculten síntomas; sin `TODO` ni código muerto al integrar.
+- Referentes: antes de diseñar una capacidad nueva, revisar cómo la resuelven 2–4 herramientas de referencia (`docs/referentes/README.md`) y dejar en el PR qué se toma, qué se descarta y por qué.
 - Revisión (cuando aplica): el revisor lee el cambio y ejecuta las pruebas afectadas para comprobar el comportamiento. No reconstruye imágenes ni repite lo que CI ya ejecuta.
