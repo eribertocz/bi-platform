@@ -43,6 +43,6 @@ Cada PR, de cualquiera de los dos, cumple esto o explica por qué no aplica:
 - Contratos estables: un cambio incompatible de la API se versiona; nunca se rompe un cliente sin aviso.
 - UI: accesibilidad verificada (axe) y tamaño de bundle medido por pantalla.
 - Causas raíz, nunca parches que oculten síntomas; sin `TODO` ni código muerto al integrar.
-- Referentes: antes de diseñar una capacidad nueva, revisar cómo la resuelven 2–4 herramientas de referencia (`docs/referentes/README.md`) y dejar en el PR qué se toma, qué se descarta y por qué.
+- Referentes: antes de diseñar una capacidad nueva, revisar cómo la resuelven 2–4 herramientas de referencia (`docs/referentes/README.md`), **leyendo su código fuente cuando es abierto** (ELT: SQLMesh y Rill; motor semántico: Cube, Malloy, MetricFlow y Rill; visualización: Rill, cuya UI es Svelte, Superset y Grafana), y dejar en el PR qué se toma, qué se descarta y por qué.
 - **Nivel mínimo: Atlas BI.** Cada capacidad (visualización, ELT, motor semántico, filtros, trabajos…) alcanza al menos la profundidad de diseño del documento equivalente de Atlas BI (`E:\bi-platform\docs\`, tabla en `docs/referentes/atlasbi.md`), con implementación propia: sin Cube ni SQLMesh como dependencias.
 - Revisión (cuando aplica): el revisor lee el cambio y ejecuta las pruebas afectadas para comprobar el comportamiento. No reconstruye imágenes ni repite lo que CI ya ejecuta.
