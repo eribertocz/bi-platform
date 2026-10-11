@@ -8,7 +8,7 @@ M10 pide definiciones declarativas, portables y versionables, con "archivos legi
 ## Decisión
 ```
 mi-proyecto/
-├── project.yaml     # nombre, conexión por defecto, valores por defecto, variables, usuarios de prueba
+├── project.yaml     # nombre, conexión principal elegida al crearlo (0004), variables, usuarios de prueba
 ├── connectors/      # *.yaml: DuckLake, PostgreSQL, ClickHouse…; credenciales solo como referencia a secretos
 ├── sources/         # *.yaml: qué se importa y cuándo (M01)
 ├── models/          # *.sql: transformaciones en SQL de DuckDB (M02)
@@ -19,7 +19,7 @@ mi-proyecto/
 ```
 - Cada archivo es un **recurso tipado** con esquema validable (JSON Schema publicado) y errores por archivo y línea.
 - La UI incluye un **explorador de proyecto** (árbol, "Añadir" con plantillas, edición validada) y recarga en caliente (ver `docs/referentes/rill.md`, punto R1).
-- **PostgreSQL** guarda solo el catálogo de DuckLake (`bi_lake_catalog`) y el estado operativo (`bi`): usuarios, sesiones, permisos, ejecuciones, auditoría y punteros a revisiones publicadas.
+- **La base PostgreSQL de la plataforma** (`bi`) guarda solo el estado operativo: usuarios, sesiones, permisos, ejecuciones, auditoría y punteros a revisiones publicadas. El catálogo de DuckLake vive donde el usuario lo configure (0004); en desarrollo, en el PostgreSQL local (`bi_lake_catalog`).
 
 ## Alternativas descartadas
 - **Definiciones en PostgreSQL como formato principal:** no son revisables en Git, son difíciles de portar y crean dependencia de la base de datos (M10 la descarta como núcleo).
