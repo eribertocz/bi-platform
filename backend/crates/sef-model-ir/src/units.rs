@@ -12,6 +12,9 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// # Errors
+    ///
+    /// Returns `IncompatibleUnits` if the declared unit identifier is malformed.
     pub fn validate(&self) -> Result<(), Diagnostic> {
         let valid = match self {
             Self::Currency { iso4217 } => {
@@ -37,6 +40,9 @@ impl Unit {
     }
 }
 
+/// # Errors
+///
+/// Returns `IncompatibleUnits` if the declared units differ.
 pub fn require_same_units(left: &Option<Unit>, right: &Option<Unit>) -> Result<(), Diagnostic> {
     if left == right {
         Ok(())

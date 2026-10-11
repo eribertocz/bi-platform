@@ -31,10 +31,10 @@ fn integer() -> ValueType {
 fn decimal() -> ValueType {
     ValueType::Decimal(DecimalType::new(12, 2).expect("valid decimal"))
 }
-fn currency(code: &str) -> Option<Unit> {
-    Some(Unit::Currency {
+fn currency(code: &str) -> Unit {
+    Unit::Currency {
         iso4217: code.into(),
-    })
+    }
 }
 fn field_expr(name: &str, value_type: ValueType, unit: Option<Unit>) -> ScalarExpr {
     ScalarExpr {
@@ -70,7 +70,7 @@ fn base_model() -> ModelDefinition {
                 metadata: metadata("field", &amount),
                 dataset: id("dataset", name),
                 value_type: decimal(),
-                unit: currency("USD"),
+                unit: Some(currency("USD")),
                 nullable: true,
                 binding: SourceHandle::new("amount").expect("valid handle"),
             },
@@ -119,11 +119,15 @@ fn base_model() -> ModelDefinition {
     model.measures.push(Measure {
         metadata: metadata("measure", "revenue"),
         dataset: id("dataset", "orders"),
-        scalar_expression: Some(field_expr("orders-amount", decimal(), currency("USD"))),
+        scalar_expression: Some(field_expr(
+            "orders-amount",
+            decimal(),
+            Some(currency("USD")),
+        )),
         aggregation: AggregateFunction::Sum,
         intrinsic_filter: None,
         value_type: decimal(),
-        unit: currency("USD"),
+        unit: Some(currency("USD")),
         input_grain: model.datasets[0].observation_grain.clone(),
         aggregation_contract: AggregationContract::fully_additive(),
         null_semantics: AggregateNullSemantics::IgnoreNullsNullIfEmpty,
@@ -143,11 +147,11 @@ fn metric(name: &str, target: &str, metric_ref: bool) -> Metric {
                 MetricExprKind::MeasureRef(reference.clone())
             },
             value_type: decimal(),
-            unit: currency("USD"),
+            unit: Some(currency("USD")),
         },
         intrinsic_filter: None,
         value_type: decimal(),
-        unit: currency("USD"),
+        unit: Some(currency("USD")),
         native_grain: Grain::global(),
         aggregation_contract: AggregationContract::fully_additive(),
         time_behavior: None,
@@ -216,12 +220,16 @@ fn freshness_evidence_and_labels_do_not_change_semantic_hashes() {
 #[test]
 fn different_currencies_coexist_until_a_definition_combines_them() {
     let mut model = base_model();
-    model.datasets[1].fields[1].unit = currency("BOB");
+    model.datasets[1].fields[1].unit = Some(currency("BOB"));
     let mut bob = model.measures[0].clone();
     bob.metadata = metadata("measure", "bob");
     bob.dataset = id("dataset", "customers");
-    bob.scalar_expression = Some(field_expr("customers-amount", decimal(), currency("BOB")));
-    bob.unit = currency("BOB");
+    bob.scalar_expression = Some(field_expr(
+        "customers-amount",
+        decimal(),
+        Some(currency("BOB")),
+    ));
+    bob.unit = Some(currency("BOB"));
     model.measures.push(bob);
     assert!(
         model.clone().compile().is_ok(),
@@ -234,12 +242,12 @@ fn different_currencies_coexist_until_a_definition_combines_them() {
             right: Box::new(MetricExpr {
                 kind: MetricExprKind::MeasureRef(id("measure", "bob")),
                 value_type: decimal(),
-                unit: currency("BOB"),
+                unit: Some(currency("BOB")),
             }),
             contract: NumericContract::default(),
         },
         value_type: ValueType::Decimal(DecimalType::new(13, 2).expect("derived type")),
-        unit: currency("USD"),
+        unit: Some(currency("USD")),
     };
     model.metrics[0].value_type = model.metrics[0].expression.value_type.clone();
     model.metrics[0].dependencies.push(id("measure", "bob"));
@@ -251,7 +259,7 @@ fn different_currencies_coexist_until_a_definition_combines_them() {
 #[test]
 fn malformed_units_are_rejected_even_without_arithmetic() {
     let mut model = base_model();
-    model.datasets[1].fields[1].unit = currency("usd");
+    model.datasets[1].fields[1].unit = Some(currency("usd"));
     assert!(has_code(&errors(model), ErrorCode::IncompatibleUnits));
 }
 
@@ -289,8 +297,11 @@ fn duplicate_ids_and_wrong_reference_kinds_are_rejected() {
 #[test]
 fn primitive_measures_cannot_hide_cross_dataset_access() {
     let mut model = base_model();
-    model.measures[0].scalar_expression =
-        Some(field_expr("customers-amount", decimal(), currency("USD")));
+    model.measures[0].scalar_expression = Some(field_expr(
+        "customers-amount",
+        decimal(),
+        Some(currency("USD")),
+    ));
     assert!(has_code(&errors(model), ErrorCode::InvalidModelReference));
 }
 
@@ -347,17 +358,21 @@ fn literal_type_spoofing_and_implicit_rounding_are_rejected() {
     spoof.measures[0].scalar_expression = Some(ScalarExpr {
         kind: ScalarExprKind::Literal(Literal::Utf8("not a decimal".into())),
         value_type: decimal(),
-        unit: currency("USD"),
+        unit: Some(currency("USD")),
     });
     assert!(has_code(&errors(spoof), ErrorCode::IncompatibleTypes));
     let mut cast = base_model();
     cast.measures[0].scalar_expression = Some(ScalarExpr {
         kind: ScalarExprKind::ExplicitCast {
-            operand: Box::new(field_expr("orders-amount", decimal(), currency("USD"))),
+            operand: Box::new(field_expr(
+                "orders-amount",
+                decimal(),
+                Some(currency("USD")),
+            )),
             rounding: None,
         },
         value_type: integer(),
-        unit: currency("USD"),
+        unit: Some(currency("USD")),
     });
     cast.measures[0].value_type = integer();
     cast.metrics[0].value_type = integer();
@@ -377,15 +392,15 @@ fn metric_casts_require_explicit_rounding_and_preserve_units() {
             rounding: None,
         },
         value_type: target,
-        unit: currency("USD"),
+        unit: Some(currency("USD")),
     };
     assert!(has_code(&errors(model.clone()), ErrorCode::NumericOverflow));
     if let MetricExprKind::ExplicitCast { rounding, .. } = &mut model.metrics[0].expression.kind {
         *rounding = Some(RoundingMode::HalfEven);
     }
     assert!(model.clone().compile().is_ok());
-    model.metrics[0].expression.unit = currency("BOB");
-    model.metrics[0].unit = currency("BOB");
+    model.metrics[0].expression.unit = Some(currency("BOB"));
+    model.metrics[0].unit = Some(currency("BOB"));
     assert!(has_code(&errors(model), ErrorCode::IncompatibleUnits));
 }
 
@@ -462,7 +477,7 @@ fn compilation_and_diagnostics_ignore_object_declaration_order() {
 #[test]
 fn excessive_expression_depth_is_rejected_before_canonicalization() {
     let mut model = base_model();
-    let mut expression = field_expr("orders-amount", decimal(), currency("USD"));
+    let mut expression = field_expr("orders-amount", decimal(), Some(currency("USD")));
     for _ in 0..140 {
         expression = ScalarExpr {
             kind: ScalarExprKind::Unary {
@@ -470,7 +485,7 @@ fn excessive_expression_depth_is_rejected_before_canonicalization() {
                 operand: Box::new(expression),
             },
             value_type: decimal(),
-            unit: currency("USD"),
+            unit: Some(currency("USD")),
         };
     }
     model.measures[0].scalar_expression = Some(expression);

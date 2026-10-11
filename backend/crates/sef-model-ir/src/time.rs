@@ -6,6 +6,10 @@ use crate::identity::StableId;
 pub struct IanaZoneId(String);
 
 impl IanaZoneId {
+    /// # Errors
+    ///
+    /// Returns `InvalidTemporalContract` if the declared zone identifier is
+    /// empty or contains an invalid path segment. Does not check TZDB membership.
     pub fn new(value: impl Into<String>) -> Result<Self, Diagnostic> {
         let value = value.into();
         if value.is_empty()
@@ -26,6 +30,7 @@ impl IanaZoneId {
         }
         Ok(Self(value))
     }
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
