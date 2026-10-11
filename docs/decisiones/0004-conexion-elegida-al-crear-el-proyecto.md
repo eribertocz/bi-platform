@@ -1,6 +1,6 @@
 # 0004 — La conexión de datos se elige al crear el proyecto; DuckLake local o remoto
 
-**Estado:** aprobada por el propietario, 2026-10-11. **Sustituye:** el supuesto de un DuckLake único de la plataforma configurado por variables de entorno (G1) y la frase "por defecto nuestro DuckLake" de 0002. **Matiza:** `DECISIONES_TECNICAS_RC2.md` (catálogo DuckLake en PostgreSQL, sin SQLite).
+**Estado:** aprobada por el propietario, 2026-10-11. **Sustituye:** el supuesto de un DuckLake único de la plataforma configurado por variables de entorno (G1) y la frase "por defecto nuestro DuckLake" de 0002. **Matiza:** `DECISIONES_TECNICAS_RC2.md` (catálogo DuckLake en PostgreSQL, sin SQLite). **Matizada por:** [0009](0009-modos-de-datos-y-persistencia-opcional.md) (modos de datos, persistencia opcional).
 
 ## Contexto
 El propietario no quiere un motor por defecto implícito. Al crear un proyecto, el usuario elige con qué conectarse, como en Rill: DuckLake, DuckDB, ClickHouse u otros. DuckLake separa **catálogo** y **datos**, y cada uno puede estar en local o en remoto. Ejemplo: catálogo en Supabase (PostgreSQL gestionado) y datos en S3.
