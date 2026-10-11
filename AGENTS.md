@@ -11,7 +11,6 @@ Dos ingenieros full-stack, cada uno en su propio clon y rama. Ninguno tiene un �
 
 ## Flujo
 
-1. Se avanza por gates del roadmap en orden (G0, G1, …). No se inicia un gate sin cumplir los criterios funcionales del anterior.
 Cada capacidad sigue cinco pasos: **el propietario define el objetivo → un agente implementa → el otro revisa → las pruebas automáticas lo verifican → el propietario valida lo que se puede ver o usar.**
 
 1. Se avanza por gates del roadmap en orden (G0, G1, …). No se inicia un gate sin cumplir los criterios funcionales del anterior.

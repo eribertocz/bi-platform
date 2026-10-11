@@ -35,7 +35,9 @@ No todos los usuarios necesitan ETL/ELT para crear dashboards. Hay quien tiene u
    | Solo consulta en vivo | no hace falta | no hace falta |
 
 4. **La persistencia es opcional por etapa.** Cada modelo es virtual (`VIEW`) o materializado (`FULL`, `INCREMENTAL_*`) según su uso y lo que admita el motor (0005 §3).
-5. **La ejecución depende del destino.** DuckLake se calcula con DuckDB; ClickHouse calcula con su propio motor, sin pasar por DuckDB ni por un DuckLake intermedio cuando no hace falta (0005 §2). ClickHouse también lee S3 directamente.
+5. **La ejecución depende del destino, sin pasos de más.** Cada modelo sigue eligiendo quién calcula (`engine`) y dónde se guarda (`output`); se mantienen todas las combinaciones de 0005 §2, incluidas DuckDB → ClickHouse y, más adelante, ClickHouse → DuckLake mediante Parquet intermedio registrado por DuckDB. Lo que se evita son los pasos innecesarios:
+   - un proyecto solo con ClickHouse calcula y guarda en ClickHouse, sin pasar por DuckDB ni por un DuckLake intermedio;
+   - ClickHouse también lee S3 directamente.
 6. **Los dashboards no dependen de rutas físicas.** Consumen datasets y modelos semánticos estables (`metrics/`, 0002). Cambiar de modo o de destino exige volver a validar la ejecución, pero no rediseñar los gráficos.
 7. **Lo operativo, separado de la lógica.** Los archivos de transformación (`models/*.sql`) solo describen qué se calcula:
    - **credenciales:** en `connectors/`, como referencia a secretos (0004);
