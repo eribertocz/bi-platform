@@ -130,16 +130,19 @@ fn request() -> impl Strategy<Value = QueryRequest> {
 #[derive(Debug, Clone)]
 struct Sale {
     region: Option<String>,
-    quantity: i64,
+    quantity: Option<i64>,
     /// `amount` in hundredths.
-    cents: i64,
+    cents: Option<i64>,
 }
 
 fn sales() -> impl Strategy<Value = Vec<Sale>> {
+    // Small values too, so groups sum to a real zero and measures tie.
+    let quantity = prop_oneof![any::<i64>(), -3..=3_i64];
+    let cents = prop_oneof![-MAX_CENTS..=MAX_CENTS, -3..=3_i64];
     let sale = (
         prop::option::weighted(0.8, prop::sample::select(&REGIONS[..])),
-        any::<i64>(),
-        -MAX_CENTS..=MAX_CENTS,
+        prop::option::weighted(0.8, quantity),
+        prop::option::weighted(0.8, cents),
     )
         .prop_map(|(region, quantity, cents)| Sale {
             region: region.map(str::to_owned),
@@ -180,9 +183,16 @@ impl Cell {
     }
 }
 
+/// `count(*)` counts every row; `sum` ignores nulls and is null when the
+/// group has no value at all (including an empty table).
 fn measure(name: &str, group: &[&Sale]) -> Cell {
-    let sum = |value: fn(&Sale) -> i64| {
-        (!group.is_empty()).then(|| group.iter().map(|s| i128::from(value(s))).sum())
+    let sum = |value: fn(&Sale) -> Option<i64>| {
+        let present: Vec<i128> = group
+            .iter()
+            .filter_map(|s| value(s))
+            .map(i128::from)
+            .collect();
+        (!present.is_empty()).then(|| present.iter().sum())
     };
     match name {
         "row_count" => Cell::Integer(Some(group.len() as i128)),
@@ -192,8 +202,8 @@ fn measure(name: &str, group: &[&Sale]) -> Cell {
     }
 }
 
-/// What the compiled query must return, computed without SQL. Only called
-/// for requests the compiler accepted.
+/// Every row the compiled query must produce, in order and before any
+/// limit, computed without SQL. Only called for accepted requests.
 fn model(request: &QueryRequest, sales: &[Sale]) -> Vec<Vec<Option<String>>> {
     // `IN (...)` plus `IS NULL` when the values include null; filters AND.
     let kept: Vec<&Sale> = sales
@@ -256,11 +266,13 @@ fn model(request: &QueryRequest, sales: &[Sale]) -> Vec<Vec<Option<String>>> {
             .find(|ordering| ordering.is_ne())
             .unwrap_or(Ordering::Equal)
     });
-    let limit = request.limit.unwrap_or(plan::DEFAULT_LIMIT) as usize;
     rows.into_iter()
-        .take(limit)
         .map(|row| row.iter().map(Cell::render).collect())
         .collect()
+}
+
+fn requested_limit(request: &QueryRequest) -> usize {
+    request.limit.unwrap_or(plan::DEFAULT_LIMIT) as usize
 }
 
 fn lake(sales: &[Sale]) -> duckdb::Result<Connection> {
@@ -276,7 +288,7 @@ fn lake(sales: &[Sale]) -> duckdb::Result<Connection> {
         insert.execute(duckdb::params![
             sale.region,
             sale.quantity,
-            decimal(i128::from(sale.cents))
+            sale.cents.map(|cents| decimal(i128::from(cents)))
         ])?;
     }
     Ok(conn)
@@ -314,14 +326,18 @@ fn the_generator_mostly_produces_valid_requests() {
         .count();
     println!("{valid} of 1000 generated requests compile");
     assert!(
-        valid >= 300,
+        valid >= 700,
         "only {valid} of 1000 generated requests compile"
     );
 }
 
 proptest! {
     #[test]
-    fn request_values_never_reach_the_sql(request in request(), other in any::<String>()) {
+    fn request_values_never_reach_the_sql(
+        request in request(),
+        other in any::<String>(),
+        other_limit in 1..=plan::MAX_LIMIT,
+    ) {
         let Ok(compiled) = plan::compile(&request) else {
             return Ok(());
         };
@@ -332,23 +348,29 @@ proptest! {
         {
             prop_assert!(sql_vocabulary(word), "{word:?} in {}", compiled.sql);
         }
-        // The SQL is a function of the request's shape alone.
+        // The SQL is a function of the request's shape alone: neither the
+        // filter values nor the limit change it.
         let mut same_shape = request.clone();
         for filter in &mut same_shape.filters {
             for value in filter.values.iter_mut().flatten() {
                 value.clone_from(&other);
             }
         }
+        same_shape.limit = Some(other_limit);
         prop_assert_eq!(&plan::compile(&same_shape).unwrap().sql, &compiled.sql);
-        // Every value is bound, in order, before the limit.
-        let values: Vec<Param> = request
+        // Every value is bound in order, then the limit plus the one row that
+        // detects truncation.
+        let limit = requested_limit(&request);
+        prop_assert_eq!(compiled.limit, limit);
+        let mut expected: Vec<Param> = request
             .filters
             .iter()
             .flat_map(|filter| filter.values.iter().flatten())
             .map(|value| Param::Text(value.clone()))
             .collect();
-        prop_assert_eq!(compiled.sql.matches('?').count(), values.len() + 1);
-        prop_assert_eq!(&compiled.params[..values.len()], &values[..]);
+        expected.push(Param::BigInt(i64::try_from(limit + 1).unwrap()));
+        prop_assert_eq!(compiled.sql.matches('?').count(), expected.len());
+        prop_assert_eq!(&compiled.params, &expected);
     }
 
     #[test]
@@ -357,17 +379,21 @@ proptest! {
             return Ok(());
         };
         let conn = lake(&sales).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        // As the endpoint does: read one row past the limit to detect truncation.
         let fetched = fetch(
             &conn,
             &compiled.sql,
             &compiled.params,
             compiled.columns.len(),
-            compiled.limit,
+            compiled.limit + 1,
         )
         .map_err(|e| TestCaseError::fail(format!("{e} in {}", compiled.sql)))?;
         let Fetched::Rows(rows) = fetched else {
             return Err(TestCaseError::fail("a tiny result exceeded the byte budget"));
         };
-        prop_assert_eq!(rows, model(&request, &sales));
+        let expected = model(&request, &sales);
+        let limit = requested_limit(&request);
+        prop_assert_eq!(rows.len() > limit, expected.len() > limit, "truncation flag");
+        prop_assert_eq!(rows, expected.into_iter().take(limit + 1).collect::<Vec<_>>());
     }
 }
