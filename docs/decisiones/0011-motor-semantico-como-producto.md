@@ -27,7 +27,7 @@ La ADR 0008 ya separa el núcleo (`sef-*`) del servidor y de los motores, pero n
    - consulta estructurada por HTTP con resultados Arrow (#568);
    - MCP para asistentes de IA (#529);
    - nuestra API OpenAPI con JSON tipado (ADR 0008).
-4. **Licencia: Apache-2.0 para el motor** (`sef-*`, incluidos sus adaptadores `sef-adapter-*`), la que SEF ya declaraba. Cada crate la declara en `Cargo.toml`, y al publicarse se añaden `LICENSE` y `NOTICE`. La licencia del resto de bi-platform se decide aparte.
+4. **Licencia: Apache-2.0 para toda bi-platform**, motor incluido (`sef-*` y `sef-adapter-*`; SEF ya la declaraba). Cada crate la declara en `Cargo.toml`, y al publicar se añaden `LICENSE` y `NOTICE`.
 
 ## Alternativas descartadas
 - **Solo dentro de bi-platform.** Cierra la vía de producto que el propietario quiere, y la separación ya está pagada (ADR 0008).
