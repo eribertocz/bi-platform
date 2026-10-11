@@ -1,6 +1,7 @@
 use crate::diagnostic::{Diagnostic, ErrorCode};
 use std::fmt;
 
+#[must_use]
 pub fn valid_segment(value: &str) -> bool {
     let mut bytes = value.bytes();
     bytes
@@ -13,6 +14,10 @@ pub fn valid_segment(value: &str) -> bool {
 pub struct StableId(String);
 
 impl StableId {
+    /// # Errors
+    ///
+    /// Returns `InvalidStableId` unless the value has exactly three valid
+    /// lowercase ASCII namespace/kind/name segments.
     pub fn new(value: impl Into<String>) -> Result<Self, Diagnostic> {
         let value = value.into();
         let parts: Vec<_> = value.split('/').collect();
@@ -25,12 +30,15 @@ impl StableId {
         }
         Ok(Self(value))
     }
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    #[must_use]
     pub fn namespace(&self) -> &str {
         self.0.split('/').next().unwrap_or_default()
     }
+    #[must_use]
     pub fn kind(&self) -> &str {
         self.0.split('/').nth(1).unwrap_or_default()
     }
@@ -46,6 +54,9 @@ impl fmt::Display for StableId {
 pub struct SemanticVersion(semver::Version);
 
 impl SemanticVersion {
+    /// # Errors
+    ///
+    /// Returns `InvalidSemanticVersion` if the value is not `SemVer` 2.0.0.
     pub fn new(value: &str) -> Result<Self, Diagnostic> {
         semver::Version::parse(value).map(Self).map_err(|_| {
             Diagnostic::error(
@@ -55,6 +66,7 @@ impl SemanticVersion {
             )
         })
     }
+    #[must_use]
     pub fn as_str(&self) -> String {
         self.0.to_string()
     }
@@ -77,6 +89,9 @@ pub struct ObjectIdentity {
 pub struct SourceHandle(String);
 
 impl SourceHandle {
+    /// # Errors
+    ///
+    /// Returns `InvalidSourceHandle` if any slash-separated logical token is invalid.
     pub fn new(value: impl Into<String>) -> Result<Self, Diagnostic> {
         let value = value.into();
         if !value.split('/').all(valid_segment) {
@@ -88,6 +103,7 @@ impl SourceHandle {
         }
         Ok(Self(value))
     }
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

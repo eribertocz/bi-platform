@@ -95,6 +95,7 @@ pub enum ScalarExprKind {
 }
 
 impl ScalarExpr {
+    #[must_use]
     pub fn field_refs(&self) -> Vec<StableId> {
         self.references(|k| {
             if let ScalarExprKind::FieldRef(id) = k {
@@ -104,6 +105,7 @@ impl ScalarExpr {
             }
         })
     }
+    #[must_use]
     pub fn dimension_refs(&self) -> Vec<StableId> {
         self.references(|k| {
             if let ScalarExprKind::DimensionRef(id) = k {
@@ -113,6 +115,7 @@ impl ScalarExpr {
             }
         })
     }
+    #[must_use]
     pub fn context_slots(&self) -> Vec<String> {
         self.references(|k| {
             if let ScalarExprKind::ContextSlot(name) = k {
@@ -122,6 +125,7 @@ impl ScalarExpr {
             }
         })
     }
+    #[must_use]
     pub fn conversion_refs(&self) -> Vec<StableId> {
         self.references(|k| {
             if let ScalarExprKind::UnitConversion { conversion, .. } = k {
@@ -142,6 +146,7 @@ impl ScalarExpr {
         }
         result
     }
+    #[must_use]
     pub fn children(&self) -> Vec<&Self> {
         match &self.kind {
             ScalarExprKind::Unary { operand, .. }
@@ -198,9 +203,11 @@ pub enum MetricExprKind {
 }
 
 impl MetricExpr {
+    #[must_use]
     pub fn measure_refs(&self) -> Vec<StableId> {
         self.references(false)
     }
+    #[must_use]
     pub fn metric_refs(&self) -> Vec<StableId> {
         self.references(true)
     }
@@ -213,7 +220,7 @@ impl MetricExpr {
                 MetricExprKind::MetricRef(id) | MetricExprKind::Window { base_metric: id }
                     if metrics =>
                 {
-                    result.push(id.clone())
+                    result.push(id.clone());
                 }
                 _ => {}
             }
@@ -221,6 +228,7 @@ impl MetricExpr {
         }
         result
     }
+    #[must_use]
     pub fn children(&self) -> Vec<&Self> {
         match &self.kind {
             MetricExprKind::ExplicitCast { operand, .. } => vec![operand],
