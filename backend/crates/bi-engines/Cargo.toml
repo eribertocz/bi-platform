@@ -1,0 +1,22 @@
+[package]
+name = "bi-engines"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Compares DuckDB SQL and Polars LazyFrame (G1). Not a default workspace
+# member: Polars is large and only this benchmark needs it.
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+bi-fixtures = { path = "../bi-fixtures" }
+bi-runtime = { path = "../bi-runtime" }
+polars = { version = "=0.55.2", default-features = false, features = ["lazy", "parquet", "dtype-decimal", "dtype-datetime", "dtype-i128", "timezones"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

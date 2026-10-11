@@ -88,3 +88,47 @@ jobs:
           npm ci
           echo '### npm outdated' >> "$GITHUB_STEP_SUMMARY"
           npm outdated >> "$GITHUB_STEP_SUMMARY" || true
+
+  engines:
+    # DuckDB SQL vs Polars LazyFrame (G1): exactness against the oracle and
+    # timings; the report is an artifact, never a threshold. Polars is large,
+    # so this crate builds only here, not on every PR.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: bi
+          POSTGRES_PASSWORD: bi
+          POSTGRES_DB: bi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bi -d bi"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: DuckLake catalog database
+        run: psql postgres://bi:bi@localhost:5432/bi -c "CREATE DATABASE bi_lake_catalog"
+      - run: cargo clippy --locked --release -p bi-engines -- -D warnings
+      - name: Benchmark (1M rows; exits non-zero if any result differs from the oracle)
+        run: cargo run --locked --release -p bi-engines -- --rows 1000000 --iterations 5 --out engines-report.json
+        env:
+          BI_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: engines-report
+          path: backend/engines-report.json

@@ -49,6 +49,7 @@ Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de
 
 DuckDB embebido con un DuckLake cuyo catálogo vive en la base `bi_lake_catalog` del mismo PostgreSQL (se crea con volúmenes nuevos; en uno existente: `podman compose exec postgres createdb -U bi bi_lake_catalog`) y cuyos datos son Parquet en `BI_LAKE_DATA_PATH` (por defecto `data/lake`).
 Cargar y verificar el fixture sintético contra su oráculo, desde `backend/`: `cargo run -p bi-runtime -- load-sales` (idempotente).
+Comparar DuckDB SQL y Polars sobre el mismo fixture (exactitud + tiempos, informe JSON): `cargo run --release -p bi-engines -- --out engines.json`.
 Variables: `BI_LAKE_CATALOG`, `BI_LAKE_DATA_PATH`, `BI_LAKE_METADATA_SCHEMA`, `BI_DUCKDB_WORKERS`, `BI_DUCKDB_QUEUE`, `BI_DUCKDB_THREADS`, `BI_DUCKDB_MEMORY_LIMIT`, `BI_DUCKDB_EXTENSION_DIR`.
 
 ## Frontend

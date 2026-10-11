@@ -20,6 +20,8 @@ use crate::sales::{self, FixtureSpec};
 use crate::{Error, parquet_io, typed_json};
 
 pub const BATCH_ROWS: usize = 64 * 1024;
+/// The compiler that built this crate.
+pub const RUSTC_VERSION: &str = env!("BI_RUSTC_VERSION");
 const RSS_SAMPLE_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy)]
@@ -136,7 +138,7 @@ pub fn run(options: BenchOptions, workdir: &Path) -> Result<Report, Error> {
         sha: commit_sha(),
         machine: machine(),
         versions: Versions {
-            rustc: env!("BI_RUSTC_VERSION").to_owned(),
+            rustc: RUSTC_VERSION.to_owned(),
             bi_fixtures: env!("CARGO_PKG_VERSION").to_owned(),
             parquet: parquet::file::properties::DEFAULT_CREATED_BY.to_owned(),
         },
@@ -165,27 +167,34 @@ pub fn run(options: BenchOptions, workdir: &Path) -> Result<Report, Error> {
     })
 }
 
-fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
+/// Runs `f` and returns its result with the elapsed time.
+pub fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let started = Instant::now();
     let value = f();
     (value, started.elapsed())
 }
 
+/// Collects samples of one phase; warmup rounds are recorded as unmeasured.
 #[derive(Default)]
-struct Timings {
+pub struct Timings {
     samples: Vec<Duration>,
     bytes: Option<u64>,
 }
 
 impl Timings {
-    fn record(&mut self, measured: bool, elapsed: Duration, bytes: Option<u64>) {
+    pub fn record(&mut self, measured: bool, elapsed: Duration, bytes: Option<u64>) {
         if measured {
             self.samples.push(elapsed);
             self.bytes = bytes.or(self.bytes);
         }
     }
 
-    fn phase(mut self, name: &str) -> Phase {
+    /// Summarizes the measured samples.
+    ///
+    /// # Panics
+    /// If no sample was measured.
+    #[must_use]
+    pub fn phase(mut self, name: &str) -> Phase {
         self.samples.sort_unstable();
         let ms = |d: Duration| (d.as_secs_f64() * 1_000_000.0).round() / 1_000.0;
         Phase {
@@ -208,14 +217,15 @@ fn percentile(sorted: &[Duration], percent: usize) -> Duration {
 
 /// Samples this process's resident set size on a background thread, which
 /// is stopped and joined on every exit path (including early `?` returns).
-struct RssSampler {
+pub struct RssSampler {
     stop: Arc<AtomicBool>,
     peak: Arc<AtomicU64>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl RssSampler {
-    fn start() -> Self {
+    #[must_use]
+    pub fn start() -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let peak = Arc::new(AtomicU64::new(0));
         let handle = {
@@ -249,7 +259,8 @@ impl RssSampler {
         }
     }
 
-    fn stop(mut self) -> u64 {
+    #[must_use]
+    pub fn stop(mut self) -> u64 {
         self.join();
         self.peak.load(Ordering::Relaxed)
     }
@@ -268,7 +279,8 @@ impl Drop for RssSampler {
     }
 }
 
-fn machine() -> Machine {
+#[must_use]
+pub fn machine() -> Machine {
     let system = System::new_with_specifics(
         RefreshKind::nothing()
             .with_cpu(CpuRefreshKind::nothing())
@@ -287,7 +299,8 @@ fn machine() -> Machine {
 }
 
 /// `GITHUB_SHA` in CI, otherwise `git rev-parse HEAD`, otherwise `unknown`.
-fn commit_sha() -> String {
+#[must_use]
+pub fn commit_sha() -> String {
     if let Ok(sha) = std::env::var("GITHUB_SHA") {
         return sha;
     }
