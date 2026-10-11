@@ -28,7 +28,13 @@ ENV DUCKDB_LIB_DIR=/opt/duckdb DUCKDB_INCLUDE_DIR=/opt/duckdb
 WORKDIR /app/backend
 COPY backend/ ./
 ARG BI_CARGO_FEATURES=""
-RUN cargo build --locked --release -j 2 -p bi-server --no-default-features --features "$BI_CARGO_FEATURES"
+# Cache mounts keep the crate registry and compiled dependencies between
+# builds, so a code change recompiles only our crates. `locked`: builds
+# from several checkouts on one machine take turns instead of racing.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/app/backend/target,sharing=locked \
+    cargo build --locked --release -j 2 -p bi-server --no-default-features --features "$BI_CARGO_FEATURES" \
+    && cp target/release/bi-server /usr/local/bin/bi-server
 
 FROM docker.io/library/debian:trixie-slim
 # CA certificates: DuckDB downloads its ducklake/postgres extensions over HTTPS.
@@ -39,7 +45,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=backend /opt/duckdb/libduckdb.so /usr/local/lib/libduckdb.so
 RUN ldconfig
 WORKDIR /app
-COPY --from=backend /app/backend/target/release/bi-server /usr/local/bin/bi-server
+COPY --from=backend /usr/local/bin/bi-server /usr/local/bin/bi-server
 COPY --from=frontend /app/frontend/build /app/static
 ENV BI_BIND_ADDR=0.0.0.0:8080 BI_STATIC_DIR=/app/static BI_LOG_FORMAT=json \
     BI_LAKE_DATA_PATH=/var/lib/bi/lake BI_DUCKDB_EXTENSION_DIR=/var/lib/bi/duckdb-extensions
