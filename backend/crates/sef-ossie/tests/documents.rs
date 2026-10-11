@@ -280,3 +280,63 @@ fn time_role_follows_the_datatype_unless_set_explicitly() {
         assert_eq!(field.is_time(), expected, "{}", field.name);
     }
 }
+
+/// Review of #51 (P2): the schema never allows `null`; reading it as
+/// "absent" would silently change the document on export.
+#[test]
+fn explicit_nulls_are_rejected_not_dropped() {
+    for text in [
+        BASE.replace("name: sales", "name: sales\ndescription: null"),
+        BASE.replace("name: sales", "name: sales\nai_context: null"),
+        BASE.replace("primary_key: [order_id]", "primary_key: null"),
+        BASE.replace(
+            "expression: order_id } ] }",
+            "expression: order_id } ] }\n        dimension: { is_time: null }",
+        ),
+        BASE.replace(
+            "name: sales",
+            "name: sales\nai_context: { instructions: null }",
+        ),
+        BASE.replace("name: revenue", "name: revenue\n    datatype: null"),
+    ] {
+        assert_eq!(errors(&text)[0].code, Code::Syntax, "{text}");
+    }
+}
+
+/// Review of #51 (P2): names must be Ossie identifiers of at most 128
+/// characters; the model name is not an identifier (the official flights
+/// example is called "Flights semantic model").
+#[test]
+fn names_must_be_valid_identifiers() {
+    let named = |name: &str| BASE.replace("name: orders\n", &format!("name: '{name}'\n"));
+    assert!(
+        load(
+            &named(&"a".repeat(128))
+                .replace("from: orders", &format!("from: '{}'", "a".repeat(128)))
+        )
+        .is_ok()
+    );
+    for (name, path) in [
+        ("a".repeat(129), "/datasets/0/name"),
+        ("order-lines".to_owned(), "/datasets/0/name"),
+        ("1orders".to_owned(), "/datasets/0/name"),
+        ("\"bad\"quote\"".to_owned(), "/datasets/0/name"),
+    ] {
+        let found = errors(&named(&name));
+        assert!(
+            codes(&found).contains(&(Code::InvalidIdentifier, path)),
+            "{name}: {found:?}"
+        );
+    }
+    let quoted = named("\"Order Lines\"").replace("from: orders", "from: '\"Order Lines\"'");
+    assert!(load(&quoted).is_ok(), "{quoted}");
+    let key = BASE.replace("primary_key: [order_id]", "primary_key: [order-id]");
+    assert!(codes(&errors(&key)).contains(&(Code::InvalidIdentifier, "/datasets/0/primary_key/0")));
+    let column = BASE.replace("to_columns: [id]", "to_columns: ['id; x']");
+    assert!(
+        codes(&errors(&column))
+            .contains(&(Code::InvalidIdentifier, "/relationships/0/to_columns/0"))
+    );
+    let spaced_model = BASE.replace("name: sales\n", "name: Sales semantic model\n");
+    assert!(load(&spaced_model).is_ok());
+}

@@ -37,7 +37,7 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
     }
     for (i, dataset) in model.datasets.iter().enumerate() {
         let base = format!("/datasets/{i}");
-        non_empty(
+        identifier(
             &mut found,
             &format!("{base}/name"),
             &dataset.name,
@@ -49,9 +49,10 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
             &dataset.source,
             "el origen del dataset",
         );
+        key_columns(&mut found, &base, dataset);
         for (j, field) in dataset.fields.iter().enumerate() {
             let path = format!("{base}/fields/{j}");
-            non_empty(
+            identifier(
                 &mut found,
                 &format!("{path}/name"),
                 &field.name,
@@ -74,7 +75,7 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
     );
     for (i, metric) in model.metrics.iter().enumerate() {
         let path = format!("/metrics/{i}");
-        non_empty(
+        identifier(
             &mut found,
             &format!("{path}/name"),
             &metric.name,
@@ -120,6 +121,79 @@ fn non_empty(found: &mut Vec<Diagnostic>, path: &str, value: &str, what: &str) {
     }
 }
 
+/// Key columns of a dataset are identifiers too.
+fn key_columns(found: &mut Vec<Diagnostic>, base: &str, dataset: &crate::document::Dataset) {
+    let keys = dataset
+        .primary_key
+        .iter()
+        .map(|key| ("primary_key".to_owned(), key))
+        .chain(
+            dataset
+                .unique_keys
+                .iter()
+                .flatten()
+                .enumerate()
+                .map(|(k, key)| (format!("unique_keys/{k}"), key)),
+        );
+    for (place, key) in keys {
+        for (c, column) in key.iter().enumerate() {
+            identifier(
+                found,
+                &format!("{base}/{place}/{c}"),
+                column,
+                "la columna de la clave",
+            );
+        }
+    }
+}
+
+/// Longest identifier, in characters (expression language, "Namespacing and
+/// Identifier Resolution").
+pub const MAX_IDENTIFIER_CHARS: usize = 128;
+
+/// An Ossie identifier: a regular one (a letter or `_`, then letters,
+/// digits or `_`) or a delimited one (`"…"`, with `""` for a quote), of at
+/// most 128 characters.
+fn identifier(found: &mut Vec<Diagnostic>, path: &str, value: &str, what: &str) {
+    if value.is_empty() {
+        non_empty(found, path, value, what);
+        return;
+    }
+    let body = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'));
+    let (valid, length) = if let Some(inner) = body {
+        (
+            !inner.is_empty() && !inner.replace("\"\"", "").contains('"'),
+            inner.replace("\"\"", "\"").chars().count(),
+        )
+    } else {
+        let mut chars = value.chars();
+        let start = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_');
+        (
+            start && chars.all(|c| c.is_alphanumeric() || c == '_'),
+            value.chars().count(),
+        )
+    };
+    if !valid {
+        found.push(Diagnostic::error(
+            Code::InvalidIdentifier,
+            path,
+            format!(
+                "{value:?} no es un identificador válido: usa letras, dígitos y `_` (empezando por                  letra o `_`), o escríbelo entre comillas dobles."
+            ),
+        ));
+    } else if length > MAX_IDENTIFIER_CHARS {
+        found.push(Diagnostic::error(
+            Code::InvalidIdentifier,
+            path,
+            format!(
+                "El identificador tiene {length} caracteres; el máximo es {MAX_IDENTIFIER_CHARS}."
+            ),
+        ));
+    }
+}
+
 fn expression(found: &mut Vec<Diagnostic>, path: &str, expression: &Expression) {
     if expression.dialects.is_empty() {
         found.push(Diagnostic::error(
@@ -159,14 +233,14 @@ fn relationships(found: &mut Vec<Diagnostic>, model: &SemanticModel) {
         .collect();
     for (i, relationship) in model.relationships.iter().enumerate() {
         let base = format!("/relationships/{i}");
-        non_empty(
+        identifier(
             found,
             &format!("{base}/name"),
             &relationship.name,
             "el nombre de la relación",
         );
         for (end, dataset) in [("from", &relationship.from), ("to", &relationship.to)] {
-            non_empty(
+            identifier(
                 found,
                 &format!("{base}/{end}"),
                 dataset,
@@ -187,6 +261,14 @@ fn relationships(found: &mut Vec<Diagnostic>, model: &SemanticModel) {
             ("from_columns", &relationship.from_columns),
             ("to_columns", &relationship.to_columns),
         ] {
+            for (c, column) in columns.iter().enumerate() {
+                identifier(
+                    found,
+                    &format!("{base}/{side}/{c}"),
+                    column,
+                    "la columna de la relación",
+                );
+            }
             if columns.is_empty() {
                 found.push(Diagnostic::error(
                     Code::EmptyList,

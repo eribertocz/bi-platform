@@ -27,6 +27,9 @@ pub enum Code {
     EmptyValue,
     /// A list that must not be empty is empty.
     EmptyList,
+    /// A dataset, field, metric, relationship or column name that is not a
+    /// valid Ossie identifier (syntax or more than 128 characters).
+    InvalidIdentifier,
     /// Two datasets, fields of one dataset, metrics or relationships share a
     /// name, compared as normalized identifiers.
     DuplicateName,
@@ -48,6 +51,7 @@ impl Code {
             Self::UnsupportedVersion => "unsupported_version",
             Self::EmptyValue => "empty_value",
             Self::EmptyList => "empty_list",
+            Self::InvalidIdentifier => "invalid_identifier",
             Self::DuplicateName => "duplicate_name",
             Self::UnknownDataset => "unknown_dataset",
             Self::ColumnArity => "column_arity",
