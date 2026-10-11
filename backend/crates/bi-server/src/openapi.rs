@@ -3,7 +3,7 @@
 
 use utoipa::OpenApi;
 
-use crate::{auth, health};
+use crate::{auth, health, query};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -12,7 +12,15 @@ use crate::{auth, health};
         description = "Contrato HTTP vigente. Única fuente de tipos para servidor y cliente.",
         version = "0.1.0"
     ),
-    paths(health::live, health::ready, auth::current, auth::logout, auth::dev_login, auth::dev_users),
+    paths(
+        health::live,
+        health::ready,
+        auth::current,
+        auth::logout,
+        auth::dev_login,
+        auth::dev_users,
+        query::run
+    ),
     components(schemas(crate::problem::Problem)),
     security(),
     modifiers(&SessionSecurity)

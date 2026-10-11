@@ -347,6 +347,8 @@ name = "bi-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bi-fixtures",
+ "bi-runtime",
  "getrandom 0.4.3",
  "http-body-util",
  "serde",

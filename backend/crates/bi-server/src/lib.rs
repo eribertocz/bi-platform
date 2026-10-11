@@ -1,40 +1,54 @@
 //! bi-platform API server: Axum HTTP layer over the modular monolith.
 
+pub mod analytics;
 pub mod auth;
 pub mod config;
 pub mod db;
 pub mod health;
 pub mod openapi;
 pub mod problem;
+pub mod query;
 mod static_files;
 pub mod telemetry;
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::Request;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
 use tower_http::trace::TraceLayer;
 
+use crate::analytics::Analytics;
 use crate::db::Database;
+
+/// Largest accepted query request body.
+const QUERY_BODY_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Database,
     pub auth: auth::AuthConfig,
+    pub analytics: Analytics,
+    pub query_timeout: Duration,
 }
 
 impl AppState {
+    /// API-only state: default authentication, no analytical runtime,
+    /// default query deadline.
     #[must_use]
     pub fn new(db: Database) -> Self {
         Self {
             db,
             auth: auth::AuthConfig::default(),
+            analytics: Analytics::disabled(),
+            query_timeout: config::DEFAULT_QUERY_TIMEOUT,
         }
     }
 }
@@ -50,6 +64,10 @@ pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Route
         .merge(auth::routes())
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
+        .route(
+            "/api/v1/queries",
+            post(query::run).layer(DefaultBodyLimit::max(QUERY_BODY_LIMIT)),
+        )
         .with_state(state.clone());
     let app = if let Some(directory) = static_dir {
         app.fallback(move |request| static_files::serve(directory.clone(), request))

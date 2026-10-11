@@ -22,8 +22,10 @@ fn config(origin: &str) -> AuthConfig {
 
 fn offline(config: AuthConfig) -> Router {
     router(AppState {
-        db: Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap()),
         auth: config,
+        ..AppState::new(Database::start(
+            db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        ))
     })
 }
 
@@ -271,8 +273,8 @@ mod postgres {
                 .unwrap()
         );
         router(AppState {
-            db,
             auth: config(origin),
+            ..AppState::new(db)
         })
     }
 

@@ -15,7 +15,10 @@ test('Estado del sistema reflects real PostgreSQL availability and recovery', as
   page,
   request,
 }) => {
-  await expect.poll(async () => (await request.get('/health/ready')).status()).toBe(200);
+  // First start: DuckDB downloads its extensions and loads the synthetic fixture.
+  await expect
+    .poll(async () => (await request.get('/health/ready')).status(), { timeout: 120_000 })
+    .toBe(200);
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
 

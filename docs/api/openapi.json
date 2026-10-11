@@ -169,6 +169,122 @@
         ]
       }
     },
+    "/api/v1/queries": {
+      "post": {
+        "tags": [
+          "queries"
+        ],
+        "summary": "Consulta agregada tipada sobre un dataset permitido; sin SQL del cliente.",
+        "operationId": "runQuery",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resultado tipado y exacto; fases en la cabecera `Server-Timing` (plan, queue, execute, serialize; ms)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON inválido o campos desconocidos",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión válida (`session_required`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin ausente o distinto al configurado (`origin_forbidden`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Cola de consultas llena; reintentar",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Fallo interno al ejecutar",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Motor analítico no disponible",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Superó el tiempo máximo y se canceló",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [
@@ -240,7 +356,7 @@
         "tags": [
           "health"
         ],
-        "summary": "Readiness: PostgreSQL accesible y migraciones aplicadas.",
+        "summary": "Readiness: PostgreSQL accesible, migraciones aplicadas y, si está habilitado, el lago analítico listo.",
         "operationId": "getReadiness",
         "responses": {
           "200": {
@@ -269,6 +385,16 @@
   },
   "components": {
     "schemas": {
+      "ColumnType": {
+        "type": "string",
+        "description": "Logical type of a result column. Every non-null value travels as a JSON\nstring, so `integer` (64- or 128-bit) and `decimal` stay exact in clients.",
+        "enum": [
+          "string",
+          "integer",
+          "decimal",
+          "timestamptz"
+        ]
+      },
       "DataScope": {
         "type": "string",
         "enum": [
@@ -287,6 +413,40 @@
           }
         },
         "additionalProperties": false
+      },
+      "Filter": {
+        "type": "object",
+        "required": [
+          "field",
+          "op",
+          "values"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "A dimension of the dataset."
+          },
+          "op": {
+            "$ref": "#/components/schemas/FilterOp"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "1 to 100 values; `null` matches missing values."
+          }
+        },
+        "additionalProperties": false
+      },
+      "FilterOp": {
+        "type": "string",
+        "enum": [
+          "in"
+        ]
       },
       "Health": {
         "type": "object",
@@ -347,16 +507,19 @@
         "properties": {
           "code": {
             "type": "string",
+            "description": "Stable identifier for clients, e.g. `invalid_query`.",
             "pattern": "^[a-z][a-z0-9_]+$"
           },
           "detail": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Human-readable explanation, safe to show; never internal errors."
           },
           "request_id": {
             "type": "string",
+            "description": "Correlates with server logs (`x-request-id`).",
             "minLength": 1
           },
           "status": {
@@ -370,7 +533,164 @@
           },
           "type": {
             "type": "string",
-            "format": "uri"
+            "format": "uri",
+            "description": "Problem type URI; `about:blank` means the HTTP status says it all."
+          }
+        }
+      },
+      "QueryRequest": {
+        "type": "object",
+        "description": "An aggregate query over an allowlisted dataset. No SQL is accepted.",
+        "required": [
+          "dataset",
+          "measures"
+        ],
+        "properties": {
+          "dataset": {
+            "type": "string",
+            "description": "Dataset name, e.g. `sales`."
+          },
+          "dimensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Group-by fields (at most 2)."
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Filter"
+            },
+            "description": "Conditions on dimensions, combined with AND."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum rows returned, 1 to 10000 (default 1000).",
+            "maximum": 10000,
+            "minimum": 1
+          },
+          "measures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Aggregates to compute (1 to 8)."
+          },
+          "sort": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SortKey"
+            },
+            "description": "Ordering by selected fields; ties are broken by the dimensions."
+          }
+        },
+        "additionalProperties": false,
+        "example": {
+          "dataset": "sales",
+          "dimensions": [
+            "region"
+          ],
+          "filters": [
+            {
+              "field": "region",
+              "op": "in",
+              "values": [
+                "north",
+                null
+              ]
+            }
+          ],
+          "limit": 100,
+          "measures": [
+            "row_count",
+            "amount_sum"
+          ],
+          "sort": [
+            {
+              "direction": "desc",
+              "field": "amount_sum"
+            }
+          ]
+        }
+      },
+      "QueryResult": {
+        "type": "object",
+        "required": [
+          "columns",
+          "rows",
+          "row_count",
+          "truncated"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResultColumn"
+            }
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "description": "Rows in column order. Every non-null value is a string in its column's\ntype (`integer` and `decimal` are exact; `null` means missing)."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More rows matched than `limit` allowed."
+          }
+        }
+      },
+      "ResultColumn": {
+        "type": "object",
+        "description": "Describes one column of a [`super::QueryResult`].",
+        "required": [
+          "name",
+          "type",
+          "nullable"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": "boolean"
+          },
+          "precision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Present for `decimal`.",
+            "minimum": 0
+          },
+          "scale": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Present for `decimal`.",
+            "minimum": 0
+          },
+          "type": {
+            "$ref": "#/components/schemas/ColumnType"
           }
         }
       },
@@ -392,6 +712,29 @@
           },
           "user": {
             "$ref": "#/components/schemas/User"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SortDirection": {
+        "type": "string",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "SortKey": {
+        "type": "object",
+        "required": [
+          "field"
+        ],
+        "properties": {
+          "direction": {
+            "$ref": "#/components/schemas/SortDirection"
+          },
+          "field": {
+            "type": "string",
+            "description": "A selected dimension or measure."
           }
         },
         "additionalProperties": false
