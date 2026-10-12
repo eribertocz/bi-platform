@@ -113,7 +113,11 @@ fn expression(metric: bool) -> impl Strategy<Value = Expression> {
                 expression
             }),
     ];
-    prop::collection::vec(one, 1..3).prop_map(|dialects| Expression { dialects })
+    prop::collection::vec(one, 1..3).prop_map(|mut dialects| {
+        let mut seen = std::collections::HashSet::new();
+        dialects.retain(|candidate| seen.insert(candidate.dialect));
+        Expression { dialects }
+    })
 }
 
 fn datatype() -> impl Strategy<Value = Option<DataType>> {

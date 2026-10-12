@@ -182,6 +182,8 @@ pub struct FieldExtension {
     /// domain); without it the dimension is `<dataset>.<field>`.
     pub dimension: Option<String>,
     pub unit: Option<UnitDeclaration>,
+    /// Override the selected dialect's zero-denominator policy for this field.
+    pub zero_division: Option<ZeroDivisionDeclaration>,
     /// The role of this column on its dataset's timeline.
     pub time_role: Option<TimeRoleDeclaration>,
     /// Required by `DATE_TRUNC`: where the day boundaries are.
