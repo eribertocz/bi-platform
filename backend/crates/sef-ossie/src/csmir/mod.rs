@@ -100,10 +100,27 @@ pub fn compile(
                     .and_then(|id| paths.get(id))
                     .cloned()
                     .unwrap_or_default();
+                // Type evidence (for example the two clashing units) is
+                // part of what the author needs to fix the model.
+                let evidence: Vec<String> = diagnostic
+                    .evidence
+                    .iter()
+                    .filter_map(|evidence| match evidence {
+                        sef_model_ir::diagnostic::Evidence::TypeMismatch { expected, actual } => {
+                            Some(format!("{expected} / {actual}"))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let code = diagnostic.code.as_str();
                 Diagnostic::error(
                     Code::SemanticContract,
                     path,
-                    format!("{} [{}]", diagnostic.message, diagnostic.code.as_str()),
+                    if evidence.is_empty() {
+                        format!("{} [{code}]", diagnostic.message)
+                    } else {
+                        format!("{} [{code}: {}]", diagnostic.message, evidence.join("; "))
+                    },
                 )
             })
             .collect()
