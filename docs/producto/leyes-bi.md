@@ -4,6 +4,8 @@
 
 Son **innegociables**: antes de implementar cualquier funcionalidad (frontend, backend, motor semántico o ELT) se comprueba que no viola ninguna ley. Si dos chocan, priman las leyes **1, 2, 3 y 5**.
 
+**Son retroactivas:** lo ya construido se audita contra ellas. Cada incumplimiento se resuelve en su Issue, con prioridad para las leyes 1, 2, 3 y 5. Seguimiento: Issue #84.
+
 Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; ⏳ planificado, con su gate) y qué mejora añadimos sobre el texto original.
 
 ## 1. Verdad única
