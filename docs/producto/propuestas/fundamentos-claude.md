@@ -151,9 +151,27 @@
   - **Cambiar de modo sin perder nada:** los tres modos son vistas del mismo `VisualSpec`.
   - **Idioma:** la interfaz en español y en inglés desde el diseño (textos externalizados).
 
+## El orden de prioridad del cierre
+El documento fija, para resolver conflictos: 1) leyes, 2) anti-patrones, 3) seguridad, 4) decisiones del motor y por capa, 5) capacidades y patrones, 6) estructura y contratos, 7) UX.
+
+- ✅ **Lo comparto en lo esencial:** las leyes primero, después lo que no se debe hacer, la seguridad por encima de cualquier decisión técnica, y la estructura y la UX al final.
+- ⬆ **Mejoras:**
+  1. **Dónde encajan las ADR vigentes.** Son decisiones ya aprobadas por el propietario. Propongo este orden:
+     - leyes;
+     - anti-patrones;
+     - seguridad;
+     - **ADR vigentes**;
+     - el resto de los documentos.
+
+     Si un documento (por ejemplo, la estructura del documento 5) choca con una ADR, el conflicto no se resuelve solo por la tabla: lo decide el propietario y queda en una ADR nueva. Así ninguna decisión aprobada se deroga sin que nadie lo sepa.
+  2. **La accesibilidad no puede quedar en el último puesto** por pertenecer a la UX (documento 8). Ya es ley (13), así que sube con las leyes. Lo mismo vale para la exactitud (ley 11).
+  3. **Los principios del documento 2 no aparecen en el orden**, solo sus anti-patrones. Propongo situarlos justo después de los anti-patrones, como criterio de diseño cuando nada más decide.
+  4. **La instrucción final** ("antes de implementar cualquier feature, verifica…") la convertimos en regla de AGENTS.md: todo PR de producto declara qué leyes toca y que no introduce anti-patrones (ya en #82).
+
 ## Decisiones para el propietario
 1. **Estructura de carpetas:** mantener la actual (`backend/crates`, `frontend`), ya vigilada por CI, y crear solo `echarts-safe`. *Recomendado.*
 2. **Formato de métricas:** mantener Apache Ossie y añadir `owner`, `tags`, `status` y la lista restrictiva de dimensiones en la extensión `bi-platform`, en lugar de un YAML propio. *Recomendado.*
 3. **Datos hacia el navegador:** JSON exacto para pantallas y Arrow para grandes volúmenes, con decimales siempre exactos. *Recomendado.*
 4. **Seguridad:** adoptar los roles `viewer`, `analyst`, `modeler` y `admin`, CLS de tres niveles y API keys con *scopes*, manteniendo las políticas como parámetros tipados (nunca plantillas de texto). *Recomendado.*
 5. **Nuevas capacidades en la hoja de ruta:** *time intelligence* (G2/G4), *what-if* (G5) y *embedded analytics* (con ADR 0011).
+6. **Orden de prioridad:** leyes → anti-patrones → seguridad → **ADR vigentes** → principios → resto de documentos. Accesibilidad y exactitud cuentan como leyes. Un choque con una ADR lo decide el propietario.
