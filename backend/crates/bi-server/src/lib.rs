@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod health;
 pub mod metrics;
+pub mod oidc;
 pub mod openapi;
 pub mod problem;
 pub mod query;
@@ -66,6 +67,7 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let app = Router::new()
         .merge(auth::routes())
+        .merge(oidc::routes())
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
         .route(

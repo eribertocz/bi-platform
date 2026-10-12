@@ -58,7 +58,7 @@ impl fmt::Display for ConfigError {
         match self {
             Self::InvalidAuthConfig => write!(
                 f,
-                "invalid authentication configuration: check BI_PUBLIC_ORIGIN, BI_SESSION_TTL_SECONDS and BI_DEV_USERS"
+                "invalid authentication configuration: check BI_PUBLIC_ORIGIN, BI_SESSION_TTL_SECONDS, BI_DEV_USERS and BI_OIDC_*"
             ),
             Self::InvalidBindAddr(value) => {
                 write!(

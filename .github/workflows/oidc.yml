@@ -1,0 +1,73 @@
+name: oidc
+on:
+  pull_request:
+    paths: ['backend/**', 'frontend/**', 'docker/oidc/**', 'compose.oidc.yaml', '.github/workflows/oidc.yml']
+  push:
+    branches: [main]
+    paths: ['backend/**', 'frontend/**', 'docker/oidc/**', 'compose.oidc.yaml', '.github/workflows/oidc.yml']
+permissions:
+  contents: read
+concurrency:
+  group: oidc-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - name: Native production server with official DuckDB
+        working-directory: backend
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          curl -fsSL -o /tmp/libduckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.6/libduckdb-linux-amd64.zip
+          echo 'b845005f5132a7d8180057c35e14a7626632258782f871a90861b19c1c03841b  /tmp/libduckdb.zip' | sha256sum -c -
+          mkdir -p /tmp/oidc-duckdb
+          unzip -q /tmp/libduckdb.zip -d /tmp/oidc-duckdb
+          DUCKDB_LIB_DIR=/tmp/oidc-duckdb DUCKDB_INCLUDE_DIR=/tmp/oidc-duckdb cargo build --locked -j 4 -p bi-server --no-default-features
+      - name: Start PostgreSQL, Keycloak and production server
+        run: |
+          docker compose -f compose.oidc.yaml up -d
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18071/realms/bi-test/.well-known/openid-configuration >/dev/null; then break; fi
+            sleep 2
+          done
+          LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi BI_PUBLIC_ORIGIN=http://127.0.0.1:18070 BI_BIND_ADDR=127.0.0.1:18070 BI_STATIC_DIR=frontend/build BI_ANALYTICS=off BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test BI_OIDC_CLIENT_ID=bi-platform backend/target/debug/bi-server > /tmp/oidc-server.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18070/health/ready >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - name: Corporate login, session, logout, keyboard and axe
+        run: npm run test:e2e -- e2e/oidc.spec.ts
+        working-directory: frontend
+        env:
+          BI_E2E_BASE_URL: http://127.0.0.1:18070
+          BI_E2E_REQUIRE_OIDC: '1'
+      - name: Logs
+        if: always()
+        run: |
+          cat /tmp/oidc-server.log || true
+          docker compose -f compose.oidc.yaml logs --no-color
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: oidc-playwright-results
+          path: frontend/test-results/
+          retention-days: 7
+      - name: Stop fixture
+        if: always()
+        run: docker compose -f compose.oidc.yaml down --volumes

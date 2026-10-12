@@ -128,7 +128,9 @@ fn attributes<'a>(
 }
 
 fn expected_unit(name: &str) -> &'static str {
-    if [
+    if name == "bi_oidc_login" {
+        "{login}"
+    } else if [
         "bi_semantic_compile_duration",
         "bi_query_wait",
         "bi_query_execute",
@@ -191,6 +193,7 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
             "bi_query_execute" => vec!["engine", "result", "workload"],
             "bi_result_serialize" => vec!["format"],
             "bi_query_rejected" => vec!["reason", "workload"],
+            "bi_oidc_login" => vec!["result"],
             "bi_query_inflight"
             | "bi_query_queued"
             | "bi_query_capacity"
@@ -208,6 +211,7 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
                 "workload" => &["interactive"],
                 "engine" => &["duckdb"],
                 "format" => &["json"],
+                "result" if p.name == "bi_oidc_login" => &["oidc_disabled"],
                 "result" => &["ok", "error", "busy", "timeout", "unavailable", "cancelled"],
                 "reason" => &[
                     "invalid_query",
@@ -233,6 +237,34 @@ fn count(points: &[Point], name: &str, label: Option<(&str, &str)>) -> u64 {
         })
         .map(|p| p.count)
         .sum()
+}
+
+#[tokio::test]
+async fn oidc_denial_exports_a_closed_outcome_without_private_labels() {
+    let capture = Capture::new(Analytics::disabled(), Duration::from_secs(5));
+    let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
+    let app = bi_server::router(AppState {
+        metrics: QueryMetrics::new(&capture.provider.meter("test"), &Analytics::disabled()),
+        ..AppState::new(db)
+    });
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/oidc/start?token=private-token")
+                .header("origin", "http://127.0.0.1:8080")
+                .header("x-request-id", "private-request-id")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.headers()["x-request-id"], "private-request-id");
+    let points = capture.points();
+    assert_eq!(
+        count(&points, "bi_oidc_login", Some(("result", "oidc_disabled"))),
+        1
+    );
+    assert!(!format!("{points:?}").contains("private-"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

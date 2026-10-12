@@ -1,0 +1,720 @@
+use super::*;
+use proptest::prelude::*;
+
+fn config(issuer: &str, client: &str) -> OidcConfig {
+    OidcConfig::from_lookup(
+        &|key| match key {
+            "BI_OIDC_ISSUER" => Some(issuer.to_owned()),
+            "BI_OIDC_CLIENT_ID" => Some(client.to_owned()),
+            "BI_OIDC_ATTRIBUTE_CLAIMS" => Some("department".to_owned()),
+            _ => None,
+        },
+        "http://127.0.0.1:8080",
+    )
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn configuration_is_all_or_nothing_and_redacted() {
+    for (key, value) in [
+        ("BI_OIDC_CLIENT_SECRET", "secret"),
+        ("BI_OIDC_ISSUER", "https://id.example.test"),
+    ] {
+        assert!(
+            OidcConfig::from_lookup(
+                &|k| (k == key).then(|| value.to_owned()),
+                "http://127.0.0.1:8080"
+            )
+            .is_err()
+        );
+    }
+    for issuer in [
+        "http://id.example.test",
+        "https://u:p@id.example.test",
+        "https://id.example.test/#bad",
+        "https://id.example.test/?bad",
+    ] {
+        assert!(
+            OidcConfig::from_lookup(
+                &|key| match key {
+                    "BI_OIDC_ISSUER" => Some(issuer.to_owned()),
+                    "BI_OIDC_CLIENT_ID" => Some("client".to_owned()),
+                    _ => None,
+                },
+                "http://127.0.0.1:8080"
+            )
+            .is_err()
+        );
+    }
+    let configured = config("https://id.example.test", "client");
+    assert_eq!(format!("{configured:?}"), "OidcConfig { [redacted] }");
+    assert_eq!(
+        configured.redirect.as_str(),
+        "http://127.0.0.1:8080/api/v1/oidc/callback"
+    );
+}
+
+proptest! {
+    #[test]
+    fn insecure_issuer_configuration_is_always_rejected(host in "[a-z]{1,30}") {
+        let parsed = OidcConfig::from_lookup(&|key| match key {
+            "BI_OIDC_ISSUER" => Some(format!("http://{host}.example.test")),
+            "BI_OIDC_CLIENT_ID" => Some("client".to_owned()),
+            _ => None,
+        }, "http://127.0.0.1:8080");
+        prop_assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn arbitrary_cookies_never_authenticate(raw in "[a-zA-Z0-9]{0,200}") {
+        let mut headers = HeaderMap::new();
+        if let Ok(value) = raw.parse() {
+            headers.append(header::COOKIE, value);
+            prop_assert!(browser_binding(&headers).is_none());
+        }
+    }
+
+    #[test]
+    fn duplicate_binding_is_always_rejected(value in "[a-f0-9]{64}") {
+        let mut headers = HeaderMap::new();
+        headers.append(header::COOKIE, format!("bi_oidc={value}; bi_oidc={value}").parse().unwrap());
+        prop_assert!(browser_binding(&headers).is_none());
+        headers.clear();
+        headers.append(header::COOKIE, format!("bi_oidc={value}").parse().unwrap());
+        headers.append(header::COOKIE, format!("bi_oidc={value}").parse().unwrap());
+        prop_assert!(browser_binding(&headers).is_none());
+    }
+
+    #[test]
+    fn identity_key_preserves_issuer_subject_boundary(a in "[a-z]{1,30}", b in "[a-z]{1,30}", c in "[a-z]{1,30}") {
+        let first = serde_json::to_vec(&(format!("{a}{b}"), &c)).unwrap();
+        let second = serde_json::to_vec(&(&a, format!("{b}{c}"))).unwrap();
+        prop_assert_ne!(Sha256::digest(first), Sha256::digest(second));
+    }
+}
+
+#[tokio::test]
+async fn audit_events_never_include_callback_input_or_credentials() {
+    for raw_id in ["request-1", "bad request?code=secret", ""] {
+        let id = RequestId::new(raw_id.parse().unwrap());
+        let event = login_event(&id, None).await.unwrap();
+        event.validate().unwrap();
+        assert!(!event.canonical_json().unwrap().contains("secret"));
+        assert_eq!(event.result, bi_audit::ResultCode::Denied);
+    }
+}
+
+#[cfg(feature = "postgres-tests")]
+mod real {
+    use super::*;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use base64::Engine as _;
+    use http_body_util::BodyExt;
+    use sqlx::PgPool;
+    use tower::ServiceExt;
+
+    fn issuer() -> String {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        std::env::var("BI_TEST_OIDC_ISSUER")
+            .expect("postgres-tests require the real Keycloak fixture (docker/oidc)")
+    }
+
+    // Actual Keycloak login form and token exchange, without replacing any provider endpoint.
+    async fn authorize(url: &str) -> String {
+        let http = http_client().unwrap();
+        let response = http.get(url).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| {
+                value
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let html = response.text().await.unwrap();
+        let form = html
+            .split("id=\"kc-form-login\"")
+            .nth(1)
+            .expect("real Keycloak login form");
+        let action = form
+            .split("action=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .replace("&amp;", "&");
+        let response = http
+            .post(action)
+            .header(header::COOKIE, cookies)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body("username=oidc-user&password=oidc-test-only&credentialId=")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn tokens(
+        config: &OidcConfig,
+    ) -> (
+        DiscoveredClient,
+        openidconnect::core::CoreTokenResponse,
+        String,
+    ) {
+        let http = http_client().unwrap();
+        let client = config.client(&http).await.expect("real provider discovery");
+        let nonce = auth::random_token().await.unwrap();
+        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+        let url_nonce = nonce.clone();
+        let (url, _, _) = client
+            .authorize_url(
+                CoreAuthenticationFlow::AuthorizationCode,
+                CsrfToken::new_random,
+                move || Nonce::new(url_nonce),
+            )
+            .add_scope(Scope::new("profile".to_owned()))
+            .set_pkce_challenge(challenge)
+            .url();
+        let callback = reqwest::Url::parse(&authorize(url.as_str()).await).unwrap();
+        let code = callback
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .unwrap()
+            .1
+            .into_owned();
+        let response = client
+            .exchange_code(AuthorizationCode::new(code))
+            .unwrap()
+            .set_pkce_verifier(verifier)
+            .request_async(&http)
+            .await
+            .unwrap();
+        (client, response, nonce)
+    }
+
+    fn replace_token(
+        tokens: &openidconnect::core::CoreTokenResponse,
+        jwt: &str,
+    ) -> openidconnect::core::CoreTokenResponse {
+        let mut value = serde_json::to_value(tokens).unwrap();
+        value["id_token"] = serde_json::Value::String(jwt.to_owned());
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Adversarial checks share one real signed token and JWKS.
+    async fn real_signed_tokens_reject_signature_issuer_audience_expiry_nonce_and_none() {
+        let config = config(&issuer(), "bi-platform");
+        let (client, valid, nonce) = tokens(&config).await;
+        let (user, identity) = verified_identity(&client, &config, &valid, &nonce).unwrap();
+        assert!(user.id.starts_with("oidc:"));
+        assert_eq!(identity.issuer, issuer());
+        assert_eq!(identity.groups, ["analysts"]);
+        assert_eq!(identity.attributes["department"], "finance");
+        assert_eq!(identity.attributes.len(), 1);
+        assert!(verified_identity(&client, &config, &valid, "other-nonce").is_err());
+        assert!(verified_identity(&client, &config, &valid, "").is_err());
+        assert!(
+            verify_identity_at(
+                &client,
+                &config,
+                &valid,
+                &nonce,
+                now_seconds().unwrap() - 360
+            )
+            .is_err()
+        );
+        assert!(
+            verify_identity_at(
+                &client,
+                &config,
+                &valid,
+                &nonce,
+                now_seconds().unwrap() + 360
+            )
+            .is_err()
+        );
+        let jwt = valid.id_token().unwrap().to_string();
+        // Property tests mutate the signature of a real token, never a fake issuer.
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(&(0_usize..256, 1_u8..=255), |(position, xor)| {
+                let mut parts: Vec<String> = jwt.split('.').map(str::to_owned).collect();
+                let base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+                let mut signature = base64.decode(&parts[2]).unwrap();
+                let index = position % signature.len();
+                signature[index] ^= xor;
+                parts[2] = base64.encode(signature);
+                prop_assert!(
+                    verified_identity(
+                        &client,
+                        &config,
+                        &replace_token(&valid, &parts.join(".")),
+                        &nonce
+                    )
+                    .is_err()
+                );
+                Ok(())
+            })
+            .unwrap();
+        let mut parts: Vec<String> = jwt.split('.').map(str::to_owned).collect();
+        let base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut signature = base64.decode(&parts[2]).unwrap();
+        signature[0] ^= 1;
+        parts[2] = base64.encode(signature);
+        assert!(
+            verified_identity(
+                &client,
+                &config,
+                &replace_token(&valid, &parts.join(".")),
+                &nonce
+            )
+            .is_err()
+        );
+        parts[0] = base64.encode(br#"{"alg":"none","typ":"JWT"}"#);
+        parts[2] = String::new();
+        assert!(
+            verified_identity(
+                &client,
+                &config,
+                &replace_token(&valid, &parts.join(".")),
+                &nonce
+            )
+            .is_err()
+        );
+
+        let (_, wrong_aud, aud_nonce) = tokens(&super::config(&issuer(), "other-client")).await;
+        assert!(verified_identity(&client, &config, &wrong_aud, &aud_nonce).is_err());
+        let foreign_config =
+            super::config(&issuer().replace("bi-test", "foreign-test"), "bi-platform");
+        let (_, foreign, foreign_nonce) = tokens(&foreign_config).await;
+        assert!(verified_identity(&client, &config, &foreign, &foreign_nonce).is_err());
+        // Independently exercise issuer validation with the foreign provider's real public key.
+        let http = http_client().unwrap();
+        let metadata = CoreProviderMetadata::discover_async(foreign_config.issuer.clone(), &http)
+            .await
+            .unwrap()
+            .set_issuer(config.issuer.clone());
+        let foreign_key_client = CoreClient::from_provider_metadata(
+            metadata,
+            ClientId::new(config.client_id.clone()),
+            None,
+        );
+        assert!(verified_identity(&foreign_key_client, &config, &foreign, &foreign_nonce).is_err());
+
+        let expired_config = super::config(&issuer(), "expired-client");
+        let (expired_client, expired, expired_nonce) = tokens(&expired_config).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            verified_identity(&expired_client, &expired_config, &expired, &expired_nonce).is_err()
+        );
+        // A fresh authorization has a new nonce; an old token cannot complete that attempt.
+        let (_, _, new_nonce) = tokens(&config).await;
+        assert_ne!(nonce, new_nonce);
+        assert!(verified_identity(&client, &config, &valid, &new_nonce).is_err());
+    }
+
+    async fn send(
+        app: &Router,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        origin: Option<&str>,
+    ) -> Response {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header(header::COOKIE, cookie);
+        }
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        app.clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fresh_jwks_accepts_a_real_provider_key_rotation() {
+        // Dedicated realm: changing signing keys must not race the other tests.
+        let issuer = issuer().replace("bi-test", "rotation-test");
+        let root = issuer.split("/realms/").next().unwrap();
+        let config = config(&issuer, "bi-platform");
+        let (old_client, _, _) = tokens(&config).await;
+        let http = http_client().unwrap();
+        let login = http.post(format!("{root}/realms/master/protocol/openid-connect/token"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body("grant_type=password&client_id=admin-cli&username=test-admin&password=oidc-admin-test-only")
+            .send().await.unwrap();
+        assert!(login.status().is_success());
+        let admin: serde_json::Value = serde_json::from_str(&login.text().await.unwrap()).unwrap();
+        let authorization = format!("Bearer {}", admin["access_token"].as_str().unwrap());
+        let realm = http
+            .get(format!("{root}/admin/realms/rotation-test"))
+            .header(header::AUTHORIZATION, &authorization)
+            .send()
+            .await
+            .unwrap();
+        let realm: serde_json::Value = serde_json::from_str(&realm.text().await.unwrap()).unwrap();
+        let key = serde_json::json!({
+            "name": "test-rotation", "providerId": "rsa-generated",
+            "providerType": "org.keycloak.keys.KeyProvider", "parentId": realm["id"],
+            "config": {"priority": ["200"], "enabled": ["true"], "active": ["true"], "algorithm": ["RS256"], "keySize": ["2048"]}
+        });
+        let response = http
+            .post(format!("{root}/admin/realms/rotation-test/components"))
+            .header(header::AUTHORIZATION, &authorization)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&key).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let remove = response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let (new_client, rotated, nonce) = tokens(&config).await;
+        let old_accepts = verified_identity(&old_client, &config, &rotated, &nonce).is_ok();
+        let new_accepts = verified_identity(&new_client, &config, &rotated, &nonce).is_ok();
+        assert_eq!(
+            http.delete(remove)
+                .header(header::AUTHORIZATION, authorization)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(!old_accepts, "the old JWKS must lack the new signing key");
+        assert!(
+            new_accepts,
+            "rediscovery must accept the provider's new key"
+        );
+    }
+
+    async fn begin(app: &Router) -> (String, String) {
+        let response = send(
+            app,
+            "POST",
+            "/api/v1/oidc/start",
+            None,
+            Some("http://127.0.0.1:8080"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.contains("HttpOnly; SameSite=Lax; Max-Age=300"));
+        let cookie = cookie.split(';').next().unwrap().to_owned();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let login: LoginStart = serde_json::from_slice(&body).unwrap();
+        (login.authorization_url, cookie)
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[allow(clippy::too_many_lines)] // Keep the login, reauthentication and logout workflow together.
+    async fn real_callback_creates_persistent_session_and_consumes_bound_state(pool: PgPool) {
+        let db = crate::db::Database::start(pool.clone());
+        assert!(db.wait_until_migrated().await);
+        let mut state = AppState::new(db.clone());
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        let app = crate::router(state.clone());
+        for origin in [None, Some("http://evil.test"), Some("null")] {
+            assert_eq!(
+                send(&app, "POST", "/api/v1/oidc/start", None, origin)
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        for param in [
+            "redirect_uri=https://evil.test",
+            "return_to=//evil.test",
+            "next=https://evil.test",
+        ] {
+            assert_eq!(
+                send(
+                    &app,
+                    "POST",
+                    &format!("/api/v1/oidc/start?{param}"),
+                    None,
+                    Some("http://127.0.0.1:8080")
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let (url, cookie) = begin(&app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        // The code is real; absent, duplicate or another browser's binding cannot consume it.
+        for binding in [
+            None,
+            Some("bi_oidc=bad"),
+            Some(&format!("bi_oidc={}", "a".repeat(64))),
+            Some(&format!("{cookie}; {cookie}")),
+        ] {
+            assert_eq!(
+                send(&app, "GET", &path, binding, None).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        assert_eq!(
+            send(
+                &app,
+                "GET",
+                "/api/v1/oidc/callback?code=unused",
+                Some(&cookie),
+                None
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let foreign_state = format!("/api/v1/oidc/callback?state={}&code=unused", "b".repeat(64));
+        assert_eq!(
+            send(&app, "GET", &foreign_state, Some(&cookie), None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for extra in [
+            format!("state={}", "c".repeat(64)),
+            "next=https://evil.test".to_owned(),
+        ] {
+            assert_eq!(
+                send(&app, "GET", &format!("{path}&{extra}"), Some(&cookie), None)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let (first, second) = tokio::join!(
+            // A single database DELETE arbitrates concurrent callbacks.
+            send(&app, "GET", &path, Some(&cookie), None),
+            send(&app, "GET", &path, Some(&cookie), None)
+        );
+        let (response, rejected) = if first.status() == StatusCode::SEE_OTHER {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/");
+        let session = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|v| v.starts_with("bi_session="))
+            .unwrap()
+            .to_owned();
+        assert!(session.contains("HttpOnly; SameSite=Strict"));
+        let session = session.split(';').next().unwrap();
+        assert_eq!(
+            send(&app, "GET", &path, Some(&cookie), None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let restarted = crate::router(state);
+        assert_eq!(
+            send(&restarted, "GET", "/api/v1/session", Some(session), None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let identity: String =
+            sqlx::query_scalar("SELECT federated_identity::text FROM bi_meta.sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let identity: FederatedIdentity = serde_json::from_str(&identity).unwrap();
+        assert_eq!(identity.groups, ["analysts"]);
+        let events: Vec<String> =
+            sqlx::query_scalar("SELECT payload FROM bi_meta.audit_events ORDER BY sequence")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let events: Vec<bi_audit::Event> = events
+            .iter()
+            .map(|json| serde_json::from_str(json).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.result == bi_audit::ResultCode::Success)
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.result == bi_audit::ResultCode::Denied)
+        );
+        crate::audit::verify(&pool, None).await.unwrap();
+        // Reauthentication rotates the session and revokes the previous one.
+        let start = send(
+            &app,
+            "POST",
+            "/api/v1/oidc/start",
+            Some(session),
+            Some("http://127.0.0.1:8080"),
+        )
+        .await;
+        assert_eq!(start.status(), StatusCode::OK);
+        let binding = start.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let body = start.into_body().collect().await.unwrap().to_bytes();
+        let login: LoginStart = serde_json::from_slice(&body).unwrap();
+        let rotated = reqwest::Url::parse(&authorize(&login.authorization_url).await).unwrap();
+        let rotated_path = format!("{}?{}", rotated.path(), rotated.query().unwrap());
+        let response = send(&app, "GET", &rotated_path, Some(&binding), None).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let replacement = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|v| v.starts_with("bi_session="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_ne!(replacement, session);
+        assert_eq!(
+            send(&app, "GET", "/api/v1/session", Some(session), None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let session = replacement.as_str();
+        assert_eq!(
+            send(
+                &restarted,
+                "POST",
+                "/api/v1/logout",
+                Some(session),
+                Some("http://evil.test")
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(
+                &restarted,
+                "POST",
+                "/api/v1/logout",
+                Some(session),
+                Some("http://127.0.0.1:8080")
+            )
+            .await
+            .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            send(&restarted, "GET", "/api/v1/session", Some(session), None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // A bad nonce consumes state; even correcting the record cannot resurrect the attempt.
+        let (url, cookie) = begin(&app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        sqlx::query("UPDATE bi_meta.oidc_attempts SET nonce = 'wrong-nonce'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            send(&app, "GET", &path, Some(&cookie), None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(&app, "GET", &path, Some(&cookie), None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (url, cookie) = begin(&app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        sqlx::query(
+            "UPDATE bi_meta.oidc_attempts SET expires_at = clock_timestamp() - interval '1 second'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            send(&app, "GET", &path, Some(&cookie), None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn pkce_failure_and_audit_failure_cannot_create_sessions(pool: PgPool) {
+        let db = crate::db::Database::start(pool.clone());
+        assert!(db.wait_until_migrated().await);
+        let mut state = AppState::new(db);
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        let app = crate::router(state);
+        let (url, cookie) = begin(&app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        sqlx::query("UPDATE bi_meta.oidc_attempts SET verifier = repeat('a', 64)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            send(&app, "GET", &path, Some(&cookie), None).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let (url, cookie) = begin(&app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        // Break the append adapter after a genuine authorization and token exchange.
+        sqlx::query("DROP FUNCTION bi_meta.audit_append(TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = send(&app, "GET", &path, Some(&cookie), None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .any(|v| v.to_str().unwrap().starts_with("bi_session="))
+        );
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0);
+    }
+}

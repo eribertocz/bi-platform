@@ -41,6 +41,7 @@ Pruebas: en `backend/`, `cargo fmt --all --check`,
 `cargo test --locked`; con PostgreSQL real, configura
 `DATABASE_URL=postgres://bi:bi@127.0.0.1:54320/bi` y ejecuta
 `cargo test --locked --all-features` (PowerShell: `$env:DATABASE_URL='postgres://bi:bi@127.0.0.1:54320/bi'`).
+Estas pruebas también requieren el proveedor real descrito en «Login corporativo».
 Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de
 `compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG` y `BI_STATIC_DIR`
 (directorio del build; sin esta variable, Rust sirve solo la API).
@@ -74,7 +75,7 @@ si no está disponible, se muestra el error y se puede reintentar.
 La pila Compose habilita el login de desarrollo y configura dos identidades
 sintéticas. Abre `/login` para entrar; `/estado` sigue siendo público. El resto
 de la UI requiere sesión y todo `/api/v1/**` la valida en PostgreSQL, salvo los
-dos endpoints de login de desarrollo. Logout revoca la sesión en el servidor.
+endpoints de login de desarrollo y OIDC. Logout revoca la sesión en el servidor.
 
 Para desarrollar con Vite, configura en el proceso Rust
 `BI_PUBLIC_ORIGIN=http://127.0.0.1:5173` y
@@ -85,8 +86,54 @@ estas variables con `$env:BI_PUBLIC_ORIGIN='http://127.0.0.1:5173'` y
 La cookie es HttpOnly y SameSite=Strict; con origen HTTPS añade Secure. Solo
 se permite HTTP en loopback. `BI_SESSION_TTL_SECONDS` admite 60–86400 segundos
 (por defecto 3600). Las operaciones mutadoras exigen el Origin configurado.
-El build por defecto no admite login aunque exista `BI_DEV_USERS`; no añadas
+El build por defecto no admite login de desarrollo aunque exista `BI_DEV_USERS`; no añadas
 `dev-auth` al build de producción. Estas sesiones solo autorizan datos sintéticos.
+
+### Login corporativo
+
+Configura `BI_OIDC_ISSUER` (URL exacta del emisor) y `BI_OIDC_CLIENT_ID` en el
+servidor. Para un cliente confidencial, añade `BI_OIDC_CLIENT_SECRET` mediante
+el gestor de secretos o el entorno del proceso. Registra en el proveedor el
+callback exacto `BI_PUBLIC_ORIGIN/api/v1/oidc/callback`; exige Authorization Code
+y PKCE S256. HTTPS es obligatorio salvo en loopback. No hay destinos de retorno
+elegidos por el cliente. En `/login` aparece «Entrar con mi empresa».
+
+Se conserva la sesión de servidor HttpOnly, SameSite=Strict, Secure con HTTPS
+y validación de Origin. Solo la cookie de enlace OIDC, de cinco minutos,
+usa SameSite=Lax para recibir el callback. El intento se consume una sola vez
+antes del intercambio. Cada callback vuelve a leer JWKS para aceptar la
+rotación; una caída del proveedor impide el login. No se guardan tokens OAuth.
+El callback registra éxitos y rechazos en la cadena de auditoría; la creación
+de sesión y su evento se confirman en la misma transacción. Si falla la
+auditoría, no se crea la sesión.
+La identidad se identifica por emisor y `sub`, nunca por email; registra
+`groups` y únicamente los atributos adicionales enumerados en
+`BI_OIDC_ATTRIBUTE_CLAIMS` (nombres separados por comas). Los grupos no conceden
+permisos por sí mismos y el acceso sigue limitado a datos sintéticos hasta que
+existan políticas semánticas. Cerrar sesión revoca el acceso a BI; la sesión
+SSO corporativa la controla el proveedor.
+
+Prueba reproducible (Keycloak y PostgreSQL exclusivos para esta batería):
+desde la raíz, `docker compose -f compose.oidc.yaml up -d` (o `podman compose`).
+Espera a que responda `http://127.0.0.1:18071/realms/bi-test/.well-known/openid-configuration`.
+En `backend/`, configura `DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi`,
+`BI_TEST_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test` y
+`BI_TEST_LAKE_CATALOG=dbname=bi_lake_catalog host=127.0.0.1 port=18072 user=bi password=bi`;
+ejecuta `cargo test --locked --all-features -j 4`.
+La fixture contiene credenciales públicas **solo de prueba**, sin valor para despliegue.
+
+Para probar en navegador, compila `frontend/` con `npm ci` y `npm run build`.
+En el servidor configura `BI_BIND_ADDR=127.0.0.1:18070`,
+`BI_PUBLIC_ORIGIN=http://127.0.0.1:18070`,
+`BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi`,
+`BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test`,
+`BI_OIDC_CLIENT_ID=bi-platform`, `BI_ANALYTICS=off` y el directorio absoluto
+de `frontend/build` como `BI_STATIC_DIR`; ejecuta `cargo run --locked -j 4 -p bi-server`
+sin `dev-auth`. En `frontend/`, configura `BI_E2E_BASE_URL=http://127.0.0.1:18070`
+y ejecuta `npm run test:e2e -- e2e/oidc.spec.ts`.
+Validación manual: abre `/login`, pulsa «Entrar con mi empresa», entra en Keycloak
+con `oidc-user` / `oidc-test-only`, comprueba «Sesión: Corporate Analyst», recarga
+y cierra sesión. Debes volver a `/login` y no poder acceder a Inicio sin entrar.
 
 Verificación local (los mismos pasos de CI): `npm run check:api`,
 `npm run format:check`, `npm run check`, `npm run lint`, `npm test`,

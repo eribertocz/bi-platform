@@ -50,6 +50,57 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/oidc/callback': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** @description Acción session:login, recurso sesión propia. Requiere state, code y cookie temporal; consume el intento atómicamente antes del intercambio. Solo redirige a /. */
+    get: operations['completeOidcLogin'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/oidc/config': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** @description Acción session:login, recurso sesión propia; público, no revela secretos. */
+    get: operations['getOidcConfig'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/oidc/start': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** @description Acción session:login, recurso sesión propia. Origin obligatorio. PKCE S256, nonce y state con vida de cinco minutos. Redirección fija. */
+    post: operations['startOidcLogin'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/queries': {
     parameters: {
       query?: never;
@@ -156,6 +207,12 @@ export interface components {
     };
     /** @enum {string} */
     HealthStatus: 'ok' | 'degraded' | 'unavailable';
+    LoginConfig: {
+      enabled: boolean;
+    };
+    LoginStart: {
+      authorization_url: string;
+    };
     Problem: {
       /** @description Stable identifier for clients, e.g. `invalid_query`. */
       code: string;
@@ -412,6 +469,132 @@ export interface operations {
         };
         content: {
           'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  completeOidcLogin: {
+    parameters: {
+      query: {
+        /** @description Código del proveedor */
+        code: string;
+        /** @description State de un solo uso */
+        state: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Sesión de servidor creada; cookie HttpOnly SameSite=Strict */
+      303: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Intento o token inválido */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description OIDC deshabilitado */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Proveedor o PostgreSQL no disponible */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  getOidcConfig: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Disponibilidad del login corporativo */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['LoginConfig'];
+        };
+      };
+    };
+  };
+  startOidcLogin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description URL del proveedor y cookie temporal HttpOnly */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['LoginStart'];
+        };
+      };
+      /** @description Parámetros no permitidos */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Origin inválido */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description OIDC deshabilitado */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Proveedor o PostgreSQL no disponible */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
         };
       };
     };
