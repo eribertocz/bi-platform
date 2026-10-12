@@ -414,6 +414,7 @@ mod protection {
             analytics: memory_lake("(1, '2026-01-01T00:00:00Z', 'north', 1, 1.00)").await,
             query_timeout: Duration::from_secs(10),
             metrics: bi_server::metrics::QueryMetrics::default(),
+            models: bi_server::models::Models::default(),
         });
 
         let anonymous = send(&app, "/api/v1/queries", None, Some(ORIGIN), QUERY).await;

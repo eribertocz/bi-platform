@@ -131,14 +131,30 @@ impl Canonical for Literal {
             Self::Boolean(value) => {
                 C::record("literal.boolean", [("value", value.canonical_value())])
             }
-            Self::SignedInteger(value) => C::record(
-                "literal.signed-integer",
-                [("value", value.canonical_value())],
-            ),
-            Self::UnsignedInteger(value) => C::record(
-                "literal.unsigned-integer",
-                [("value", value.canonical_value())],
-            ),
+            // A value that fits 64 bits keeps its original encoding, so no
+            // existing fingerprint changes; only wider values use the
+            // `-128` records, with their exact decimal text. Every value has
+            // exactly one form.
+            Self::SignedInteger(value) => match i64::try_from(*value) {
+                Ok(narrow) => C::record(
+                    "literal.signed-integer",
+                    [("value", narrow.canonical_value())],
+                ),
+                Err(_) => C::record(
+                    "literal.signed-integer-128",
+                    [("value", C::text(value.to_string()))],
+                ),
+            },
+            Self::UnsignedInteger(value) => match u64::try_from(*value) {
+                Ok(narrow) => C::record(
+                    "literal.unsigned-integer",
+                    [("value", narrow.canonical_value())],
+                ),
+                Err(_) => C::record(
+                    "literal.unsigned-integer-128",
+                    [("value", C::text(value.to_string()))],
+                ),
+            },
             Self::Decimal(value) => {
                 C::record("literal.decimal", [("value", value.canonical_value())])
             }
