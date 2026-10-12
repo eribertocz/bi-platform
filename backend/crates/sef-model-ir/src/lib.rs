@@ -11,6 +11,7 @@ pub mod canonical;
 mod canonical_projection;
 pub mod diagnostic;
 pub mod expressions;
+pub mod functions;
 pub mod grain;
 pub mod identity;
 pub mod model;

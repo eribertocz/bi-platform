@@ -361,6 +361,18 @@ async fn queued(runtime: &Runtime) {
     .unwrap();
 }
 
+/// A cancelled queued job keeps its slot until the worker dequeues it
+/// (`PoolLoad`): wait for that before asking for the slot again.
+async fn drained(runtime: &Runtime) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while runtime.load().queued != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_queue_records_busy_and_observes_native_pool_occupancy() {
     let runtime = runtime().await;
@@ -406,6 +418,7 @@ async fn queued_timeout_records_wait_without_inventing_execution() {
     assert_eq!(runtime.load().queued, 1, "cancelled slot awaits dequeuing");
     drop(release);
     blocker.await.unwrap();
+    drained(&runtime).await;
     runtime.run(|_| Ok(())).await.unwrap();
     assert_eq!(runtime.load().running, 0);
     assert_eq!(runtime.load().queued, 0);
