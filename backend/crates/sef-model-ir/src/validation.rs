@@ -11,7 +11,7 @@ use crate::grain::{Grain, GrainAtom};
 use crate::identity::{StableId, valid_segment};
 use crate::model::{
     AggregationClass, AggregationContract, ConformanceContract, ConversionRule, Dimension,
-    EntityKey, Field, Measure, Metric, ModelDefinition, SemanticDataset, TemporalTies,
+    EntityKey, Field, Lifecycle, Measure, Metric, ModelDefinition, SemanticDataset, TemporalTies,
     UnitConversion, WindowBehavior,
 };
 use crate::policy::{ContextSlot, PolicyScope};
@@ -132,7 +132,7 @@ impl<'a> Validator<'a> {
         for entity in &self.model.entities {
             collect_metadata!(entity.keys);
         }
-        for metadata in objects {
+        for metadata in &objects {
             let id = metadata.id();
             if !ids.insert(id) {
                 self.error(
@@ -141,6 +141,71 @@ impl<'a> Validator<'a> {
                     "Semantic stable IDs must be unique",
                 );
             }
+        }
+        let mut replacements = BTreeMap::new();
+        for metadata in &objects {
+            let governance = &metadata.governance;
+            let mut tags = BTreeSet::new();
+            if governance
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.trim().is_empty())
+                || governance
+                    .tags
+                    .iter()
+                    .any(|tag| tag.trim().is_empty() || !tags.insert(tag))
+            {
+                self.error(
+                    ErrorCode::InvalidCanonicalValue,
+                    metadata.id(),
+                    "Governance owner and tags must be nonempty; tags must be unique",
+                );
+            }
+            if let Lifecycle::Deprecated {
+                sunset: Some(date), ..
+            } = &governance.lifecycle
+                && crate::time::iso_date_days(date).is_none()
+            {
+                self.error(
+                    ErrorCode::InvalidTemporalContract,
+                    metadata.id(),
+                    "Governance sunset must be a valid ISO date (YYYY-MM-DD)",
+                );
+            }
+            if let Lifecycle::Deprecated {
+                replacement: Some(target),
+                ..
+            } = &metadata.governance.lifecycle
+            {
+                if !ids.contains(target) || target.kind() != metadata.id().kind() {
+                    self.missing(metadata.id(), target);
+                } else {
+                    replacements.insert(metadata.id(), target);
+                }
+            }
+        }
+        // Walk each functional graph once: completed tails need no further traversal.
+        let mut completed = BTreeSet::new();
+        for start in replacements.keys() {
+            let mut path = BTreeSet::new();
+            let mut current = *start;
+            while !completed.contains(current) {
+                if !path.insert(current) {
+                    for id in &path {
+                        self.error(
+                            ErrorCode::InvalidModelReference,
+                            id,
+                            "Governance replacement chain contains a cycle",
+                        );
+                    }
+                    break;
+                }
+                let Some(next) = replacements.get(current) else {
+                    break;
+                };
+                current = next;
+            }
+            completed.extend(path);
         }
     }
 

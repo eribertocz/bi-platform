@@ -311,7 +311,7 @@ Es la parte más relevante para nuestro motor de corrección (#45). Busca que **
 | Punto | Situación | Acción |
 |---|---|---|
 | Lectura, escritura y validación de la capa 1 (YAML y JSON, esquema, unicidad, referencias, aridad, sintaxis) | Hecho (#54) | — |
-| `ANSI_SQL` como lengua común de facto (ejemplos, conversores) | Solo se calcula `OSSIE_SQL_2026` | #74 |
+| `ANSI_SQL` como lengua común de facto (ejemplos, conversores) | #74 calcula el mismo subconjunto representable que `OSSIE_SQL_2026`, con selección determinista | Semántica de división y redondeo indicada abajo |
 | **Funciones REQUIRED** (texto, matemáticas, extracción y aritmética de fechas, estadísticos, percentiles, ventanas de ranking y desplazamiento, `SUM(DISTINCT)`, `%`) | El validador las acepta, pero la conversión a CSMIR las rechaza con `not_representable`; por ejemplo, `UPPER`, `MOD` y `SUM(DISTINCT)` | #77: ampliar CSMIR y el planificador para cumplir el **MUST** |
 | `is_time`, descripciones y `ai_context` | Validados; no llegan a la API ni a la UI | #75 |
 | Referencias métrica → métrica (`ingresos / pedidos`) | Las admitimos; #486 las deja "para más adelante" y #246 las usa | Es **extensión nuestra**: al exportar a herramientas sin soporte, expandirlas (parte 4 de #48) |
@@ -321,3 +321,27 @@ Es la parte más relevante para nuestro motor de corrección (#45). Busca que **
 | Orígenes de tipo archivo (#338) | Encaja con "consultar sin copiar" (ADR 0009) | Seguir la propuesta |
 | `MEASURE()` (#354) y la capa 3 (#246, #529, #568) | Consulta semántica estructurada compilada a SQIR (#73); no ofrece una interfaz SQL | Si llega una entrada SQL con `MEASURE()`, también se compilará a SQIR; vigilar los contratos MCP y Arrow |
 | Batería de conformidad (vacía en Ossie) | Tenemos el corpus de 21 casos con resultado exacto | Oportunidad: aportarlo (decisión del propietario, ver `ossie.md`) |
+
+### Semántica ANSI adoptada por bi-platform (#74)
+
+Se elige `OSSIE_SQL_2026` antes de `ANSI_SQL`, independientemente del orden de
+las alternativas. Ambos usan el mismo subconjunto de sintaxis representable;
+la política de división sigue el **dialecto de la expresión seleccionada**:
+en ANSI, un denominador cero exige `ZeroDivisionPolicy::Error`; en Ossie se
+conserva `Null`. Esto cubre razones entre métricas, campos calculados y
+divisiones dentro del argumento de un agregado, también al insertar un campo
+calculado en otra expresión: el campo conserva su propia política.
+
+La extensión `vendor_name: bi-platform` de la métrica o del campo puede
+declarar `{"version":1,"zero_division":"null"}` o `"error"` para sobrescribir
+ese valor. Omitirla en ANSI nunca convierte la división en `NULL` de manera
+implícita. `AVG` sobre un conjunto vacío conserva `NULL`: su descomposición
+interna en `SUM/COUNT` no es una división escrita por el autor; una declaración
+explícita de la extensión sigue teniendo precedencia.
+
+El redondeo de las divisiones decimales con `CAST(... AS DECIMAL(p,s))` y de
+los casts decimales que lo requieren es `HalfEven` por defecto, una elección
+de implementación permitida en ANSI. La extensión de métrica `rounding`
+conserva las alternativas explícitas ya admitidas. Los dos ratios del oráculo
+de 21 casos definen `Null`: sus variantes ANSI lo declaran explícitamente para
+comparar la misma semántica, sin cambiar el oráculo.

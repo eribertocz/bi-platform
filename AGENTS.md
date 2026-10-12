@@ -25,6 +25,23 @@ Cada capacidad sigue cinco pasos: **el propietario define el objetivo → un age
 9. Decisiones técnicas rutinarias: las toman los agentes. Decisiones fundamentales de producto: se consultan al propietario (@eribertocz) en el Issue.
 10. **Validación del propietario.** Cuando se integra algo que se puede ver o usar, Claude se lo explica en lenguaje llano: qué puede hacer ahora, cómo probarlo paso a paso y qué debería ver. El propietario lo acepta o lo rechaza; si lo rechaza, se abre un Issue con lo que falla. Lo que no se puede probar a mano (correcciones internas, rendimiento, seguridad) se le informa, pero lo validan la revisión y las pruebas automáticas.
 
+## Principios de producto (todas las capas y módulos)
+
+Definidos por el propietario (2026-10-11). Cada capacidad rescata lo mejor de las herramientas BI de referencia y **va más allá**: la documentación y los referentes son el suelo, no el techo. Todo diseño y todo PR explica cómo cumple cada principio, o por qué no aplica.
+
+**Leyes fundamentales (obligatorias):** `docs/producto/leyes-bi.md`. Son las 10 leyes del propietario más 3 añadidas. Todo PR de producto indica qué leyes toca y cómo las cumple; si dos chocan, priman la 1, 2, 3 y 5. Un PR que viola una ley no se integra, aunque CI esté en verde.
+
+| Principio | Qué significa | Cómo se comprueba |
+|---|---|---|
+| **Facilidad** | La persona dice qué necesita, no cómo hacerlo. Hay valores por defecto sensatos, el usuario puede anularlos y el sistema explica cada decisión que toma por él | El caso común se hace sin configurar nada; la elección automática es visible y anulable |
+| **Velocidad** | Respuesta inmediata en lo interactivo y ningún trabajo repetido sin necesidad | Medida antes y después en las rutas críticas (`PERFORMANCE_DESDE_G0.md`) |
+| **Modernidad** | Estándares abiertos y la mejor técnica disponible (Ossie, Arrow, DuckDB y DuckLake, OIDC, OpenTelemetry), nunca la copia de un producto anterior | El PR nombra qué estándar o técnica usa y qué hace mejor que los referentes |
+| **Reproducibilidad** | Lo mismo de entrada da lo mismo de salida: definiciones en Git, versiones de datos (DuckLake) y huellas deterministas | Repetir con la misma versión da los mismos bytes o el mismo resultado; probado |
+| **Trazabilidad** | Cada número sabe de dónde viene (linaje hasta la fuente), con qué definición y versión se calculó, y quién hizo qué (auditoría) | Desde un valor en pantalla se llega a su definición, su versión de datos y su plan |
+| **Exactitud demostrable** | Nunca un número equivocado en silencio: o se demuestra correcto, o se rechaza con un motivo claro | Pruebas contra el oráculo, corpus normativo y casos negativos |
+| **Seguridad por diseño** | Permisos en un punto único, denegación por defecto y ningún secreto expuesto (ADR 0010) | Modelo de amenazas y pruebas negativas de autorización |
+| **Apertura** | Sin encierro: entra y sale en formatos estándar; el motor también se usa fuera (ADR 0011) | Importar y exportar sin pérdida, o con la pérdida declarada |
+
 ## Calidad
 
 - Software funcionando y pruebas reales; nada simulado que aparente funcionalidad. Las pruebas son automáticas, reproducibles (los mismos comandos en local y en CI) e incluyen casos negativos: lo que debe rechazarse se prueba que se rechaza.

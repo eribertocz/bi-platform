@@ -35,6 +35,31 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   await expect(detail).toContainText('DECIMAL(18,2)');
   await expect(detail).toContainText('sales.region');
   await expect(detail).toContainText('Admite valores sin dato (NULL)');
+  await expect(detail).toContainText('Suma exacta del importe de las ventas.');
+  await expect(detail).toContainText('Sinónimos para IA: facturación');
+  await expect(detail).toContainText('Región comercial');
+  await expect(detail).toContainText('Sinónimos para IA: zona comercial');
+  await expect(detail).toContainText('Dimensión de tiempo');
+  await expect(detail).toContainText('Fecha del pedido');
+  await expect(detail).toContainText('TIMESTAMPTZ (instante)');
+  const metadata = await page.evaluate(async () => (await fetch('/api/v1/models')).json());
+  const source = metadata.models.find((m: { file: string }) => m.file === 'metrics/ventas.yaml');
+  expect(
+    source.datasets[0].fields.find((f: { name: string }) => f.name === 'region').annotation
+      .ai_context.vendor_hint,
+  ).toEqual({ category: 'geography' });
+  const declared = detail.getByText('Datasets y campos declarados', { exact: true });
+  await declared.click();
+  await expect(detail.getByText('Una fila por pedido.', { exact: true })).toBeVisible();
+  await expect(detail.getByText('Sinónimos para IA: pedidos', { exact: true })).toBeVisible();
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await declared.click();
   const fingerprint = detail.getByText('Huella de esta definición', { exact: true });
   await fingerprint.focus();
   await page.keyboard.press('Enter');
@@ -49,6 +74,8 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
         .analyze()
     ).violations,
   ).toEqual([]);
+  await page.keyboard.press('Shift+Tab');
+  await expect(detail.getByText('Datasets y campos declarados', { exact: true })).toBeFocused();
   await page.keyboard.press('Shift+Tab');
   await expect(ventas).toBeFocused();
   await page.keyboard.press('Shift+Tab');
@@ -85,6 +112,27 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   const original = readFileSync(file, 'utf8');
   await page.getByRole('button', { name: 'Ventas', exact: true }).click();
   try {
+    writeFileSync(
+      file,
+      original.replace('dimension: {}', 'datatype: String\n        dimension: {is_time: true}'),
+    );
+    await page.getByRole('button', { name: 'Actualizar modelos' }).click();
+    await expect(detail).toContainText(
+      'Este campo tiene is_time: true, pero su tipo no es temporal.',
+    );
+    await expect(detail).toContainText('Aviso:');
+    await page.setViewportSize({ width: 320, height: 800 });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .withTags(['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+    await page.setViewportSize({ width: 1280, height: 720 });
     writeFileSync(file, 'version: [\n');
     await page.getByRole('button', { name: 'Actualizar modelos' }).click();
     const broken = page.getByRole('region', { name: 'ventas.yaml', exact: true });

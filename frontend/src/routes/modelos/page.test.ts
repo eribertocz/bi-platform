@@ -15,8 +15,42 @@ const data: ModelsResponse = {
       name: 'Ventas',
       fingerprint: 'sef-sha256-v1:abc',
       diagnostics: [],
-      metrics: [{ id: 'p/metric/m', name: 'Importe', data_type: 'DECIMAL(38,2)', nullable: null }],
-      dimensions: [{ id: 'p/dimension/id', name: 'ID', data_type: 'INT64', nullable: false }],
+      description: 'Ventas registradas.',
+      ai_context: { synonyms: ['operaciones'] },
+      datasets: [],
+      metrics: [
+        {
+          id: 'p/metric/m',
+          name: 'Importe',
+          data_type: 'DECIMAL(38,2)',
+          nullable: null,
+          annotations: [],
+        },
+      ],
+      dimensions: [
+        {
+          id: 'p/dimension/id',
+          name: 'ID',
+          data_type: 'INT64',
+          nullable: false,
+          annotations: [
+            {
+              path: '/datasets/0/fields/0',
+              name: 'ventas.fecha',
+              label: 'Fecha comercial',
+              description: '<img src=x onerror=alert(1)>',
+              ai_context: {
+                synonyms: ['fecha de compra'],
+                instructions: 'No ejecutar',
+                examples: ['ayer'],
+                vendor_hint: { arbitrary: true },
+              },
+              is_time: true,
+              declared_is_time: null,
+            },
+          ],
+        },
+      ],
     },
     {
       status: 'invalid',
@@ -44,6 +78,12 @@ it('shows exact types and file diagnostics with location', async () => {
   await fireEvent.click(await screen.findByRole('button', { name: 'Ventas' }));
   expect(screen.getByText('DECIMAL(38,2)').textContent).toBe('DECIMAL(38,2)');
   expect(screen.getByText('INT64').textContent).toBe('INT64');
+  expect(screen.getByText('Dimensión de tiempo')).toBeTruthy();
+  expect(screen.getByText('Fecha comercial')).toBeTruthy();
+  expect(screen.getByText('Ventas registradas.')).toBeTruthy();
+  expect(screen.getByText('Sinónimos para IA: fecha de compra')).toBeTruthy();
+  expect(screen.getByText('<img src=x onerror=alert(1)>')).toBeTruthy();
+  expect(document.querySelector('img')).toBeNull();
   await fireEvent.click(screen.getByRole('button', { name: 'Error' }));
   expect(screen.getByText('El archivo no es un YAML válido.')).toBeTruthy();
   expect(screen.getByText(/metrics\/error.yaml.*Línea 2,\s*columna 3/)).toBeTruthy();

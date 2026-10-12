@@ -1,14 +1,14 @@
 //! The checks of the official validator (`validation/validate.py`) that a
 //! typed parse cannot express: schema constraints (`const`, `minLength`,
 //! `minItems`), unique names, relationship references, column arity and key
-//! coverage. Expression syntax is checked when expressions are compiled.
+//! coverage. Computable expressions share these checks with conversion.
 //!
 //! One deliberate difference: names are compared as **normalized
 //! identifiers** (Ossie: unquoted identifiers are case-insensitive), so
 //! `orders` and `Orders` collide here although `validate.py` compares raw
 //! strings. Both would resolve to the same dataset in an expression.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::document::{Dialect, Expression, SPEC_VERSION, SemanticModel};
@@ -65,6 +65,15 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
                 &field.expression,
                 Context::Field,
             );
+            if field.dimension.as_ref().and_then(|d| d.is_time) == Some(true)
+                && field.datatype == Some(crate::document::DataType::String)
+            {
+                found.push(Diagnostic::warning(
+                    Code::NonTemporalTimeRole,
+                    format!("{path}/dimension/is_time"),
+                    "Este campo tiene is_time: true, pero su tipo no es temporal. Revisa cómo representa el tiempo; el rol declarado se conserva.",
+                ));
+            }
         }
         duplicates(
             &mut found,
@@ -201,9 +210,14 @@ fn identifier(found: &mut Vec<Diagnostic>, path: &str, value: &str, what: &str) 
     }
 }
 
-/// Only `OSSIE_SQL_2026` defines portable semantics. Other dialects are
-/// opaque here and will be analyzed by their adapter when compiled.
-fn expression(found: &mut Vec<Diagnostic>, path: &str, expression: &Expression, context: Context) {
+/// Both computable dialects use one allowlist and resource budget. Vendor
+/// expressions stay opaque and are retained for export, never executed.
+pub(crate) fn expression(
+    found: &mut Vec<Diagnostic>,
+    path: &str,
+    expression: &Expression,
+    context: Context,
+) {
     if expression.dialects.is_empty() {
         found.push(Diagnostic::error(
             Code::EmptyList,
@@ -211,13 +225,43 @@ fn expression(found: &mut Vec<Diagnostic>, path: &str, expression: &Expression, 
             "La expresión necesita al menos un dialecto.",
         ));
     }
+    let mut seen = HashSet::new();
+    let mut repeated = HashSet::new();
     for (k, candidate) in expression.dialects.iter().enumerate() {
-        if candidate.dialect == Dialect::OssieSql2026
+        if !seen.insert(candidate.dialect) && repeated.insert(candidate.dialect) {
+            found.push(Diagnostic::error(
+                Code::DuplicateDialect,
+                format!("{path}/dialects/{k}/dialect"),
+                "Un dialecto solo puede declararse una vez en cada expresión.",
+            ));
+        }
+        if matches!(candidate.dialect, Dialect::OssieSql2026 | Dialect::AnsiSql)
             && let Err(mut diagnostic) = analyze(&candidate.expression, context)
         {
+            // ANSI functions outside our portable subset are unsupported;
+            // recognizing vendor SQL does not make it executable.
+            if candidate.dialect == Dialect::AnsiSql && diagnostic.code == Code::UnknownFunction {
+                diagnostic.code = Code::UnsupportedConstruct;
+            }
             diagnostic.path = format!("{path}/dialects/{k}/expression");
             found.push(diagnostic);
         }
+    }
+    if repeated.is_empty()
+        && let Some((_, selected)) = expression.executable()
+        && selected.dialect == Dialect::OssieSql2026
+        && let Some((k, ansi)) = expression
+            .dialects
+            .iter()
+            .enumerate()
+            .find(|(_, candidate)| candidate.dialect == Dialect::AnsiSql)
+        && selected.expression != ansi.expression
+    {
+        found.push(Diagnostic::warning(
+            Code::DialectPrecedence,
+            format!("{path}/dialects/{k}/expression"),
+            "Las expresiones difieren: se calcula OSSIE_SQL_2026 por prioridad; ANSI_SQL se conserva para exportar.",
+        ));
     }
 }
 
