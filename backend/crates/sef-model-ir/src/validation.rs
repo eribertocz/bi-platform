@@ -1678,7 +1678,26 @@ impl<'a> Validator<'a> {
                 owner,
                 "Arithmetic units do not satisfy an explicit canonical operation",
             );
+            // The evidence names both units, so the caller sees what clashed.
+            if let Some(error) = self.errors.last_mut() {
+                error.evidence.push(Evidence::TypeMismatch {
+                    expected: unit_text(left),
+                    actual: unit_text(right),
+                });
+            }
         }
+    }
+}
+
+fn unit_text(unit: Option<&Unit>) -> String {
+    match unit {
+        None => "no unit".to_owned(),
+        Some(Unit::Currency { iso4217 }) => iso4217.clone(),
+        Some(Unit::Physical { ucum }) => ucum.clone(),
+        Some(Unit::Ratio) => "ratio".to_owned(),
+        Some(Unit::Percent) => "percent".to_owned(),
+        Some(Unit::Count) => "count".to_owned(),
+        Some(Unit::Custom { namespace, code }) => format!("{namespace}:{code}"),
     }
 }
 

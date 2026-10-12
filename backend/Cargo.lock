@@ -3503,6 +3503,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sef-correctness"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sef-model-ir",
+ "sef-ossie",
+ "sef-query-ir",
+ "serde-saphyr",
+]
+
+[[package]]
 name = "sef-model-ir"
 version = "0.1.0"
 dependencies = [
