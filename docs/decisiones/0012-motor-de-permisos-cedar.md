@@ -18,7 +18,7 @@ La seguridad por filas (RLS) ya existe en CSMIR: políticas tipadas con parámet
 | **Cedar** (`cedar-policy` 4.13.0, Apache-2.0) | `cedar-policy/cedar@56c9706` | Rust nativo, **sin tokio ni red**. Lenguaje de políticas con esquema y validación estricta. Semántica **verificada formalmente en Lean**. `cedar-policy-symcc` demuestra propiedades de conjuntos de políticas (`check_implies`, `check_equivalent`, `check_always_denies`) con contraejemplos. Evaluación parcial con tipos (`tpe`), experimental, que deja residuos sobre los atributos del recurso |
 | **Casbin** (`casbin` 2.18.1, Apache-2.0) | `casbin/casbin-rs@ab8b1e9` | Por defecto exige `runtime-tokio`. API asíncrona (`async-trait`). Los *matchers* son *scripts* `rhai` evaluados como texto. Sin validación ni análisis formal |
 | **OpenFGA** (Go, Apache-2.0) | `openfga/openfga@526995e` | Servicio aparte (modelo Zanzibar, permisos por relación). Exigiría una dependencia de red en el núcleo |
-| **OPA** (Go, Apache-2.0) | `open-policy-agent/opa` | Rego y evaluación parcial madura para filtrar datos. En Rust exigiría un runtime de Wasm y otro lenguaje para los autores |
+| **OPA** (Go, Apache-2.0) | `open-policy-agent/opa@b86655f` (`Rego.Partial`, evaluación parcial para filtrar datos) | Rego y evaluación parcial madura para filtrar datos. En Rust exigiría un runtime de Wasm y otro lenguaje para los autores |
 
 **Prueba real con Cedar** (`cedar-policy =4.13.0`, sin funciones experimentales, Windows, perfil de depuración):
 - el esquema `User in [Role]`, `Metric { certified, sensitive }` y la acción `view` se validan en modo estricto;
