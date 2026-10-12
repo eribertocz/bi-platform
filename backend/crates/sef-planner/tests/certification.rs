@@ -946,3 +946,54 @@ fn a_metric_policy_guards_the_rows_of_every_metric_built_on_it() {
         .any(|op| matches!(op, Operator::PolicyGuard { policy, .. } if policy.id.as_str() == "corpus/policy/tenant"));
     assert!(guarded, "{}", planned.plan.explain());
 }
+
+#[test]
+fn the_explanation_states_exact_types_and_units() {
+    let none = SemanticContext::default();
+    // CASE-019: revenue is an exact decimal without a declared unit.
+    let (daily, _, plan19) = case(19, &none);
+    let text = sef_planner::explain(&daily, &plan19.plan);
+    let revenue = daily
+        .definition()
+        .metrics
+        .iter()
+        .find(|m| m.metadata.id().as_str() == "corpus/metric/revenue")
+        .expect("revenue");
+    let sef_model_ir::types::ValueType::Decimal(decimal) = &revenue.value_type else {
+        panic!("revenue is a decimal")
+    };
+    let line = format!(
+        "contract corpus/metric/revenue DECIMAL({},{}) sin unidad",
+        decimal.precision(),
+        decimal.scale()
+    );
+    assert!(text.contains(&line), "{text}");
+    assert!(
+        text.contains("contract corpus/measure/revenue DECIMAL("),
+        "{text}"
+    );
+    assert!(
+        text.contains("contract corpus/dimension/business_day DATE sin unidad"),
+        "{text}"
+    );
+    // CASE-010: attainment is a ratio.
+    let (targets, _, plan10) = case(10, &none);
+    let text = sef_planner::explain(&targets, &plan10.plan);
+    assert!(
+        text.lines().any(
+            |l| l.starts_with("contract corpus/metric/attainment DECIMAL(")
+                && l.ends_with(" ratio")
+        ),
+        "{text}"
+    );
+    // CASE-017: a currency.
+    let finance = model(17);
+    let request = validated(&finance, &query(vec![metric("revenue_usd")]), &none);
+    let text = sef_planner::explain(&finance, &planned(&finance, &request).plan);
+    assert!(
+        text.lines().any(
+            |l| l.starts_with("contract corpus/metric/revenue_usd DECIMAL(") && l.ends_with(" USD")
+        ),
+        "{text}"
+    );
+}

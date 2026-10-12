@@ -52,7 +52,13 @@ fn every_valid_case_has_its_frozen_plan_and_certificate() {
     for case in VALID {
         let planned = planned(case);
         writeln!(text, "=== CASE-{case:03}").expect("in memory");
-        write!(text, "{}{}", planned.plan.explain(), planned.certificate).expect("in memory");
+        write!(
+            text,
+            "{}{}",
+            sef_planner::explain(&common::model(case), &planned.plan),
+            planned.certificate
+        )
+        .expect("in memory");
     }
     let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus-plans.txt");
     if std::env::var_os("SEF_BLESS_PLANS").is_some() {

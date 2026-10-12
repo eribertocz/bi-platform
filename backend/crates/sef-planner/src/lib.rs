@@ -10,8 +10,10 @@
 
 mod build;
 mod certificate;
+mod explain;
 mod verify;
 
 pub use build::{PlannedQuery, plan};
 pub use certificate::{Certificate, Discharge, Evidence};
+pub use explain::explain;
 pub use verify::certify;
