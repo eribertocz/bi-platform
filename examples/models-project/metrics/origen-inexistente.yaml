@@ -1,0 +1,11 @@
+version: '0.2.0.dev0'
+name: Origen inexistente
+datasets:
+  - name: ausente
+    source: tabla_inexistente
+    fields:
+      - name: id
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: id

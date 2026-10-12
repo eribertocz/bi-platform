@@ -93,6 +93,16 @@ jobs:
             fi
           done
 
+      - name: Layering - audit contract stays independent (ADR 0008)
+        shell: bash
+        run: |
+          graph=$(cargo tree --locked -p bi-audit --all-features --target all -e normal --prefix none --format '{p}')
+          # The root is the audit core itself; inspect its dependencies only.
+          if tail -n +2 <<<"$graph" | grep -E '^(tokio|axum|utoipa|tower|hyper|reqwest|sqlx|duckdb|libduckdb-sys|clickhouse|opentelemetry|bi|sef)([-_][[:alnum:]_-]+)? '; then
+            echo '::error::bi-audit depends on infrastructure or another product module (ADR 0008)'
+            exit 1
+          fi
+
   bench:
     # Records a baseline (G0.13); no thresholds, shared runners are noisy.
     runs-on: ubuntu-24.04

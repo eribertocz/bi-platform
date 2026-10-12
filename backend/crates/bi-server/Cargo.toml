@@ -17,8 +17,14 @@ postgres-tests = []
 
 [dependencies]
 axum.workspace = true
+bi-audit = { path = "../bi-audit" }
 bi-fixtures = { path = "../bi-fixtures" }
 bi-runtime = { path = "../bi-runtime", default-features = false }
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+sef-adapter-duckdb = { path = "../sef-adapter-duckdb" }
+sef-ossie = { path = "../sef-ossie" }
+sef-model-ir = { path = "../sef-model-ir" }
 getrandom.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
@@ -45,6 +51,9 @@ http-body-util.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tower.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [lints]
 workspace = true

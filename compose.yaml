@@ -18,8 +18,10 @@ services:
       BI_LAKE_METADATA_SCHEMA: compose_stack
       # Development stack: load the synthetic sales fixture (idempotent).
       BI_DEV_FIXTURE_ROWS: "1000000"
+      BI_PROJECT_DIR: /project
     volumes:
       - lakedata:/var/lib/bi
+      - ./examples/models-project:/project:ro
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
