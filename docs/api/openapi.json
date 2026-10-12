@@ -169,6 +169,72 @@
         ]
       }
     },
+    "/api/v1/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real.",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "Estado del proyecto y resultados por archivo; sin configuración, lista vacía. Directorio inaccesible o límites globales: project_status unavailable y diagnóstico; nunca resultados parciales.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión válida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Demasiadas cargas simultáneas",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Motor no disponible o lectura fallida",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Tiempo de compilación agotado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/oidc/callback": {
       "get": {
         "tags": [
@@ -580,6 +646,13 @@
         },
         "additionalProperties": false
       },
+      "DiagnosticSeverity": {
+        "type": "string",
+        "enum": [
+          "error",
+          "warning"
+        ]
+      },
       "Filter": {
         "type": "object",
         "required": [
@@ -683,6 +756,360 @@
           }
         }
       },
+      "ModelAiContext": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "$ref": "#/components/schemas/ModelAiContextObject"
+          }
+        ],
+        "description": "Context is descriptive, never executable or a semantic name alias."
+      },
+      "ModelAiContextObject": {
+        "type": "object",
+        "properties": {
+          "examples": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "synonyms": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": {
+          "description": "Unknown keys are preserved without interpretation."
+        }
+      },
+      "ModelAnnotation": {
+        "type": "object",
+        "required": [
+          "name",
+          "path"
+        ],
+        "properties": {
+          "ai_context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelAiContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "declared_is_time": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Explicit declaration; null means the datatype supplies the default."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_time": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Effective time role for fields/dimensions; null for a metric."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Ossie declaration name, useful when a dimension has several origins."
+          },
+          "path": {
+            "type": "string",
+            "description": "JSON pointer in this Ossie file, identifying the declaration."
+          }
+        }
+      },
+      "ModelDataset": {
+        "type": "object",
+        "required": [
+          "name",
+          "fields"
+        ],
+        "properties": {
+          "ai_context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelAiContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelField"
+            },
+            "description": "All declared fields, including computed fields that CSMIR inlines."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelDiagnostic": {
+        "type": "object",
+        "required": [
+          "code",
+          "severity",
+          "path",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "column": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "description": "JSON pointer; empty string denotes the document root."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/DiagnosticSeverity"
+          }
+        }
+      },
+      "ModelField": {
+        "type": "object",
+        "required": [
+          "name",
+          "is_dimension",
+          "annotation"
+        ],
+        "properties": {
+          "annotation": {
+            "$ref": "#/components/schemas/ModelAnnotation"
+          },
+          "is_dimension": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ModelFile": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "name",
+              "fingerprint",
+              "datasets",
+              "metrics",
+              "dimensions",
+              "diagnostics",
+              "status"
+            ],
+            "properties": {
+              "ai_context": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ModelAiContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "datasets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelDataset"
+                }
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelDiagnostic"
+                }
+              },
+              "dimensions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelMember"
+                }
+              },
+              "file": {
+                "type": "string"
+              },
+              "fingerprint": {
+                "type": "string"
+              },
+              "metrics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelMember"
+                }
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "valid"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "name",
+              "diagnostics",
+              "status"
+            ],
+            "properties": {
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelDiagnostic"
+                }
+              },
+              "file": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "invalid"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "An invalid file never exposes metadata from a previous successful load."
+      },
+      "ModelMember": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "data_type",
+          "annotations"
+        ],
+        "properties": {
+          "annotations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelAnnotation"
+            },
+            "description": "Metadata per Ossie origin; conformed dimensions keep every binding."
+          },
+          "data_type": {
+            "type": "string",
+            "description": "Exact logical type, e.g. INT64, DECIMAL(18,2), TIMESTAMPTZ (instant)."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nullable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Direct dimension binding nullability. Null means not inferred for\ncomputed dimensions or metrics, whose result has not been executed."
+          }
+        }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "required": [
+          "project_status",
+          "models",
+          "diagnostics"
+        ],
+        "properties": {
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelDiagnostic"
+            }
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelFile"
+            }
+          },
+          "project_status": {
+            "$ref": "#/components/schemas/ProjectStatus"
+          }
+        }
+      },
       "Problem": {
         "type": "object",
         "required": [
@@ -725,6 +1152,14 @@
             "description": "Problem type URI; `about:blank` means the HTTP status says it all."
           }
         }
+      },
+      "ProjectStatus": {
+        "type": "string",
+        "enum": [
+          "not_configured",
+          "ready",
+          "unavailable"
+        ]
       },
       "QueryRequest": {
         "type": "object",

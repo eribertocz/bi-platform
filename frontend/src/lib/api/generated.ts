@@ -50,6 +50,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/models': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real. */
+    get: operations['listModels'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/oidc/callback': {
     parameters: {
       query?: never;
@@ -184,6 +201,8 @@ export interface components {
       /** @description Selects a configured synthetic identity; this is not password authentication. */
       user_id: string;
     };
+    /** @enum {string} */
+    DiagnosticSeverity: 'error' | 'warning';
     Filter: {
       /** @description A dimension of the dataset. */
       field: string;
@@ -213,6 +232,91 @@ export interface components {
     LoginStart: {
       authorization_url: string;
     };
+    /** @description Context is descriptive, never executable or a semantic name alias. */
+    ModelAiContext: string | components['schemas']['ModelAiContextObject'];
+    ModelAiContextObject: {
+      examples?: string[] | null;
+      instructions?: string | null;
+      synonyms?: string[] | null;
+    } & {
+      [key: string]: unknown;
+    };
+    ModelAnnotation: {
+      ai_context?: components['schemas']['ModelAiContext'] | null;
+      /** @description Explicit declaration; null means the datatype supplies the default. */
+      declared_is_time?: boolean | null;
+      description?: string | null;
+      /** @description Effective time role for fields/dimensions; null for a metric. */
+      is_time?: boolean | null;
+      label?: string | null;
+      /** @description Ossie declaration name, useful when a dimension has several origins. */
+      name: string;
+      /** @description JSON pointer in this Ossie file, identifying the declaration. */
+      path: string;
+    };
+    ModelDataset: {
+      ai_context?: components['schemas']['ModelAiContext'] | null;
+      description?: string | null;
+      /** @description All declared fields, including computed fields that CSMIR inlines. */
+      fields: components['schemas']['ModelField'][];
+      name: string;
+    };
+    ModelDiagnostic: {
+      code: string;
+      /** Format: int64 */
+      column?: number | null;
+      /** Format: int64 */
+      line?: number | null;
+      message: string;
+      /** @description JSON pointer; empty string denotes the document root. */
+      path: string;
+      severity: components['schemas']['DiagnosticSeverity'];
+    };
+    ModelField: {
+      annotation: components['schemas']['ModelAnnotation'];
+      is_dimension: boolean;
+      name: string;
+    };
+    /** @description An invalid file never exposes metadata from a previous successful load. */
+    ModelFile:
+      | {
+          ai_context?: components['schemas']['ModelAiContext'] | null;
+          datasets: components['schemas']['ModelDataset'][];
+          description?: string | null;
+          diagnostics: components['schemas']['ModelDiagnostic'][];
+          dimensions: components['schemas']['ModelMember'][];
+          file: string;
+          fingerprint: string;
+          metrics: components['schemas']['ModelMember'][];
+          name: string;
+          /** @enum {string} */
+          status: 'valid';
+        }
+      | {
+          diagnostics: components['schemas']['ModelDiagnostic'][];
+          file: string;
+          name: string;
+          /** @enum {string} */
+          status: 'invalid';
+        };
+    ModelMember: {
+      /** @description Metadata per Ossie origin; conformed dimensions keep every binding. */
+      annotations: components['schemas']['ModelAnnotation'][];
+      /** @description Exact logical type, e.g. INT64, DECIMAL(18,2), TIMESTAMPTZ (instant). */
+      data_type: string;
+      id: string;
+      name: string;
+      /**
+       * @description Direct dimension binding nullability. Null means not inferred for
+       *     computed dimensions or metrics, whose result has not been executed.
+       */
+      nullable?: boolean | null;
+    };
+    ModelsResponse: {
+      diagnostics: components['schemas']['ModelDiagnostic'][];
+      models: components['schemas']['ModelFile'][];
+      project_status: components['schemas']['ProjectStatus'];
+    };
     Problem: {
       /** @description Stable identifier for clients, e.g. `invalid_query`. */
       code: string;
@@ -229,6 +333,8 @@ export interface components {
        */
       type: string;
     };
+    /** @enum {string} */
+    ProjectStatus: 'not_configured' | 'ready' | 'unavailable';
     /**
      * @description An aggregate query over an allowlisted dataset. No SQL is accepted.
      * @example {
@@ -464,6 +570,62 @@ export interface operations {
       };
       /** @description PostgreSQL no disponible */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  listModels: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Estado del proyecto y resultados por archivo; sin configuración, lista vacía. Directorio inaccesible o límites globales: project_status unavailable y diagnóstico; nunca resultados parciales. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ModelsResponse'];
+        };
+      };
+      /** @description Sin sesión válida */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Demasiadas cargas simultáneas */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Motor no disponible o lectura fallida */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Tiempo de compilación agotado */
+      504: {
         headers: {
           [name: string]: unknown;
         };

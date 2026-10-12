@@ -211,8 +211,10 @@ impl FiniteFloat {
 pub enum Literal {
     Null(ValueType),
     Boolean(bool),
-    SignedInteger(i64),
-    UnsignedInteger(u64),
+    /// The full range of the widest integer type (`bits: Some(128)`), so a
+    /// literal can hold every value its column can.
+    SignedInteger(i128),
+    UnsignedInteger(u128),
     Decimal(DecimalValue),
     Float(FiniteFloat),
     Utf8(String),
@@ -239,13 +241,21 @@ impl Literal {
         match self {
             Self::Null(t) => t.clone(),
             Self::Boolean(_) => ValueType::Boolean,
-            Self::SignedInteger(_) => ValueType::Integer {
+            Self::SignedInteger(value) => ValueType::Integer {
                 signed: true,
-                bits: Some(64),
+                bits: Some(if i64::try_from(*value).is_ok() {
+                    64
+                } else {
+                    128
+                }),
             },
-            Self::UnsignedInteger(_) => ValueType::Integer {
+            Self::UnsignedInteger(value) => ValueType::Integer {
                 signed: false,
-                bits: Some(64),
+                bits: Some(if u64::try_from(*value).is_ok() {
+                    64
+                } else {
+                    128
+                }),
             },
             Self::Decimal(value) => ValueType::Decimal(value.decimal_type()),
             Self::Float(_) => ValueType::Float { bits: 64 },

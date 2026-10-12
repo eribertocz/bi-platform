@@ -1,0 +1,68 @@
+// Semantic fragment of the Cedar schema, owned by SEF (ADR 0012 §7).
+// Attributes mirror the governance metadata of CSMIR objects. The platform
+// fragment, declared by the edge, provides `User`, `Role`, `Dashboard`,
+// `Source` and the `RequestContext` type every action uses.
+
+entity Model = {
+  classification: String,
+};
+
+entity Dataset in [Model] = {
+  classification: String,
+  tags: Set<String>,
+  deprecated: Bool,
+};
+
+entity Metric in [Model] = {
+  classification: String,
+  tags: Set<String>,
+  deprecated: Bool,
+};
+
+entity Dimension in [Model] = {
+  classification: String,
+  tags: Set<String>,
+  deprecated: Bool,
+};
+
+action "view" appliesTo {
+  principal: [User],
+  resource: [Model, Dataset, Metric, Dimension, Dashboard],
+  context: RequestContext,
+};
+
+action "view_masked" appliesTo {
+  principal: [User],
+  resource: [Dataset, Metric, Dimension],
+  context: RequestContext,
+};
+
+action "use_in_dashboard" appliesTo {
+  principal: [User],
+  resource: [Metric, Dimension],
+  context: RequestContext,
+};
+
+action "edit", "share", "delete" appliesTo {
+  principal: [User],
+  resource: [Dashboard],
+  context: RequestContext,
+};
+
+action "propose_change", "approve", "publish" appliesTo {
+  principal: [User],
+  resource: [Model],
+  context: RequestContext,
+};
+
+action "connect", "configure" appliesTo {
+  principal: [User],
+  resource: [Source],
+  context: RequestContext,
+};
+
+action "manage" appliesTo {
+  principal: [User],
+  resource: [User, Role],
+  context: RequestContext,
+};

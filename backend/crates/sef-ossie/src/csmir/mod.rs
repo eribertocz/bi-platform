@@ -22,6 +22,7 @@
 //! defaults that would change a number.
 
 mod contracts;
+mod governance;
 mod metric;
 pub(crate) mod scalar;
 
@@ -32,8 +33,8 @@ use sef_model_ir::grain::{Grain, GrainAtom};
 use sef_model_ir::identity::{SemanticVersion, StableId, valid_segment};
 use sef_model_ir::model::{
     CompiledSemanticModel, ConformanceContract, DatasetTimeRole, Dimension, DimensionBinding,
-    Entity, EntityKey, Field, FieldBinding, KeyBinding, ModelDefinition, Namespace, ObjectMetadata,
-    SemanticDataset, SourceBinding,
+    Entity, EntityKey, Field, FieldBinding, Governance, KeyBinding, ModelDefinition, Namespace,
+    ObjectMetadata, SemanticDataset, SourceBinding,
 };
 use sef_model_ir::policy::{Policy, PolicyScope};
 use sef_model_ir::relationships::{
@@ -45,6 +46,7 @@ use sef_model_ir::types::{StructField, ValueType};
 use sef_model_ir::units::Unit;
 use sqlparser::ast::Expr;
 
+use self::governance::Governed;
 use self::scalar::{Division, Failure, Names, Translator, describe, normalize};
 use crate::catalog::{Catalog, Column, Relation};
 use crate::diagnostic::{Code, Diagnostic};
@@ -90,6 +92,86 @@ pub fn compile(
     options: &Options,
 ) -> Result<CompiledSemanticModel, Vec<Diagnostic>> {
     let (definition, paths) = convert(model, catalog, options)?;
+    compile_definition(definition, &paths)
+}
+
+/// A semantic snapshot with its original interchange document. Presentation
+/// context stays outside CSMIR and is never used for name resolution or hashes.
+#[derive(Debug, Clone)]
+pub struct CompiledDocument {
+    pub semantic: CompiledSemanticModel,
+    /// Warnings based on inferred source/expression types. Document-level
+    /// warnings are supplied separately by [`crate::load`].
+    pub warnings: Vec<Diagnostic>,
+    document: SemanticModel,
+    paths: Paths,
+}
+
+impl CompiledDocument {
+    /// The original document, including opaque AI properties and explicit
+    /// versus inferred time roles. This is not a CSMIR-to-Ossie exporter.
+    #[must_use]
+    pub fn document(&self) -> &SemanticModel {
+        &self.document
+    }
+
+    /// Every Ossie origin of an object, including all conformed bindings.
+    /// Synthetic objects with no declared origin return an empty list.
+    #[must_use]
+    pub fn origins(&self, id: &StableId) -> Vec<&str> {
+        self.paths
+            .get(id)
+            .map_or_else(Vec::new, |paths| paths.iter().map(String::as_str).collect())
+    }
+}
+
+/// Compiles while retaining non-semantic metadata for catalog consumers.
+///
+/// # Errors
+/// The same conversion and semantic diagnostics as [`compile`].
+pub fn compile_document(
+    model: &SemanticModel,
+    catalog: &Catalog,
+    options: &Options,
+) -> Result<CompiledDocument, Vec<Diagnostic>> {
+    let (definition, paths) = convert(model, catalog, options)?;
+    let semantic = compile_definition(definition, &paths)?;
+    let mut warnings = Vec::new();
+    for dimension in &semantic.definition().dimensions {
+        if dimension.value_type != ValueType::Utf8 {
+            continue;
+        }
+        for path in paths.get(dimension.metadata.id()).into_iter().flatten() {
+            let parts: Vec<&str> = path.split('/').collect();
+            let ["", "datasets", d, "fields", f] = parts.as_slice() else {
+                continue;
+            };
+            let field = d
+                .parse::<usize>()
+                .ok()
+                .and_then(|d| model.datasets.get(d))
+                .and_then(|d| f.parse::<usize>().ok().and_then(|f| d.fields.get(f)));
+            if field.is_some_and(|f| f.datatype.is_none() && f.is_time()) {
+                warnings.push(Diagnostic::warning(
+                    Code::NonTemporalTimeRole,
+                    format!("{path}/dimension/is_time"),
+                    "Este campo tiene is_time: true, pero el tipo de su expresión no es temporal. Revisa cómo representa el tiempo; el rol declarado se conserva.",
+                ));
+            }
+        }
+    }
+    Ok(CompiledDocument {
+        semantic,
+        warnings,
+        document: model.clone(),
+        paths,
+    })
+}
+
+fn compile_definition(
+    definition: ModelDefinition,
+    paths: &Paths,
+) -> Result<CompiledSemanticModel, Vec<Diagnostic>> {
     definition.compile().map_err(|diagnostics| {
         diagnostics
             .into_iter()
@@ -98,19 +180,37 @@ pub fn compile(
                     .primary_ref
                     .as_ref()
                     .and_then(|id| paths.get(id))
+                    .and_then(|paths| paths.first())
                     .cloned()
                     .unwrap_or_default();
+                // Type evidence (for example the two clashing units) is
+                // part of what the author needs to fix the model.
+                let evidence: Vec<String> = diagnostic
+                    .evidence
+                    .iter()
+                    .filter_map(|evidence| match evidence {
+                        sef_model_ir::diagnostic::Evidence::TypeMismatch { expected, actual } => {
+                            Some(format!("{expected} / {actual}"))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let code = diagnostic.code.as_str();
                 Diagnostic::error(
                     Code::SemanticContract,
                     path,
-                    format!("{} [{}]", diagnostic.message, diagnostic.code.as_str()),
+                    if evidence.is_empty() {
+                        format!("{} [{code}]", diagnostic.message)
+                    } else {
+                        format!("{} [{code}: {}]", diagnostic.message, evidence.join("; "))
+                    },
                 )
             })
             .collect()
     })
 }
 
-type Paths = BTreeMap<StableId, String>;
+type Paths = BTreeMap<StableId, Vec<String>>;
 
 fn convert(
     model: &SemanticModel,
@@ -206,6 +306,7 @@ struct FieldState<'a> {
     path: String,
     expression_path: String,
     extension: FieldExtension,
+    division: Division,
     ast: Option<Expr>,
     /// The CSMIR field, when the expression is a bare column.
     column: Option<StableId>,
@@ -235,9 +336,10 @@ impl<'a> Converter<'a> {
     fn id(&mut self, kind: &str, name: &str, path: &str) -> Option<StableId> {
         match self.ids.id(kind, name) {
             Ok(id) => {
-                self.paths
-                    .entry(id.clone())
-                    .or_insert_with(|| path.to_owned());
+                let paths = self.paths.entry(id.clone()).or_default();
+                if !paths.iter().any(|existing| existing == path) {
+                    paths.push(path.to_owned());
+                }
                 Some(id)
             }
             Err(id) => {
@@ -330,8 +432,11 @@ impl<'a> Converter<'a> {
             }
         };
         let segment = ids::segment(&field.name);
-        let (ast, expression_path) =
-            self.portable(&field.expression, &format!("{path}/expression"));
+        let (ast, expression_path) = self.portable(
+            &field.expression,
+            &format!("{path}/expression"),
+            crate::expression::Context::Field,
+        );
         let mut column = None;
         if let (Some(Expr::Identifier(_) | Expr::CompoundIdentifier(_)), Some(relation)) =
             (ast.as_ref().map(strip), state.relation)
@@ -350,6 +455,14 @@ impl<'a> Converter<'a> {
             let mut metadata = metadata;
             metadata.label.clone_from(&field.label);
             metadata.description.clone_from(&field.description);
+            match extension.governance(&self.ids, "field", Some(&state.segment)) {
+                Ok(governance) => metadata.governance = governance,
+                Err(failure) => {
+                    self.fail(&path, failure);
+                    return;
+                }
+            }
+
             if let Some(datatype) = field.datatype
                 && !compatible(datatype, &found.value_type)
             {
@@ -388,6 +501,7 @@ impl<'a> Converter<'a> {
                 "time_role y unit describen una columna; este campo es calculado.",
             );
         }
+        let division = Division::for_expression(&field.expression, extension.zero_division);
         state.fields.push(FieldState {
             ossie: field,
             normalized: normalize_identifier(&field.name),
@@ -395,32 +509,35 @@ impl<'a> Converter<'a> {
             path,
             expression_path,
             extension,
+            division,
             ast,
             column,
         });
     }
 
-    /// The portable expression, parsed (validation already accepted it).
+    /// Validates even for callers that construct a typed model directly,
+    /// then parses the selected expression with the same resource budget.
     fn portable(
         &mut self,
         expression: &document::Expression,
         path: &str,
+        context: crate::expression::Context,
     ) -> (Option<Expr>, String) {
-        let Some(k) = expression
-            .dialects
-            .iter()
-            .position(|candidate| candidate.dialect == document::Dialect::OssieSql2026)
-        else {
+        let first = self.found.len();
+        crate::validate::expression(&mut self.found, path, expression, context);
+        if self.found[first..].iter().any(Diagnostic::is_error) {
+            return (None, path.to_owned());
+        }
+        let Some((k, selected)) = expression.executable() else {
             self.error(
                 Code::NotRepresentable,
                 format!("{path}/dialects"),
-                "Falta la expresión OSSIE_SQL_2026: los otros dialectos no definen su \
-                 significado y el motor no los interpreta.",
+                "Falta OSSIE_SQL_2026 o ANSI_SQL: el motor no interpreta los dialectos de proveedor.",
             );
             return (None, path.to_owned());
         };
         let path = format!("{path}/dialects/{k}/expression");
-        match crate::expression::parse(&expression.dialects[k].expression) {
+        match crate::expression::parse(&selected.expression) {
             Ok(ast) => (Some(ast), path),
             Err(mut diagnostic) => {
                 diagnostic.path.clone_from(&path);
@@ -710,7 +827,8 @@ impl<'a> Converter<'a> {
                     continue;
                 };
                 let timezone = self.timezone(d, f);
-                match self.row_expression(d, &ast, timezone) {
+                let division = self.datasets[d].fields[f].division;
+                match self.row_expression(d, &ast, timezone, division) {
                     Ok(expression) => self.check_datatype(d, f, &expression.value_type),
                     Err(failure) => self.fail(&path, failure),
                 }
@@ -751,6 +869,7 @@ impl<'a> Converter<'a> {
         d: usize,
         ast: &Expr,
         timezone: Option<IanaZoneId>,
+        division: Division,
     ) -> Result<ScalarExpr, Failure> {
         let mut scope = RowScope {
             converter: self,
@@ -759,7 +878,7 @@ impl<'a> Converter<'a> {
         };
         Translator {
             names: &mut scope,
-            division: Division::default(),
+            division,
         }
         .translate(ast)
     }
@@ -788,6 +907,13 @@ impl<'a> Converter<'a> {
             .dimension
             .clone()
             .unwrap_or_else(|| format!("{}.{}", self.model.datasets[d].name, field.ossie.name));
+        let governance = match self.dimension_governance(d, f) {
+            Ok(governance) => governance,
+            Err(failure) => {
+                self.fail(&path, failure);
+                return;
+            }
+        };
         let semantic_role = field.extension.semantic_role.clone();
         let tzdb = field
             .extension
@@ -806,7 +932,8 @@ impl<'a> Converter<'a> {
             }
             (None, Some(ast)) => {
                 let timezone = self.timezone(d, f);
-                self.row_expression(d, &ast, timezone)
+                let division = self.datasets[d].fields[f].division;
+                self.row_expression(d, &ast, timezone, division)
             }
             (None, None) => return,
         };
@@ -829,6 +956,7 @@ impl<'a> Converter<'a> {
             return;
         };
         metadata.label = Some(label);
+        metadata.governance = governance;
         let binding = DimensionBinding {
             dataset: self.datasets[d].id.clone(),
             expression: expression.clone(),
@@ -849,6 +977,14 @@ impl<'a> Converter<'a> {
             );
             return;
         };
+        if state.metadata.governance != metadata.governance {
+            self.error(
+                Code::InvalidExtension,
+                format!("{path}/custom_extensions"),
+                "Los campos de una dimensión conformada deben declarar el mismo gobierno.",
+            );
+            return;
+        }
         if let Err(conflict) = state.absorb(binding, semantic_role, time_semantics) {
             let first = state.path.clone();
             self.error(
@@ -860,6 +996,53 @@ impl<'a> Converter<'a> {
                 ),
             );
         }
+    }
+
+    fn dimension_governance(&self, d: usize, f: usize) -> Result<Governance, Failure> {
+        let extension = &self.datasets[d].fields[f].extension;
+        let scope = extension
+            .dimension
+            .is_none()
+            .then_some(self.datasets[d].segment.as_str());
+        let mut governance = extension.governance(&self.ids, "dimension", scope)?;
+        if let Some(crate::extension::StatusDeclaration::Deprecated {
+            replacement: Some(name),
+            ..
+        }) = &extension.status
+        {
+            let (dataset, field_name) = match name.split_once('.') {
+                Some((dataset, field)) => (self.dataset_index(dataset), field),
+                None => (Some(d), name.as_str()),
+            };
+            if let Some(dataset) = dataset
+                && let Some(field) = self.datasets[dataset]
+                    .fields
+                    .iter()
+                    .find(|field| field.segment == ids::segment(field_name))
+            {
+                if field.ossie.dimension.is_none() {
+                    return Err(Failure::new(
+                        Code::UnknownReference,
+                        "El campo de reemplazo no alimenta ninguna dimensión.",
+                    ));
+                }
+                let segment = field.extension.dimension.as_deref().map_or_else(
+                    || format!("{}.{}", self.datasets[dataset].segment, field.segment),
+                    ids::segment,
+                );
+                if let sef_model_ir::model::Lifecycle::Deprecated { replacement, .. } =
+                    &mut governance.lifecycle
+                {
+                    *replacement = Some(self.ids.id("dimension", &segment).map_err(|_| {
+                        Failure::new(
+                            Code::InvalidIdentifier,
+                            "Reemplazo sin identificador estable.",
+                        )
+                    })?);
+                }
+            }
+        }
+        Ok(governance)
     }
 
     /// The time semantics of a dimension bucketed with `DATE_TRUNC`: the
@@ -972,18 +1155,21 @@ impl<'a> Converter<'a> {
         }
     }
 
+    fn model_metadata(&self, options: &Options) -> Result<ObjectMetadata, Failure> {
+        let identity = self
+            .ids
+            .identity("model", &options.model)
+            .map_err(|_| Failure::new(Code::SemanticContract, "modelo inv\u{e1}lido"))?;
+        let mut metadata = ObjectMetadata::new(identity);
+        metadata.label = Some(self.model.name.clone());
+        metadata.description.clone_from(&self.model.description);
+        Ok(metadata)
+    }
+
     fn finish(self, options: &Options) -> Result<(ModelDefinition, Paths), Failure> {
         let internal =
             |what: &str| Failure::new(Code::SemanticContract, format!("{what} inválido"));
-        let model_identity = self
-            .ids
-            .identity("model", &options.model)
-            .map_err(|_| internal("modelo"))?;
-        let mut definition = ModelDefinition::new(ObjectMetadata {
-            identity: model_identity,
-            label: Some(self.model.name.clone()),
-            description: self.model.description.clone(),
-        });
+        let mut definition = ModelDefinition::new(self.model_metadata(options)?);
         definition.namespaces.push(Namespace {
             metadata: ObjectMetadata::new(
                 self.ids
@@ -1017,6 +1203,8 @@ impl<'a> Converter<'a> {
                     .identity("dataset", &state.segment)
                     .map_err(|_| internal("dataset"))?,
             );
+            let extension = &state.extension;
+            metadata.governance = extension.governance(&self.ids, "dataset", None)?;
             metadata.description.clone_from(
                 &self
                     .model

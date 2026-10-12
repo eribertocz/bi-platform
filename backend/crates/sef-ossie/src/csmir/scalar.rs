@@ -92,6 +92,32 @@ impl Default for Division {
     }
 }
 
+impl Division {
+    /// Defaults follow the selected dialect, including when alternatives are
+    /// reordered. An explicit extension takes precedence over that default.
+    pub(crate) fn for_expression(
+        expression: &crate::document::Expression,
+        declared: Option<crate::extension::ZeroDivisionDeclaration>,
+    ) -> Self {
+        use crate::document::Dialect;
+        use crate::extension::ZeroDivisionDeclaration;
+        let zero = match declared {
+            Some(ZeroDivisionDeclaration::Error) => ZeroDivisionPolicy::Error,
+            None if expression
+                .executable()
+                .is_some_and(|(_, e)| e.dialect == Dialect::AnsiSql) =>
+            {
+                ZeroDivisionPolicy::Error
+            }
+            Some(ZeroDivisionDeclaration::Null) | None => ZeroDivisionPolicy::Null,
+        };
+        Self {
+            zero,
+            ..Self::default()
+        }
+    }
+}
+
 pub(crate) struct Translator<'n, N: Names> {
     pub names: &'n mut N,
     pub division: Division,
@@ -857,7 +883,7 @@ fn number(text: &str, like: Option<&ValueType>, exact: bool) -> Result<ScalarExp
             let value = format!("{sign}{integer}")
                 .parse::<i64>()
                 .map_err(|_| type_mismatch(format!("{text} no cabe en un entero de 64 bits.")))?;
-            let scalar = literal(Literal::SignedInteger(value));
+            let scalar = literal(Literal::SignedInteger(value.into()));
             Ok(match like {
                 Some(target) if *target != scalar.value_type => cast(scalar, target.clone()),
                 _ => scalar,
@@ -1021,40 +1047,9 @@ pub(crate) fn normalize(ident: &Ident) -> String {
     }
 }
 
-/// Days since 1970-01-01 of an ISO `YYYY-MM-DD` date (proleptic Gregorian).
 fn date(text: &str) -> Result<i32, Failure> {
-    let invalid = || type_mismatch(format!("{text:?} no es una fecha AAAA-MM-DD válida."));
-    let mut parts = text.splitn(3, '-');
-    let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(invalid());
-    };
-    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
-        return Err(invalid());
-    }
-    let (year, month, day): (i64, i64, i64) = (
-        year.parse().map_err(|_| invalid())?,
-        month.parse().map_err(|_| invalid())?,
-        day.parse().map_err(|_| invalid())?,
-    );
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days_in_month = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return Err(invalid()),
-    };
-    if !(1..=days_in_month).contains(&day) {
-        return Err(invalid());
-    }
-    // Howard Hinnant's days_from_civil.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    i32::try_from(era * 146_097 + doe - 719_468).map_err(|_| invalid())
+    sef_model_ir::time::iso_date_days(text)
+        .ok_or_else(|| type_mismatch(format!("{text:?} no es una fecha AAAA-MM-DD válida.")))
 }
 
 pub(crate) fn describe(value_type: &ValueType) -> String {

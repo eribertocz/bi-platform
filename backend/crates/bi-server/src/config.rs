@@ -31,6 +31,7 @@ pub struct Config {
     pub log_format: LogFormat,
     /// Optional frontend build directory; unset means API-only development.
     pub static_dir: Option<PathBuf>,
+    pub project_dir: Option<PathBuf>,
     pub auth: AuthConfig,
     /// Analytical runtime; `None` when `BI_ANALYTICS=off`.
     pub analytics: Option<RuntimeConfig>,
@@ -95,6 +96,9 @@ impl Config {
     /// # Errors
     /// Returns an error when a variable is set to an invalid value.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let project_dir = lookup("BI_PROJECT_DIR")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
         let bind_addr = lookup("BI_BIND_ADDR").unwrap_or_else(|| DEFAULT_BIND_ADDR.to_owned());
         let bind_addr = bind_addr
             .parse()
@@ -136,6 +140,7 @@ impl Config {
         };
 
         Ok(Self {
+            project_dir,
             bind_addr,
             database_url,
             database_url_is_default,
@@ -171,6 +176,7 @@ mod tests {
         assert!(config.database_url_is_default);
         assert_eq!(config.log_format, LogFormat::Text);
         assert_eq!(config.static_dir, None);
+        assert_eq!(config.project_dir, None);
         assert!(config.analytics.is_some());
         assert_eq!(config.dev_fixture, None);
         assert_eq!(config.query_timeout, DEFAULT_QUERY_TIMEOUT);
@@ -183,6 +189,7 @@ mod tests {
             ("BI_DATABASE_URL", "postgres://u:p@db:5432/x"),
             ("BI_LOG_FORMAT", "json"),
             ("BI_STATIC_DIR", "../frontend/build"),
+            ("BI_PROJECT_DIR", "../examples/models-project"),
         ]))
         .unwrap();
         assert_eq!(config.bind_addr, "0.0.0.0:9000".parse().unwrap());
@@ -190,6 +197,10 @@ mod tests {
         assert!(!config.database_url_is_default);
         assert_eq!(config.log_format, LogFormat::Json);
         assert_eq!(config.static_dir, Some(PathBuf::from("../frontend/build")));
+        assert_eq!(
+            config.project_dir,
+            Some(PathBuf::from("../examples/models-project"))
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod health;
 pub mod metrics;
+pub mod models;
 pub mod oidc;
 pub mod openapi;
 pub mod problem;
@@ -41,6 +42,7 @@ pub struct AppState {
     pub analytics: Analytics,
     pub query_timeout: Duration,
     pub metrics: metrics::QueryMetrics,
+    pub models: models::Models,
 }
 
 impl AppState {
@@ -54,6 +56,7 @@ impl AppState {
             analytics: Analytics::disabled(),
             query_timeout: config::DEFAULT_QUERY_TIMEOUT,
             metrics: metrics::QueryMetrics::default(),
+            models: models::Models::default(),
         }
     }
 }
@@ -70,6 +73,7 @@ pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Route
         .merge(oidc::routes())
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
+        .route("/api/v1/models", get(models::list))
         .route(
             "/api/v1/queries",
             post(query::run).layer(DefaultBodyLimit::max(QUERY_BODY_LIMIT)),

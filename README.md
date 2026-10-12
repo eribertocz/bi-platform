@@ -46,6 +46,14 @@ Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de
 `compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG` y `BI_STATIC_DIR`
 (directorio del build; sin esta variable, Rust sirve solo la API).
 
+`BI_PROJECT_DIR` selecciona la carpeta del proyecto (ADR 0003). En **Modelos**,
+tras iniciar sesión, «Actualizar modelos» recarga `metrics/*.yaml`, `*.yml` y
+`*.json` sin reiniciar: cada archivo muestra sus métricas y dimensiones o sus
+errores en español. Sin esta variable, la pantalla indica que no hay proyecto.
+Se rechazan enlaces simbólicos y archivos mayores que 8 MiB; el máximo es
+100 modelos, 32 MiB en conjunto y 4096 entradas en `metrics/`.
+La pila de desarrollo monta `examples/models-project/` como proyecto de ejemplo.
+
 Métricas de consulta M15: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`
 habilita exportación OTLP/HTTP protobuf a `/v1/metrics`. Sin la variable, la
 instrumentación es no-op y no inicia el SDK ni hilos de exportación.

@@ -495,6 +495,7 @@ mod real {
                     let now = Instant::now();
                     let mut admission = limit.lock().unwrap();
                     *admission = Admission::new(now);
+                    admission.clock = Some(now);
                     if global {
                         admission.global.tokens = 0.0;
                     } else {
@@ -556,7 +557,13 @@ mod real {
         );
         // Admitted rejections still append to the audit chain.
         *limit.lock().unwrap() = Admission::new(Instant::now());
-        limit.lock().unwrap().global.tokens = 1.0;
+        {
+            let mut admission = limit.lock().unwrap();
+            // Audit I/O may take more than 500 ms, enough to refill a token.
+            // Freeze admission time so this tests sharing between routes.
+            admission.clock = Some(admission.global.updated);
+            admission.global.tokens = 1.0;
+        }
         assert_eq!(
             send(&app, "GET", "/api/v1/oidc/callback", None, None)
                 .await

@@ -1,6 +1,7 @@
 //! `OSSIE_SQL_2026` expressions (`core-spec/expression_language.md`): parsed
 //! with a proven SQL parser, then checked against an **allowlist** of the
 //! constructs and REQUIRED/RECOMMENDED functions the language defines.
+//! `ANSI_SQL` uses this same subset, not a permissive vendor SQL parser.
 //! Anything else (subqueries, `SELECT`, vendor syntax, unknown functions) is
 //! rejected rather than passed through, because a semantic engine must know
 //! what every expression means.
@@ -134,6 +135,10 @@ pub(crate) fn parse(text: &str) -> Result<Expr, Diagnostic> {
         return Err(too_large(MAX_EXPRESSION_TOKENS, "tokens significativos"));
     }
     check_structure_budget(&tokens)?;
+    if matches!(tokens.first(), Some(Token::Word(word)) if matches!(word.keyword, Keyword::SELECT | Keyword::WITH))
+    {
+        return Err(unsupported("Una sentencia SELECT o WITH"));
+    }
     for token in &tokens {
         if let Token::Word(word) = token {
             validate_identifier(&word.value, word.quote_style)?;
@@ -913,7 +918,7 @@ fn allowed_operator(op: &BinaryOperator) -> bool {
 }
 
 /// `VARCHAR`/`STRING`, `INTEGER`/`INT`/`BIGINT`, `DECIMAL`/`NUMERIC`,
-/// `FLOAT`/`DOUBLE`, `BOOLEAN`, `DATE`, `TIMESTAMP` and `TIME`.
+/// `FLOAT`/`REAL`/`DOUBLE [PRECISION]`, `BOOLEAN`, `DATE`, `TIMESTAMP` and `TIME`.
 fn allowed_cast_target(data_type: &DataType) -> bool {
     let text = data_type.to_string().to_uppercase();
     let base = text.split('(').next().unwrap_or_default().trim();
@@ -926,7 +931,9 @@ fn allowed_cast_target(data_type: &DataType) -> bool {
         "DECIMAL",
         "NUMERIC",
         "FLOAT",
+        "REAL",
         "DOUBLE",
+        "DOUBLE PRECISION",
         "BOOLEAN",
         "DATE",
         "TIMESTAMP",

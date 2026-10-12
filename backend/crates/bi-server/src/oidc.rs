@@ -53,6 +53,8 @@ pub(crate) struct Admission {
     clients: BTreeMap<IpAddr, Bucket>,
     rejected: u64,
     last_log: Option<Instant>,
+    #[cfg(test)]
+    clock: Option<Instant>,
 }
 impl Admission {
     fn new(now: Instant) -> Self {
@@ -64,6 +66,8 @@ impl Admission {
             clients: BTreeMap::new(),
             rejected: 0,
             last_log: None,
+            #[cfg(test)]
+            clock: None,
         }
     }
     fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
@@ -107,6 +111,8 @@ fn admit(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = Instant::now();
+    #[cfg(test)]
+    let now = admission.clock.unwrap_or(now);
     if admission.allow(ip, now) {
         return None;
     }

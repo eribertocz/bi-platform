@@ -1,0 +1,202 @@
+=== CASE-001
+block result
+  fact requested grain [corpus/dimension/region]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/sale]
+  fact corpus/dataset/sales reaches corpus/dimension/region locally
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-002
+block result
+  fact requested grain [corpus/dimension/category, corpus/dimension/region]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/line]
+  fact corpus/dataset/sales reaches corpus/dimension/category through [corpus/relationship/product]
+  fact corpus/dataset/sales reaches corpus/dimension/region through [corpus/relationship/customer]
+  fact corpus/relationship/customer proven at-most-one-match
+  fact corpus/relationship/product proven at-most-one-match
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-003
+block result
+  fact requested grain [corpus/dimension/segment]
+  fact corpus/metric/billed_amount is fully-additive
+  fact corpus/metric/billed_amount native grain [key corpus/key/invoice]
+  fact corpus/dataset/invoices reaches corpus/dimension/segment through [corpus/relationship/customer]
+  fact corpus/relationship/customer proven at-most-one-match
+  must PreserveExactDecimalSemantics corpus/metric/billed_amount
+=== CASE-004
+block result
+  fact requested grain [corpus/dimension/region]
+  fact corpus/metric/item_count is fully-additive
+  fact corpus/metric/order_revenue is fully-additive
+  fact corpus/metric/item_count native grain [key corpus/key/item]
+  fact corpus/metric/order_revenue native grain [key corpus/key/order]
+  fact corpus/dataset/order_items reaches corpus/dimension/region through [corpus/relationship/order, corpus/relationship/customer]
+  fact corpus/dataset/orders reaches corpus/dimension/region through [corpus/relationship/customer]
+  fact corpus/relationship/customer proven at-most-one-match
+  fact corpus/relationship/order proven at-most-one-match
+  must PreserveMetricGrain corpus/measure/item_count at [key corpus/key/item]
+  must PreserveMetricGrain corpus/measure/order_revenue at [key corpus/key/order]
+  must AggregateBeforeAlignment [corpus/dimension/region]
+  must PreserveExactDecimalSemantics corpus/metric/order_revenue
+=== CASE-005
+block result
+  fact requested grain [corpus/dimension/region]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/sale]
+  fact corpus/dataset/sales reaches corpus/dimension/region through [corpus/relationship/store, corpus/relationship/region]
+  fact corpus/relationship/region proven at-most-one-match
+  fact corpus/relationship/store proven at-most-one-match
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-006
+block result
+  fact requested grain []
+  fact corpus/metric/average_order_value is recomputable
+  fact corpus/metric/order_count is fully-additive
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/average_order_value native grain [key corpus/key/order]
+  fact corpus/metric/order_count native grain [key corpus/key/order]
+  fact corpus/metric/revenue native grain [key corpus/key/order]
+  must RecomputeAtTargetGrain corpus/metric/average_order_value from [corpus/metric/order_count, corpus/metric/revenue]
+  must PreserveExactDecimalSemantics corpus/metric/average_order_value
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-007
+block result
+  fact requested grain [corpus/dimension/region, corpus/dimension/snapshot_date by Month]
+  fact corpus/metric/balance is semi-additive
+  fact corpus/metric/balance native grain [key corpus/key/account_snapshot]
+  fact corpus/dataset/balances reaches corpus/dimension/region through [corpus/relationship/account]
+  fact corpus/dataset/balances reaches corpus/dimension/snapshot_date locally
+  fact corpus/relationship/account proven at-most-one-match
+  must ApplyPeriodEndSelection corpus/metric/balance period-end on corpus/dimension/snapshot_date per Month within [key corpus/key/account]
+  must ApplyCalendarBucket corpus/dimension/snapshot_date on corpus/dataset/balances by Month (Gregorian)
+  must PreserveExactDecimalSemantics corpus/metric/balance
+=== CASE-008
+block by_region
+  fact requested grain [corpus/dimension/region]
+  fact corpus/metric/active_customers is non-additive
+  fact corpus/metric/active_customers native grain [key corpus/key/activity]
+  fact corpus/dataset/activity reaches corpus/dimension/region locally
+  must DoNotReaggregate corpus/metric/active_customers
+block overall
+  fact requested grain []
+  fact corpus/metric/active_customers is non-additive
+  fact corpus/metric/active_customers native grain [key corpus/key/activity]
+  must DoNotReaggregate corpus/metric/active_customers
+=== CASE-009
+block result
+  fact requested grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/metric/gross_revenue is fully-additive
+  fact corpus/metric/net_revenue is fully-additive
+  fact corpus/metric/refunds is fully-additive
+  fact corpus/metric/gross_revenue native grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/metric/net_revenue native grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/metric/refunds native grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/dataset/refunds_monthly reaches corpus/dimension/month locally
+  fact corpus/dataset/refunds_monthly reaches corpus/dimension/region locally
+  fact corpus/dataset/sales_monthly reaches corpus/dimension/month locally
+  fact corpus/dataset/sales_monthly reaches corpus/dimension/region locally
+  must PreserveMetricGrain corpus/measure/gross_revenue at [corpus/dimension/month, corpus/dimension/region]
+  must PreserveMetricGrain corpus/measure/refunds at [corpus/dimension/month, corpus/dimension/region]
+  must AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region]
+  must RecomputeAtTargetGrain corpus/metric/net_revenue from [corpus/metric/gross_revenue, corpus/metric/refunds]
+  must PreserveExactDecimalSemantics corpus/metric/gross_revenue
+  must PreserveExactDecimalSemantics corpus/metric/net_revenue
+  must PreserveExactDecimalSemantics corpus/metric/refunds
+=== CASE-010
+block result
+  fact requested grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/metric/actual_revenue is fully-additive
+  fact corpus/metric/attainment is recomputable
+  fact corpus/metric/target_revenue is fully-additive
+  fact corpus/metric/actual_revenue native grain [key corpus/key/invoice]
+  fact corpus/metric/attainment native grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/metric/target_revenue native grain [corpus/dimension/month, corpus/dimension/region]
+  fact corpus/dataset/invoices reaches corpus/dimension/month locally
+  fact corpus/dataset/invoices reaches corpus/dimension/region locally
+  fact corpus/dataset/targets reaches corpus/dimension/month locally
+  fact corpus/dataset/targets reaches corpus/dimension/region locally
+  must PreserveMetricGrain corpus/measure/actual_revenue at [key corpus/key/invoice]
+  must PreserveMetricGrain corpus/measure/target_revenue at [corpus/dimension/month, corpus/dimension/region]
+  must AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region]
+  must RecomputeAtTargetGrain corpus/metric/attainment from [corpus/metric/actual_revenue, corpus/metric/target_revenue]
+  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/invoices to UTC then Month (Gregorian)
+  must PreserveExactDecimalSemantics corpus/metric/actual_revenue
+  must PreserveExactDecimalSemantics corpus/metric/attainment
+  must PreserveExactDecimalSemantics corpus/metric/target_revenue
+=== CASE-011
+block result
+  fact requested grain [corpus/dimension/campaign]
+  fact corpus/metric/allocated_revenue is fully-additive
+  fact corpus/metric/allocated_revenue native grain [key corpus/key/order]
+  fact corpus/dataset/orders reaches corpus/dimension/campaign through [corpus/relationship/order, corpus/relationship/campaign]
+  fact corpus/relationship/campaign proven at-most-one-match
+  must ApplyBridgeAllocation corpus/metric/allocated_revenue through corpus/bridge/order_campaign
+  must ValidateAllocationNormalization corpus/bridge/order_campaign
+  must PreserveExactDecimalSemantics corpus/metric/allocated_revenue
+=== CASE-012
+block result
+  fact requested grain [corpus/dimension/month by Month in UTC]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/event]
+  fact corpus/dataset/events reaches corpus/dimension/month locally
+  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/events to UTC then Month (Gregorian)
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-013
+block result
+  fact requested grain [corpus/dimension/historical_region]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/sale]
+  fact corpus/dataset/sales reaches corpus/dimension/historical_region through [corpus/relationship/historical_customer]
+  fact corpus/relationship/historical_customer proven temporal-single-match
+  must UseTemporalRelationship corpus/relationship/historical_customer
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-014
+block result
+  fact requested grain []
+  fact corpus/metric/amount_count is fully-additive
+  fact corpus/metric/amount_sum is fully-additive
+  fact corpus/metric/row_count is fully-additive
+  fact corpus/metric/amount_count native grain [key corpus/key/measurement]
+  fact corpus/metric/amount_sum native grain [key corpus/key/measurement]
+  fact corpus/metric/row_count native grain [key corpus/key/measurement]
+  must PreserveExactDecimalSemantics corpus/metric/amount_sum
+  must PreserveDeclaredNullSemantics corpus/measure/amount_count count-non-null
+  must PreserveDeclaredNullSemantics corpus/measure/amount_sum ignore-nulls-null-if-empty
+  must PreserveDeclaredNullSemantics corpus/measure/row_count count-rows
+=== CASE-015
+block result
+  fact requested grain [corpus/dimension/region]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/sale]
+  fact corpus/dataset/sales reaches corpus/dimension/region locally
+  fact corpus/dataset/sales requires policy corpus/policy/tenant
+  must ApplyMandatoryPolicy corpus/policy/tenant on corpus/dataset/sales
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-018
+block result
+  fact requested grain [corpus/dimension/category, corpus/dimension/month]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/sale]
+  fact corpus/dataset/sales reaches corpus/dimension/category locally
+  fact corpus/dataset/sales reaches corpus/dimension/month locally
+  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/sales to UTC then Month (Gregorian)
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-019
+block result
+  fact requested grain [corpus/dimension/business_day by Day in America/La_Paz]
+  fact corpus/metric/revenue is fully-additive
+  fact corpus/metric/revenue native grain [key corpus/key/event]
+  fact corpus/dataset/events reaches corpus/dimension/business_day locally
+  must ConvertTimezoneBeforeBucketing corpus/dimension/business_day on corpus/dataset/events to America/La_Paz then Day (Gregorian)
+  must PreserveExactDecimalSemantics corpus/metric/revenue
+=== CASE-021
+block result
+  fact requested grain [corpus/dimension/date]
+  fact corpus/metric/cumulative_revenue is ordered-window
+  fact corpus/metric/daily_revenue is fully-additive
+  fact corpus/metric/cumulative_revenue native grain [corpus/dimension/date]
+  fact corpus/metric/daily_revenue native grain [corpus/dimension/date]
+  fact corpus/dataset/sales_daily reaches corpus/dimension/date locally
+  must ApplyOrderedCumulative corpus/metric/cumulative_revenue over corpus/metric/daily_revenue ordered by [corpus/dimension/date] partitioned by []
+  must PreserveExactDecimalSemantics corpus/metric/cumulative_revenue
+  must PreserveExactDecimalSemantics corpus/metric/daily_revenue
