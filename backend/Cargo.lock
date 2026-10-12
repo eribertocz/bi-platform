@@ -2978,6 +2978,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sef-query-ir"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sef-model-ir",
+ "sef-ossie",
+ "serde-saphyr",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
