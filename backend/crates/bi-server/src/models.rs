@@ -1,6 +1,7 @@
 //! Project files → isolated compilations → public model metadata. File I/O and
 //! semantic compilation are bounded and run outside async executors.
 
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -95,6 +96,9 @@ pub enum ModelFile {
         file: String,
         name: String,
         fingerprint: String,
+        description: Option<String>,
+        ai_context: Option<Box<ModelAiContext>>,
+        datasets: Vec<ModelDataset>,
         metrics: Vec<ModelMember>,
         dimensions: Vec<ModelMember>,
         diagnostics: Vec<ModelDiagnostic>,
@@ -115,6 +119,76 @@ pub struct ModelMember {
     /// Direct dimension binding nullability. Null means not inferred for
     /// computed dimensions or metrics, whose result has not been executed.
     pub nullable: Option<bool>,
+    /// Metadata per Ossie origin; conformed dimensions keep every binding.
+    pub annotations: Vec<ModelAnnotation>,
+}
+
+/// Context is descriptive, never executable or a semantic name alias.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum ModelAiContext {
+    Text(String),
+    Structured(ModelAiContextObject),
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ModelAiContextObject {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synonyms: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub examples: Option<Vec<String>>,
+    /// Unknown keys are preserved without interpretation.
+    #[serde(flatten)]
+    pub other: BTreeMap<String, serde_json::Value>,
+}
+
+impl From<&sef_ossie::document::AiContext> for ModelAiContext {
+    fn from(context: &sef_ossie::document::AiContext) -> Self {
+        match context {
+            sef_ossie::document::AiContext::Text(text) => Self::Text(text.clone()),
+            sef_ossie::document::AiContext::Structured(context) => {
+                Self::Structured(ModelAiContextObject {
+                    instructions: context.instructions.clone(),
+                    synonyms: context.synonyms.clone(),
+                    examples: context.examples.clone(),
+                    other: context.other.clone(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ModelAnnotation {
+    /// Ossie declaration name, useful when a dimension has several origins.
+    pub name: String,
+    /// JSON pointer in this Ossie file, identifying the declaration.
+    pub path: String,
+    pub label: Option<String>,
+    pub description: Option<String>,
+    pub ai_context: Option<ModelAiContext>,
+    /// Effective time role for fields/dimensions; null for a metric.
+    pub is_time: Option<bool>,
+    /// Explicit declaration; null means the datatype supplies the default.
+    pub declared_is_time: Option<bool>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ModelDataset {
+    pub name: String,
+    pub description: Option<String>,
+    pub ai_context: Option<ModelAiContext>,
+    /// All declared fields, including computed fields that CSMIR inlines.
+    pub fields: Vec<ModelField>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ModelField {
+    pub name: String,
+    pub is_dimension: bool,
+    pub annotation: ModelAnnotation,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -551,7 +625,7 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
             write!(id, "{byte:02x}").expect("writing to String");
             id
         });
-    match sef_ossie::csmir::compile(
+    match sef_ossie::csmir::compile_document(
         &loaded.model,
         &catalog,
         &sef_ossie::csmir::Options {
@@ -561,15 +635,22 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
     ) {
         Err(ds) => invalid(name, ds.into_iter().map(Into::into).collect()),
         Ok(compiled) => {
-            let definition = compiled.definition();
+            let definition = compiled.semantic.definition();
             ModelFile::Valid {
                 file: path,
                 name,
-                fingerprint: compiled.content_hash().to_string(),
+                fingerprint: compiled.semantic.content_hash().to_string(),
+                description: loaded.model.description.clone(),
+                ai_context: loaded
+                    .model
+                    .ai_context
+                    .as_ref()
+                    .map(|context| Box::new(context.into())),
+                datasets: datasets(&loaded.model),
                 metrics: definition
                     .metrics
                     .iter()
-                    .map(|m| member(&m.metadata, &m.value_type, None))
+                    .map(|m| member(&m.metadata, &m.value_type, None, &compiled))
                     .collect(),
                 dimensions: definition
                     .dimensions
@@ -579,13 +660,46 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
                             &d.metadata,
                             &d.value_type,
                             dimension_nullable(d, definition),
+                            &compiled,
                         )
                     })
                     .collect(),
-                diagnostics: loaded.warnings.into_iter().map(Into::into).collect(),
+                diagnostics: loaded
+                    .warnings
+                    .into_iter()
+                    .chain(compiled.warnings)
+                    .map(Into::into)
+                    .collect(),
             }
         }
     }
+}
+
+fn datasets(model: &sef_ossie::SemanticModel) -> Vec<ModelDataset> {
+    model
+        .datasets
+        .iter()
+        .enumerate()
+        .map(|(i, dataset)| ModelDataset {
+            name: dataset.name.clone(),
+            description: dataset.description.clone(),
+            ai_context: dataset.ai_context.as_ref().map(Into::into),
+            fields: dataset
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(j, field)| ModelField {
+                    name: field.name.clone(),
+                    is_dimension: field.dimension.is_some(),
+                    annotation: field_annotation(
+                        field,
+                        format!("{}.{}", dataset.name, field.name),
+                        format!("/datasets/{i}/fields/{j}"),
+                    ),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 fn dimension_nullable(
@@ -611,7 +725,12 @@ fn dimension_nullable(
     Some(nulls.into_iter().any(|v| v))
 }
 
-fn member(metadata: &ObjectMetadata, data_type: &ValueType, nullable: Option<bool>) -> ModelMember {
+fn member(
+    metadata: &ObjectMetadata,
+    data_type: &ValueType,
+    nullable: Option<bool>,
+    compiled: &sef_ossie::csmir::CompiledDocument,
+) -> ModelMember {
     ModelMember {
         id: metadata.id().as_str().into(),
         name: metadata.label.clone().unwrap_or_else(|| {
@@ -625,6 +744,59 @@ fn member(metadata: &ObjectMetadata, data_type: &ValueType, nullable: Option<boo
         }),
         data_type: type_label(data_type),
         nullable,
+        annotations: compiled
+            .origins(metadata.id())
+            .into_iter()
+            .filter_map(|path| annotation(compiled.document(), path))
+            .collect(),
+    }
+}
+
+fn field_annotation(
+    field: &sef_ossie::document::Field,
+    name: String,
+    path: String,
+) -> ModelAnnotation {
+    ModelAnnotation {
+        name,
+        path,
+        label: field.label.clone(),
+        description: field.description.clone(),
+        ai_context: field.ai_context.as_ref().map(Into::into),
+        is_time: Some(field.is_time()),
+        declared_is_time: field.dimension.as_ref().and_then(|d| d.is_time),
+    }
+}
+
+fn annotation(model: &sef_ossie::SemanticModel, path: &str) -> Option<ModelAnnotation> {
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        ["", "datasets", i, "fields", j] => {
+            let field = model
+                .datasets
+                .get(i.parse::<usize>().ok()?)?
+                .fields
+                .get(j.parse::<usize>().ok()?)?;
+            let dataset = &model.datasets[i.parse::<usize>().ok()?];
+            Some(field_annotation(
+                field,
+                format!("{}.{}", dataset.name, field.name),
+                path.into(),
+            ))
+        }
+        ["", "metrics", i] => {
+            let metric = model.metrics.get(i.parse::<usize>().ok()?)?;
+            Some(ModelAnnotation {
+                name: metric.name.clone(),
+                path: path.into(),
+                label: None,
+                description: metric.description.clone(),
+                ai_context: metric.ai_context.as_ref().map(Into::into),
+                is_time: None,
+                declared_is_time: None,
+            })
+        }
+        _ => None,
     }
 }
 

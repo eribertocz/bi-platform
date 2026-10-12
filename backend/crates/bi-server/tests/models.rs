@@ -22,6 +22,111 @@ const VALID: &str = include_str!("../../../../examples/models-project/metrics/ve
 const INVALID: &str =
     include_str!("../../../../examples/models-project/metrics/origen-inexistente.yaml");
 
+#[tokio::test]
+async fn annotations_keep_opaque_context_defaults_and_explicit_time_overrides() {
+    let p = project();
+    write(p.path(), "ventas.yaml", VALID);
+    let router = app(Some(p.path()), analytics().await);
+    let (_, initial) = response(&router).await;
+    let model = &initial["models"][0];
+    assert_eq!(model["status"], "valid", "{initial:#}");
+    assert_eq!(model["description"], "Métricas de ventas del proyecto.");
+    assert_eq!(model["datasets"][0]["description"], "Una fila por pedido.");
+    let region = &model["dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "sales.region")
+        .unwrap()["annotations"][0];
+    assert_eq!(region["label"], "Región comercial");
+    assert_eq!(
+        region["ai_context"]["vendor_hint"],
+        serde_json::json!({"category": "geography"})
+    );
+    assert_eq!(
+        region["ai_context"]["examples"],
+        serde_json::json!(["Norte"])
+    );
+    let time = &model["dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "sales.ordered_at")
+        .unwrap()["annotations"][0];
+    assert_eq!(time["is_time"], true);
+    assert_eq!(time["declared_is_time"], Value::Null);
+    assert_eq!(
+        model["metrics"][0]["annotations"][0]["ai_context"]["synonyms"],
+        serde_json::json!(["facturación"])
+    );
+    let fingerprint = model["fingerprint"].clone();
+    // Override a temporal datatype and explicitly mark a text field as time.
+    let changed = VALID
+        .replace(
+            "datatype: DateTimeTz\n        dimension: {}",
+            "datatype: DateTimeTz\n        dimension: {is_time: false}",
+        )
+        .replacen(
+            "dimension: {}",
+            "datatype: String\n        dimension: {is_time: true}",
+            1,
+        );
+    write(p.path(), "ventas.yaml", &changed);
+    let (_, body) = response(&router).await;
+    let model = &body["models"][0];
+    assert_eq!(model["status"], "valid", "{body:#}");
+    assert_eq!(model["fingerprint"], fingerprint);
+    assert_eq!(model["diagnostics"][0]["code"], "non_temporal_time_role");
+    assert_eq!(model["diagnostics"][0]["severity"], "warning");
+    assert_eq!(
+        model["diagnostics"][0]["path"],
+        "/datasets/0/fields/1/dimension/is_time"
+    );
+    let time = &model["dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "sales.ordered_at")
+        .unwrap()["annotations"][0];
+    assert_eq!(time["is_time"], false);
+    assert_eq!(time["declared_is_time"], false);
+}
+
+#[tokio::test]
+async fn declared_computed_fields_keep_metadata_even_when_the_engine_inlines_them() {
+    let mut document = sef_ossie::load(VALID).unwrap().model;
+    let mut field = document.datasets[0].fields[2].clone();
+    field.name = "double_amount".into();
+    field.expression.dialects[0].expression = "amount + amount".into();
+    field.dimension = None;
+    field.datatype = None;
+    field.description = Some("Importe duplicado sin agregación.".into());
+    field.ai_context = Some(sef_ossie::document::AiContext::Text(
+        "Contexto libre".into(),
+    ));
+    document.datasets[0].fields.push(field);
+    let p = project();
+    write(
+        p.path(),
+        "ventas.yaml",
+        &sef_ossie::to_yaml(&document).unwrap(),
+    );
+    let (_, body) = response(&app(Some(p.path()), analytics().await)).await;
+    assert_eq!(body["models"][0]["status"], "valid", "{body:#}");
+    let field = body["models"][0]["datasets"][0]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "double_amount")
+        .unwrap();
+    assert_eq!(field["is_dimension"], false);
+    assert_eq!(
+        field["annotation"]["description"],
+        "Importe duplicado sin agregación."
+    );
+    assert_eq!(field["annotation"]["ai_context"], "Contexto libre");
+}
+
 fn project() -> tempfile::TempDir {
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir(project.path().join("metrics")).unwrap();
@@ -129,8 +234,14 @@ async fn compiles_each_file_with_exact_metadata_and_reloads_without_stale_values
     assert_eq!(valid["status"], "valid", "{first:#}");
     assert_eq!(valid["metrics"][0]["name"], "importe_total");
     assert_eq!(valid["metrics"][0]["data_type"], "DECIMAL(18,2)");
-    assert_eq!(valid["dimensions"][0]["data_type"], "VARCHAR");
-    assert_eq!(valid["dimensions"][0]["nullable"], true);
+    let region = valid["dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "sales.region")
+        .unwrap();
+    assert_eq!(region["data_type"], "VARCHAR");
+    assert_eq!(region["nullable"], true);
     assert!(
         valid["fingerprint"]
             .as_str()

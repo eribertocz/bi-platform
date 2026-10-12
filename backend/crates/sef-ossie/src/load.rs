@@ -93,7 +93,24 @@ pub fn to_yaml(model: &SemanticModel) -> Result<String, serde_saphyr::ser::Error
 /// # Errors
 /// Only if a value cannot be represented, which the typed model prevents.
 pub fn to_json(model: &SemanticModel) -> serde_json::Result<String> {
-    serde_json::to_string_pretty(model)
+    use std::fmt::Write as _;
+    let json = serde_json::to_string_pretty(model)?;
+    let mut output = String::with_capacity(json.len());
+    // JSON permits literal C1 controls and Unicode line separators, whereas
+    // our YAML 1.2 reader rejects or normalizes them. Escaping them preserves
+    // the text in both formats (including free-form AI context).
+    for character in json.chars() {
+        if matches!(
+            character,
+            '\u{7f}'..='\u{9f}' | '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}'
+        ) {
+            // Writing into a String is infallible.
+            let _ = write!(output, "\\u{:04x}", u32::from(character));
+        } else {
+            output.push(character);
+        }
+    }
+    Ok(output)
 }
 
 fn options() -> serde_saphyr::Options {

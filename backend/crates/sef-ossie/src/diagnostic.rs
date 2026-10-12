@@ -69,6 +69,8 @@ pub enum Code {
     AmbiguousReference,
     /// `datatype` contradicts the type the source or expression has.
     DatatypeMismatch,
+    /// An explicit time role on a text datatype, which needs author review.
+    NonTemporalTimeRole,
     /// Operand or result types that CSMIR does not combine implicitly.
     TypeMismatch,
     /// Valid computable-dialect SQL the engine cannot yet compute exactly.
@@ -111,6 +113,7 @@ impl Code {
             Self::UnknownReference => "unknown_reference",
             Self::AmbiguousReference => "ambiguous_reference",
             Self::DatatypeMismatch => "datatype_mismatch",
+            Self::NonTemporalTimeRole => "non_temporal_time_role",
             Self::TypeMismatch => "type_mismatch",
             Self::NotRepresentable => "not_representable",
             Self::GrainRequired => "grain_required",

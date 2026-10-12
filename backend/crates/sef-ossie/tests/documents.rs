@@ -10,6 +10,56 @@ use sef_ossie::{Code, Diagnostic, Severity, load, parse, to_json, to_yaml};
 const TPCDS: &str = include_str!("fixtures/ossie/tpcds_semantic_model.yaml");
 const FLIGHTS: &str = include_str!("fixtures/ossie/flights.semantic_model.yaml");
 
+#[test]
+fn explicitly_temporal_text_is_accepted_with_a_precise_warning() {
+    let text = BASE.replace(
+        "name: order_id\n",
+        "name: order_id\n        datatype: String\n        dimension: {is_time: true}\n",
+    );
+    let loaded = load(&text).unwrap();
+    assert_eq!(loaded.warnings.len(), 1);
+    let warning = &loaded.warnings[0];
+    assert_eq!(warning.code, Code::NonTemporalTimeRole);
+    assert_eq!(warning.severity, Severity::Warning);
+    assert_eq!(warning.path, "/datasets/0/fields/0/dimension/is_time");
+    assert!(loaded.model.datasets[0].fields[0].is_time());
+}
+
+#[test]
+fn temporal_role_uses_the_declared_datatype_and_respects_false() {
+    for datatype in [
+        DataType::Date,
+        DataType::Time,
+        DataType::DateTime,
+        DataType::DateTimeTz,
+    ] {
+        let mut model = parse(BASE).unwrap();
+        let field = &mut model.datasets[0].fields[0];
+        field.datatype = Some(datatype);
+        assert!(field.is_time());
+        field.dimension = Some(sef_ossie::document::Dimension {
+            is_time: Some(false),
+        });
+        assert!(!field.is_time());
+        assert_eq!(load(&to_yaml(&model).unwrap()).unwrap().model, model);
+    }
+}
+
+#[test]
+fn json_export_keeps_unicode_controls_and_line_separators_in_context() {
+    let mut model = parse(BASE).unwrap();
+    let text = "\u{7f}\u{85}\u{9f}\u{2028}\u{2029}\u{fffe}\u{ffff}";
+    model.description = Some(text.into());
+    model.ai_context = Some(sef_ossie::document::AiContext::Text(text.into()));
+    let exported = to_json(&model).unwrap();
+    assert_eq!(
+        serde_json::from_str::<sef_ossie::SemanticModel>(&exported).unwrap(),
+        model
+    );
+    assert_eq!(load(&exported).unwrap().model, model);
+    assert_eq!(load(&to_yaml(&model).unwrap()).unwrap().model, model);
+}
+
 /// A small valid model; tests change one thing at a time.
 const BASE: &str = r"
 version: 0.2.0.dev0

@@ -568,6 +568,137 @@
           "unavailable"
         ]
       },
+      "ModelAiContext": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "$ref": "#/components/schemas/ModelAiContextObject"
+          }
+        ],
+        "description": "Context is descriptive, never executable or a semantic name alias."
+      },
+      "ModelAiContextObject": {
+        "type": "object",
+        "properties": {
+          "examples": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "synonyms": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": {
+          "description": "Unknown keys are preserved without interpretation."
+        }
+      },
+      "ModelAnnotation": {
+        "type": "object",
+        "required": [
+          "name",
+          "path"
+        ],
+        "properties": {
+          "ai_context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelAiContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "declared_is_time": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Explicit declaration; null means the datatype supplies the default."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_time": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Effective time role for fields/dimensions; null for a metric."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "description": "Ossie declaration name, useful when a dimension has several origins."
+          },
+          "path": {
+            "type": "string",
+            "description": "JSON pointer in this Ossie file, identifying the declaration."
+          }
+        }
+      },
+      "ModelDataset": {
+        "type": "object",
+        "required": [
+          "name",
+          "fields"
+        ],
+        "properties": {
+          "ai_context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ModelAiContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelField"
+            },
+            "description": "All declared fields, including computed fields that CSMIR inlines."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ModelDiagnostic": {
         "type": "object",
         "required": [
@@ -608,6 +739,25 @@
           }
         }
       },
+      "ModelField": {
+        "type": "object",
+        "required": [
+          "name",
+          "is_dimension",
+          "annotation"
+        ],
+        "properties": {
+          "annotation": {
+            "$ref": "#/components/schemas/ModelAnnotation"
+          },
+          "is_dimension": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "ModelFile": {
         "oneOf": [
           {
@@ -616,12 +766,35 @@
               "file",
               "name",
               "fingerprint",
+              "datasets",
               "metrics",
               "dimensions",
               "diagnostics",
               "status"
             ],
             "properties": {
+              "ai_context": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ModelAiContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "datasets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ModelDataset"
+                }
+              },
+              "description": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "diagnostics": {
                 "type": "array",
                 "items": {
@@ -694,9 +867,17 @@
         "required": [
           "id",
           "name",
-          "data_type"
+          "data_type",
+          "annotations"
         ],
         "properties": {
+          "annotations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelAnnotation"
+            },
+            "description": "Metadata per Ossie origin; conformed dimensions keep every binding."
+          },
           "data_type": {
             "type": "string",
             "description": "Exact logical type, e.g. INT64, DECIMAL(18,2), TIMESTAMPTZ (instant)."

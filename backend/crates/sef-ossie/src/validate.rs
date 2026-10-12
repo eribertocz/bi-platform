@@ -65,6 +65,15 @@ pub fn validate(model: &SemanticModel) -> Vec<Diagnostic> {
                 &field.expression,
                 Context::Field,
             );
+            if field.dimension.as_ref().and_then(|d| d.is_time) == Some(true)
+                && field.datatype == Some(crate::document::DataType::String)
+            {
+                found.push(Diagnostic::warning(
+                    Code::NonTemporalTimeRole,
+                    format!("{path}/dimension/is_time"),
+                    "Este campo tiene is_time: true, pero su tipo no es temporal. Revisa cómo representa el tiempo; el rol declarado se conserva.",
+                ));
+            }
         }
         duplicates(
             &mut found,
