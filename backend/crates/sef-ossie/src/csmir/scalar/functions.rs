@@ -5,14 +5,16 @@
 //! the reason, never passed through.
 
 use sef_model_ir::expressions::{BooleanOp, ComparisonOp, ScalarExpr, ScalarExprKind, UnaryOp};
-use sef_model_ir::functions::ScalarFunction;
+use sef_model_ir::functions::{DatePart, ScalarFunction};
+use sef_model_ir::time::{CalendarProfile, TimeBucket, TimeGrain, TimestampSemantics};
 use sef_model_ir::types::{Literal, ValueType};
-use sqlparser::ast::{Expr, TrimWhereField};
+use sqlparser::ast::{Expr, TrimWhereField, Value};
 
 use super::{
     Failure, Names, Translator, Typed, boolean, exact_literal, literal, not_representable, number,
     type_mismatch, unary,
 };
+use crate::diagnostic::Code;
 
 const fn int64() -> ValueType {
     ValueType::Integer {
@@ -32,6 +34,14 @@ fn unsettled(name: &str) -> Option<Failure> {
         "POWER" | "SQRT" | "EXP" | "LN" | "LOG" | "LOG10" => {
             "su resultado es de coma flotante y su dominio (raíces de negativos, logaritmos de \
              cero) aún no está fijado; llegará en su propia entrega"
+        }
+        "CURRENT_DATE" | "CURRENT_TIMESTAMP" | "CURRENT_TIME" => {
+            "depende del instante en que se consulta y haría irreproducible la cifra; llegará \
+             con el instante de referencia del recibo de la consulta"
+        }
+        "TO_TIMESTAMP" => {
+            "un texto con fecha y hora necesita saber en qué zona está escrito; llegará cuando \
+             se fije esa regla"
         }
         _ => return None,
     };
@@ -76,6 +86,21 @@ impl<N: Names> Translator<'_, N> {
             },
             "GREATEST" => ScalarFunction::Greatest,
             "LEAST" => ScalarFunction::Least,
+            "YEAR" | "QUARTER" | "MONTH" | "DAY" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" => {
+                return Some(match (part_named(name), args) {
+                    (Ok(part), [value]) => self.extract(part, value),
+                    (Err(failure), _) => Err(failure),
+                    _ => Err(type_mismatch(format!("`{name}` toma un argumento."))),
+                });
+            }
+            "DATE_PART" => {
+                return Some(match args {
+                    [part, value] => date_part(part).and_then(|part| self.extract(part, value)),
+                    _ => Err(type_mismatch("DATE_PART toma una unidad y un valor.")),
+                });
+            }
+            "DATEADD" | "DATEDIFF" => return Some(self.date_arithmetic(name, args)),
+            "TO_DATE" => ScalarFunction::ToDate,
             "NVL2" => return Some(self.nvl2(args)),
             "NULLIFZERO" => return Some(self.null_if_zero(args)),
             _ => return None,
@@ -250,6 +275,78 @@ impl<N: Names> Translator<'_, N> {
         })
     }
 
+    /// A calendar or clock field. An instant is first bucketed to its local
+    /// date in the business zone, as `DATE_TRUNC` does; its clock fields
+    /// depend on the zone and are refused.
+    pub(super) fn extract(&mut self, part: DatePart, value: &Expr) -> Result<ScalarExpr, Failure> {
+        let operand = self.translate(value)?;
+        let instant = matches!(
+            operand.value_type,
+            ValueType::Timestamp {
+                timezone_semantics: TimestampSemantics::Instant
+            }
+        );
+        let operand = match (instant, part.is_clock()) {
+            (false, _) => operand,
+            (true, true) => {
+                return Err(not_representable(
+                    "La hora, el minuto o el segundo de un instante (dependen de la zona horaria)",
+                ));
+            }
+            (true, false) => self.local_date(operand)?,
+        };
+        build(ScalarFunction::Extract { part }, vec![operand])
+    }
+
+    /// The local date of an instant column in the business zone.
+    fn local_date(&mut self, operand: ScalarExpr) -> Result<ScalarExpr, Failure> {
+        let ScalarExprKind::FieldRef(source) = &operand.kind else {
+            return Err(not_representable(
+                "La fecha local de un instante que no es una columna",
+            ));
+        };
+        let source = source.clone();
+        let timezone = self.names.timezone().cloned().ok_or_else(|| {
+            Failure::new(
+                Code::InvalidExtension,
+                "Leer el calendario de un instante necesita la zona horaria del negocio: \
+                 decláralo en la extensión del campo (\"time\": {\"timezone\": \"UTC\"}).",
+            )
+        })?;
+        Ok(ScalarExpr {
+            kind: ScalarExprKind::TemporalDerivation {
+                operand: Box::new(operand),
+                bucket: TimeBucket {
+                    source,
+                    timezone,
+                    calendar: CalendarProfile::Gregorian,
+                    grain: TimeGrain::Day,
+                },
+            },
+            value_type: ValueType::Date,
+            unit: None,
+        })
+    }
+
+    /// `DATEADD(part, n, x)` and `DATEDIFF(part, a, b)`.
+    fn date_arithmetic(&mut self, name: &str, args: &[&Expr]) -> Result<ScalarExpr, Failure> {
+        let [part, first, second] = args else {
+            return Err(type_mismatch(format!(
+                "`{name}` toma una unidad y dos valores."
+            )));
+        };
+        let part = date_part(part)?;
+        if name == "DATEADD" {
+            let count = self.translate_like(first, &int64(), true)?;
+            let value = self.translate(second)?;
+            build(ScalarFunction::DateAdd { part }, vec![count, value])
+        } else {
+            let start = self.translate(first)?;
+            let end = self.translate(second)?;
+            build(ScalarFunction::DateDiff { part }, vec![start, end])
+        }
+    }
+
     /// `NVL2(a, b, c)`: `CASE WHEN a IS NOT NULL THEN b ELSE c END`.
     fn nvl2(&mut self, args: &[&Expr]) -> Result<ScalarExpr, Failure> {
         let [value, present, absent] = args else {
@@ -296,6 +393,41 @@ impl<N: Names> Translator<'_, N> {
             },
         })
     }
+}
+
+/// The unit of `DATE_PART`, `DATEADD` and `DATEDIFF`: a bare word or a
+/// string constant.
+fn date_part(arg: &Expr) -> Result<DatePart, Failure> {
+    let name = match arg {
+        Expr::Identifier(ident) if ident.quote_style.is_none() => ident.value.clone(),
+        Expr::Value(value) => match &value.value {
+            Value::SingleQuotedString(text) => text.clone(),
+            _ => return Err(not_representable("Una unidad temporal no constante")),
+        },
+        _ => return Err(not_representable("Una unidad temporal no constante")),
+    };
+    part_named(&name.to_uppercase())
+}
+
+pub(super) fn part_named(name: &str) -> Result<DatePart, Failure> {
+    Ok(match name {
+        "YEAR" => DatePart::Year,
+        "QUARTER" => DatePart::Quarter,
+        "MONTH" => DatePart::Month,
+        "WEEK" => DatePart::Week,
+        "DAY" => DatePart::Day,
+        "DAYOFWEEK" | "DOW" | "ISODOW" => DatePart::DayOfWeek,
+        "DAYOFYEAR" | "DOY" => DatePart::DayOfYear,
+        "HOUR" => DatePart::Hour,
+        "MINUTE" => DatePart::Minute,
+        "SECOND" => DatePart::Second,
+        "MILLISECOND" => {
+            return Err(not_representable(
+                "La unidad `MILLISECOND` (los motores difieren: dentro del segundo o acumulados)",
+            ));
+        }
+        other => return Err(not_representable(&format!("La unidad temporal `{other}`"))),
+    })
 }
 
 fn arity(function: ScalarFunction) -> Failure {

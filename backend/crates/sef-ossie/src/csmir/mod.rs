@@ -872,6 +872,15 @@ impl<'a> Converter<'a> {
         tzdb: Option<String>,
     ) -> Result<Option<TimeSemantics>, Failure> {
         let ScalarExprKind::TemporalDerivation { bucket, .. } = &expression.kind else {
+            // The zone may serve a nested derivation (the local date that
+            // `YEAR(instant)` reads); the field itself is then no bucket.
+            let mut pending = expression.children();
+            while let Some(child) = pending.pop() {
+                if matches!(child.kind, ScalarExprKind::TemporalDerivation { .. }) {
+                    return Ok(None);
+                }
+                pending.extend(child.children());
+            }
             if self.datasets[d].fields[f].extension.time.is_some() {
                 return Err(Failure::new(
                     Code::InvalidExtension,
