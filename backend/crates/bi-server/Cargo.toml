@@ -17,6 +17,7 @@ postgres-tests = []
 
 [dependencies]
 axum.workspace = true
+bi-audit = { path = "../bi-audit" }
 bi-fixtures = { path = "../bi-fixtures" }
 bi-runtime = { path = "../bi-runtime", default-features = false }
 getrandom.workspace = true
