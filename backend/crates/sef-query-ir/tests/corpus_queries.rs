@@ -184,8 +184,10 @@ fn every_valid_corpus_request_binds_with_a_frozen_fingerprint() {
 
 #[test]
 fn an_invalid_model_has_no_metric_to_bind() {
-    // CASE-017: the combined metric adds USD and BOB; its model never
-    // compiles, so the request cannot reach SQIR.
+    // CASE-017: the corpus document holds only its two valid metrics; the
+    // combined USD + BOB metric is rejected when the model compiles
+    // (sef-ossie `csmir_rules`, sef-correctness `corpus`), so a request for
+    // it cannot bind.
     let errors = bind(&request(17), &common::model(17)).expect_err("no combined metric");
     assert_eq!(errors[0].code, QueryErrorCode::UnknownMetric);
 }
