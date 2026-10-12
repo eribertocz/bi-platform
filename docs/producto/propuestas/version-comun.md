@@ -4,7 +4,7 @@
 
 ## Cómo leer este documento
 - Cada apartado dice **en qué coincidimos**, **qué corregimos al discutir** y **qué queda para después**.
-- Al final hay **nueve decisiones** para el propietario, cada una con nuestra recomendación.
+- Al final hay **diez decisiones** para el propietario, cada una con nuestra recomendación (en una no hay recomendación conjunta).
 - Usamos tres estados distintos: **decidido** (hay una ADR aprobada), **en una rama** (código en un PR abierto) e **integrado** (en `main`, probado). Una decisión no es una función terminada.
 
 ---
@@ -58,7 +58,7 @@ No conocemos otra herramienta que una resultado, seguridad, tiempo y almacenamie
 |---|---|---|
 | SQLMesh v0.236.3 | Plan con intervalos por el grafo (`plan/builder.py`); huella del modelo y de sus padres (`snapshot/definition.py`); la cautela de `categorizer.py`, que pregunta cuando no sabe | El runtime de Python, Jinja y el `cron` dentro del modelo |
 | Rill v0.90.5 | Reconciliación con recarga en caliente (`reconcilers/model.go`); vista o tabla y estrategias incrementales (`drivers/duckdb/crud.go`); navegación del grafo (`resource-graph`) | Que un refresco automático publique en producción sin plan ni pruebas |
-| Power BI, Tableau, Looker, Cube | Modo de almacenamiento por tabla; lógica separada de lo físico; reutilizar agregados solo cuando son válidos | El modo elegido a mano por un experto, sin prueba |
+| Power BI, Tableau, Looker, Cube | Modo de almacenamiento por tabla; lógica separada de lo físico; reutilizar agregados solo cuando son válidos | Que el juicio de un experto sustituya la validación. La elección manual se conserva, sometida como cualquier ruta a compilación, permisos, contratos y pruebas |
 | Snowflake, Databricks, Dagster | Frescura declarada que se propaga; comprobaciones por activo | Atarlo a un motor o a Python |
 | Fivetran, Airbyte | Puntos de control e historia de cambios y borrados | — |
 
@@ -108,23 +108,35 @@ El frontend actual se mantiene: SvelteKit 3, Svelte 5, Tailwind 4, Vite 8, TypeS
 |---|---|---|---|
 | Lienzo con nodos y conexiones | **Svelte Flow** (`@xyflow/svelte`) | 1.7.0, MIT | Teclado y ARIA; conectar también por formulario y lista |
 | Orden automático del grafo | **Dagre** (`@dagrejs/dagre`) | 3.1.1, MIT | Fuera del hilo principal si el grafo crece |
-| Editor de código | **CodeMirror 6**, por módulos (`view`, `state`, `lang-sql`, `autocomplete`, `lint`, `merge`) | 6.x, MIT | Las sugerencias vienen del catálogo autorizado. La validación real la hace Rust |
-| Tablas de vista previa | **TanStack Table** | 9.2.8, MIT | Tabla HTML semántica; paginación, filtro y orden en el servidor; decimales exactos |
+| Editor de código | **CodeMirror 6**: `@codemirror/view` 6.43.14, `state` 6.7.6, `lang-sql` 6.10.0, `autocomplete` 6.20.3 y `lint` 6.9.7 | MIT | Las sugerencias vienen del catálogo autorizado. La validación real la hace Rust |
+| Tablas de vista previa | **TanStack Table** (`@tanstack/svelte-table` y `@tanstack/table-core`) | 9.2.8, MIT | Tabla HTML semántica; paginación, filtro y orden en el servidor; decimales exactos |
 | Filas virtuales, solo si hace falta | **TanStack Virtual** (`@tanstack/virtual-core`) | 3.19.0, MIT | Con paginación accesible como alternativa |
 | Paneles, menús y diálogos | **Bits UI** | 2.19.5, MIT | Da foco, teclado y ARIA, pero la accesibilidad se verifica en cada pantalla |
 | Arrastre externo, opcional | **Pragmatic drag and drop** | 4.0.0, Apache-2.0 | Con comandos equivalentes de teclado |
-| Paneles divididos | **svelte-splitpanes** | 8.0.12, MIT | — |
-| Iconos | **Lucide** (`@lucide/svelte`) | 1.55.0, ISC | — |
-| Lienzo de dashboards (G4) | **GridStack** | 14.0.0, MIT | Ya está en la hoja de ruta |
 | Estilos | **Tailwind**, el que ya tenemos | 4.3.3, MIT | Sin una segunda biblioteca de CSS |
 
-**Aplazadas** hasta tener un caso medido: Perspective, DuckDB-WASM y Mosaic. Si llegan, será solo sobre datos ya autorizados y para presentación. **Descartadas:** ELK.js (licencia EPL o GPL), Monaco (pesado) y un segundo motor de arrastre o de edición.
+**Candidatas añadidas por Claude**, que Codex no ha validado y que pasan por la misma prueba:
 
-**Puerta de adopción.** Antes de adoptarlas, una prueba con nuestras versiones exactas debe:
-- compilar con renderizado en servidor;
+| Función | Candidata | Versión y licencia |
+|---|---|---|
+| Vista de diferencias del editor | `@codemirror/merge` | por fijar, MIT |
+| Paneles divididos | **svelte-splitpanes** | 8.0.12, MIT |
+| Iconos | **Lucide** (`@lucide/svelte`) | 1.55.0, ISC |
+| Lienzo de dashboards (G4) | **GridStack** | 14.0.0, MIT |
+
+**Aplazadas** hasta tener un caso medido:
+- Perspective, DuckDB-WASM y Mosaic. Si llegan, será solo sobre datos ya autorizados y para presentación.
+- ELK.js, si Dagre no basta para rutas, puertos o grafos compuestos. Exige revisar su licencia (EPL-2.0 o GPL-3.0).
+- Monaco, si aparece una necesidad real de un servidor de lenguaje completo.
+
+Nunca dos motores de arrastre ni dos editores a la vez.
+
+**Puerta de adopción.** Antes de adoptarlas, una prueba con nuestras versiones exactas (Kit 3, Vite 8 y TypeScript 6) debe:
+- compilar con renderizado en servidor sin tocar el DOM;
 - cargar el editor y el lienzo bajo demanda;
-- medir el tamaño de cada pantalla con un grafo de 200 nodos;
-- pasar axe, teclado y lector de pantalla (NVDA y Narrador).
+- medir por separado, con un grafo de 200 nodos, el JS y el CSS comprimidos de cada pantalla, sus dependencias y sus *workers*;
+- comprobar el objetivo propuesto de respuesta a la interacción (p95 por debajo de 100 ms en un equipo de referencia). Es un objetivo, no un resultado ya medido;
+- pasar axe, teclado y lector de pantalla (NVDA y Narrador): conectar y desconectar, deshacer, volver a la lista, recuperar el foco, zoom y errores.
 
 Los pesos de npm no son el tamaño que descarga el navegador: se mide en esa prueba.
 
@@ -153,9 +165,11 @@ Los ocho documentos son un marco muy bueno y casi todo encaja con las ADR vigent
 - **Tres niveles de gráfico** sobre el mismo `VisualSpec`. Al bajar de nivel se conserva todo y se señala lo que el nivel básico no edita. `VisualSpec` no es el objeto de ECharts: ECharts es un renderizador reemplazable.
 
 ### Orden de prioridad para resolver conflictos
-leyes → anti-patrones → seguridad → **ADR vigentes** → principios → resto de documentos.
-- La accesibilidad y la exactitud cuentan como leyes.
-- Si un documento choca con una ADR, lo decide el propietario y queda en una ADR nueva.
+**En lo que coincidimos:** las ADR vigentes siguen rigiendo como autoridad técnica hasta que el propietario decida otra cosa y la sustitución quede registrada en una ADR nueva.
+
+**Pendiente de decisión del propietario:** su documento propone un orden (leyes → anti-patrones → seguridad → decisiones del motor y por capa → capacidades → estructura → UX).
+- Claude propone situar las ADR vigentes justo después de la seguridad, y que la accesibilidad y la exactitud cuenten como leyes.
+- Codex no acordó colocar leyes ni anti-patrones por encima de las ADR. Propone tratar los documentos como objetivos de producto, con las ADR como autoridad técnica.
 
 ---
 
@@ -167,7 +181,8 @@ Cada una se aprueba o se rechaza por separado.
 3. **Reproducción con plazo declarado.** Cada resultado dice si es reproducible y hasta cuándo. "Conservar este cierre" fija sus versiones. Lo consultado en vivo se explica, pero no se promete reproducirlo. *Recomendado: sí.*
 4. **Límites de la automatización y de la seguridad.** Nada se aplica por una muestra. Las columnas enmascaradas salen vacías con su tipo y un aviso, y no se pueden usar para filtrar, ordenar ni agrupar. *Recomendado: sí.*
 5. **Estudio "el proyecto vivo"**, con dos vistas enlazadas, estado en todo y Git sin saber Git. *Recomendado: sí.*
-6. **Bibliotecas de la tabla del apartado 3**, adoptadas tras la prueba medida. *Recomendado: sí.*
-7. **Solo licencias permisivas en el frontend** (MIT, Apache-2.0, BSD o ISC), vigiladas por CI como ya se hace en Rust. *Recomendado: sí.*
+6. **Bibliotecas de la tabla común del apartado 3**, adoptadas tras la prueba medida. Las candidatas añadidas por Claude, solo si la prueba las justifica. *Recomendado: sí.*
+7. **Solo licencias permisivas en el frontend** (MIT, Apache-2.0, BSD o ISC), vigiladas por CI como ya se hace en Rust. *Propuesta de Claude; Codex no se ha pronunciado.* Si se adopta, ELK.js quedaría fuera.
 8. **Cómo se escribe la intención:** en palabras simples ("como mucho 15 minutos") que se guardan como valores con unidades. *Recomendado: sí.*
-9. **Fundamentos:** adoptar los ocho documentos como objetivos de producto, con las precisiones del apartado 4 y su orden de prioridad. *Recomendado: sí.*
+9. **Fundamentos:** adoptar los ocho documentos como objetivos de producto, con las precisiones del apartado 4. Las ADR vigentes rigen hasta que decidas lo contrario en una ADR nueva. *Recomendado por ambos.*
+10. **Orden de prioridad:** elegir entre tu orden original, el de Claude (ADR vigentes tras la seguridad; accesibilidad y exactitud como leyes) o el de Codex (documentos como objetivos y ADR como autoridad técnica). *Sin recomendación conjunta.*
