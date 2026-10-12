@@ -51,9 +51,14 @@ block result
 block result
   fact requested grain []
   fact corpus/metric/average_order_value is recomputable
+  fact corpus/metric/order_count is fully-additive
+  fact corpus/metric/revenue is fully-additive
   fact corpus/metric/average_order_value native grain [key corpus/key/order]
+  fact corpus/metric/order_count native grain [key corpus/key/order]
+  fact corpus/metric/revenue native grain [key corpus/key/order]
   must RecomputeAtTargetGrain corpus/metric/average_order_value from [corpus/metric/order_count, corpus/metric/revenue]
   must PreserveExactDecimalSemantics corpus/metric/average_order_value
+  must PreserveExactDecimalSemantics corpus/metric/revenue
 === CASE-007
 block result
   fact requested grain [corpus/dimension/region, corpus/dimension/snapshot_date by Month]
@@ -63,6 +68,7 @@ block result
   fact corpus/dataset/balances reaches corpus/dimension/snapshot_date locally
   fact corpus/relationship/account proven at-most-one-match
   must ApplyPeriodEndSelection corpus/metric/balance period-end on corpus/dimension/snapshot_date per Month within [key corpus/key/account]
+  must ApplyCalendarBucket corpus/dimension/snapshot_date on corpus/dataset/balances by Month (Gregorian)
   must PreserveExactDecimalSemantics corpus/metric/balance
 === CASE-008
 block by_region
@@ -113,7 +119,7 @@ block result
   must PreserveMetricGrain corpus/measure/target_revenue at [corpus/dimension/month, corpus/dimension/region]
   must AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region]
   must RecomputeAtTargetGrain corpus/metric/attainment from [corpus/metric/actual_revenue, corpus/metric/target_revenue]
-  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/invoices to UTC then Month
+  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/invoices to UTC then Month (Gregorian)
   must PreserveExactDecimalSemantics corpus/metric/actual_revenue
   must PreserveExactDecimalSemantics corpus/metric/attainment
   must PreserveExactDecimalSemantics corpus/metric/target_revenue
@@ -133,7 +139,7 @@ block result
   fact corpus/metric/revenue is fully-additive
   fact corpus/metric/revenue native grain [key corpus/key/event]
   fact corpus/dataset/events reaches corpus/dimension/month locally
-  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/events to UTC then Month
+  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/events to UTC then Month (Gregorian)
   must PreserveExactDecimalSemantics corpus/metric/revenue
 === CASE-013
 block result
@@ -173,7 +179,7 @@ block result
   fact corpus/metric/revenue native grain [key corpus/key/sale]
   fact corpus/dataset/sales reaches corpus/dimension/category locally
   fact corpus/dataset/sales reaches corpus/dimension/month locally
-  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/sales to UTC then Month
+  must ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/sales to UTC then Month (Gregorian)
   must PreserveExactDecimalSemantics corpus/metric/revenue
 === CASE-019
 block result
@@ -181,7 +187,7 @@ block result
   fact corpus/metric/revenue is fully-additive
   fact corpus/metric/revenue native grain [key corpus/key/event]
   fact corpus/dataset/events reaches corpus/dimension/business_day locally
-  must ConvertTimezoneBeforeBucketing corpus/dimension/business_day on corpus/dataset/events to America/La_Paz then Day
+  must ConvertTimezoneBeforeBucketing corpus/dimension/business_day on corpus/dataset/events to America/La_Paz then Day (Gregorian)
   must PreserveExactDecimalSemantics corpus/metric/revenue
 === CASE-021
 block result

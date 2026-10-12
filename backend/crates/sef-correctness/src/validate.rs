@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use sef_model_ir::diagnostic::{Diagnostic, ErrorCode as Code};
 use sef_model_ir::expressions::{
     AggregateFunction, AggregateNullSemantics, MetricExprKind, ScalarExpr, ScalarExprKind,
 };
@@ -13,15 +14,13 @@ use sef_model_ir::model::{
     AggregationClass, AxisBehavior, CompiledSemanticModel, Dimension, Measure, Metric,
     ModelDefinition, TemporalSelection, WindowBehavior,
 };
-use sef_model_ir::policy::Enforcement;
-use sef_model_ir::time::{TimeBucket, TimeGrain, TimestampSemantics};
-use sef_model_ir::types::{Literal, ValueType};
+use sef_model_ir::policy::{Enforcement, PolicyScope};
+use sef_model_ir::time::{CalendarProfile, IanaZoneId, TimeBucket, TimeGrain, TimestampSemantics};
+use sef_model_ir::types::{DecimalType, DecimalValue, Literal, ValueType};
 use sef_query_ir::query::{
     FilterExpr, FilterTarget, QualifiedDimensionRef, RequestedAtom, SelectionItem,
     SemanticQueryBlock, SemanticQuerySet, TimeDimensionSelection,
 };
-
-use sef_model_ir::diagnostic::{Diagnostic, ErrorCode as Code};
 
 use crate::error::{canonical, rejection};
 use crate::graph::{self, Path, Traversal};
@@ -62,12 +61,24 @@ pub fn validate(
     }
 }
 
-/// A requested dimension, where in the query it was asked for, and the
-/// time bucket applied to it, if any.
+/// A dimension the request needs, where it comes from, the time bucket
+/// applied to it (if any), and the facts it must be reached from (`None`:
+/// every fact of the block).
+#[derive(Clone)]
 struct Usage<'q> {
-    dimension: &'q QualifiedDimensionRef,
+    dimension: QualifiedDimensionRef,
     path: String,
     bucket: Option<&'q TimeDimensionSelection>,
+    anchors: Option<BTreeSet<StableId>>,
+}
+
+/// The values a time dimension holds: the grain they are bucketed at, the
+/// zone they were bucketed in (none for calendar dates) and the calendar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Domain {
+    grain: TimeGrain,
+    timezone: Option<IanaZoneId>,
+    calendar: CalendarProfile,
 }
 
 struct Analysis<'m> {
@@ -104,29 +115,49 @@ impl<'m> Analysis<'m> {
     fn block(mut self, block: &SemanticQueryBlock) -> Result<BlockValidation, Vec<Diagnostic>> {
         let requested = block.requested_grain();
         self.facts.insert(Fact::RequestedGrain(requested.clone()));
-        let usages = self.usages(block);
-        let metrics = self.metrics(block);
+        let selected = self.metrics(block);
+        // Every metric the selections depend on is analysed with its own
+        // contracts, under the selection that brought it in (§13, §15.2).
+        let closure = self.closure(&selected);
+        let mut usages = self.usages(block);
+        usages.extend(self.intrinsic(&closure));
         let mut anchors = BTreeSet::new();
-        for (metric, path) in &metrics {
-            let measures = self.lineage(metric);
-            for measure in &measures {
+        for (metric, _) in &selected {
+            let allocations = self.allocations(metric);
+            for measure in self.measures(metric) {
                 anchors.insert(measure.dataset.clone());
                 self.datasets.insert(measure.dataset.clone());
                 for usage in &usages {
-                    self.reach(metric, &measure.dataset, usage);
+                    let applies = usage
+                        .anchors
+                        .as_ref()
+                        .is_none_or(|anchors| anchors.contains(&measure.dataset));
+                    if applies {
+                        self.reach(metric, &allocations, &measure.dataset, usage);
+                    }
                 }
                 self.null_semantics(measure);
             }
+        }
+        for (metric, path) in &closure {
+            self.facts.insert(Fact::MetricClass {
+                metric: metric.metadata.id().clone(),
+                class: class_name(metric.aggregation_contract.classification),
+            });
+            self.facts.insert(Fact::MetricNativeGrain {
+                metric: metric.metadata.id().clone(),
+                grain: metric.native_grain.clone(),
+            });
             self.algebra(metric, path, &requested);
             self.temporal(metric, path, &requested);
         }
         if anchors.len() > 1 {
-            self.align(&metrics, &requested);
+            self.align(&selected, &requested);
         }
         for usage in &usages {
             self.time(usage, &anchors);
         }
-        self.policies(&metrics);
+        self.policies(&closure);
         if self.errors.is_empty() {
             Ok(BlockValidation {
                 block_id: block.block_id.clone(),
@@ -148,14 +179,16 @@ impl<'m> Analysis<'m> {
             match &selection.item {
                 SelectionItem::Metric(_) => {}
                 SelectionItem::Dimension(dimension) => usages.push(Usage {
-                    dimension,
+                    dimension: dimension.clone(),
                     path,
                     bucket: None,
+                    anchors: None,
                 }),
                 SelectionItem::TimeDimension(time) => usages.push(Usage {
-                    dimension: &time.dimension,
+                    dimension: time.dimension.clone(),
                     path,
                     bucket: Some(time),
+                    anchors: None,
                 }),
             }
         }
@@ -163,16 +196,60 @@ impl<'m> Analysis<'m> {
             let mut targets = Vec::new();
             filter_dimensions(filter, &mut targets);
             for dimension in targets {
-                if !usages.iter().any(|usage| usage.dimension == dimension) {
+                if !usages.iter().any(|usage| &usage.dimension == dimension) {
                     usages.push(Usage {
-                        dimension,
+                        dimension: dimension.clone(),
                         path: format!("{}/filter", self.path),
                         bucket: None,
+                        anchors: None,
                     });
                 }
             }
         }
         usages
+    }
+
+    /// Dimensions read by the intrinsic filters of every metric and measure
+    /// in the lineage, reached only from that metric's own facts; fields
+    /// they read mark their datasets as read (policy lineage, §20).
+    fn intrinsic<'q>(&mut self, closure: &[(&'m Metric, String)]) -> Vec<Usage<'q>> {
+        let mut found = Vec::new();
+        for (metric, path) in closure {
+            let measures = self.measures(metric);
+            let anchors: BTreeSet<StableId> = measures
+                .iter()
+                .map(|measure| measure.dataset.clone())
+                .collect();
+            let mut filters: Vec<&ScalarExpr> = metric.intrinsic_filter.iter().collect();
+            filters.extend(measures.iter().filter_map(|m| m.intrinsic_filter.as_ref()));
+            for filter in filters {
+                for field in filter.field_refs() {
+                    if let Some(dataset) = self.dataset_of_field(&field) {
+                        self.datasets.insert(dataset);
+                    }
+                }
+                for dimension in filter.dimension_refs() {
+                    found.push(Usage {
+                        dimension: QualifiedDimensionRef {
+                            dimension,
+                            roles: Vec::new(),
+                        },
+                        path: format!("{path}/intrinsic_filter"),
+                        bucket: None,
+                        anchors: Some(anchors.clone()),
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    fn dataset_of_field(&self, field: &StableId) -> Option<StableId> {
+        self.model
+            .datasets
+            .iter()
+            .find(|dataset| dataset.fields.iter().any(|f| f.metadata.id() == field))
+            .map(|dataset| dataset.metadata.id().clone())
     }
 
     fn metrics(&mut self, block: &SemanticQueryBlock) -> Vec<(&'m Metric, String)> {
@@ -197,36 +274,69 @@ impl<'m> Analysis<'m> {
             .find(|metric| metric.metadata.id() == id)
     }
 
-    /// The primitive measures a metric is computed from, through metric
-    /// references and window bases.
-    fn lineage(&mut self, metric: &'m Metric) -> Vec<&'m Measure> {
-        self.facts.insert(Fact::MetricClass {
-            metric: metric.metadata.id().clone(),
-            class: class_name(metric.aggregation_contract.classification),
-        });
-        self.facts.insert(Fact::MetricNativeGrain {
-            metric: metric.metadata.id().clone(),
-            grain: metric.native_grain.clone(),
-        });
-        let mut measures = BTreeMap::new();
+    /// The metrics a metric is built from, itself included: references,
+    /// window bases and recomposition components.
+    fn dependencies(&self, metric: &'m Metric) -> Vec<&'m Metric> {
+        let mut found: BTreeMap<StableId, &'m Metric> = BTreeMap::new();
         let mut pending = vec![metric];
-        let mut seen = BTreeSet::new();
         while let Some(current) = pending.pop() {
-            if !seen.insert(current.metadata.id()) {
+            if found
+                .insert(current.metadata.id().clone(), current)
+                .is_some()
+            {
                 continue;
             }
-            for id in current.expression.measure_refs() {
+            let mut next = current.expression.metric_refs();
+            if let Some(decomposition) = &current.aggregation_contract.decomposition {
+                next.extend(decomposition.components.iter().cloned());
+            }
+            if let Some(WindowBehavior::Cumulative { base_metric, .. }) = &current.window_behavior {
+                next.push(base_metric.clone());
+            }
+            pending.extend(next.iter().filter_map(|id| self.metric(id)));
+        }
+        found.into_values().collect()
+    }
+
+    /// Every metric of the block's lineage, each under the first selection
+    /// that needs it.
+    fn closure(&self, selected: &[(&'m Metric, String)]) -> Vec<(&'m Metric, String)> {
+        let mut found: BTreeMap<StableId, (&'m Metric, String)> = BTreeMap::new();
+        for (metric, path) in selected {
+            for dependency in self.dependencies(metric) {
+                found
+                    .entry(dependency.metadata.id().clone())
+                    .or_insert_with(|| (dependency, path.clone()));
+            }
+        }
+        found.into_values().collect()
+    }
+
+    /// The primitive measures a metric is computed from.
+    fn measures(&self, metric: &'m Metric) -> Vec<&'m Measure> {
+        let mut measures: BTreeMap<StableId, &'m Measure> = BTreeMap::new();
+        for dependency in self.dependencies(metric) {
+            for id in dependency.expression.measure_refs() {
                 if let Some(measure) = self.model.measures.iter().find(|m| m.metadata.id() == &id) {
                     measures.insert(id, measure);
                 }
             }
-            for id in current.expression.metric_refs() {
-                if let Some(next) = self.metric(&id) {
-                    pending.push(next);
-                }
-            }
         }
         measures.into_values().collect()
+    }
+
+    /// The bridges a metric's lineage declares, with the metric declaring
+    /// each: an allocation stated on a dependency covers its users.
+    fn allocations(&self, metric: &'m Metric) -> Vec<(StableId, StableId)> {
+        self.dependencies(metric)
+            .into_iter()
+            .filter_map(|dependency| {
+                dependency
+                    .allocation_bridge
+                    .as_ref()
+                    .map(|bridge| (dependency.metadata.id().clone(), bridge.clone()))
+            })
+            .collect()
     }
 
     // ---- 5–6. Relationships, paths and fanout --------------------------------------
@@ -234,7 +344,13 @@ impl<'m> Analysis<'m> {
     /// Proves that `usage` is reachable from `anchor` by exactly one path
     /// and that the path cannot multiply the metric's observations, or that
     /// a declared allocation resolves it.
-    fn reach(&mut self, metric: &'m Metric, anchor: &StableId, usage: &Usage<'_>) {
+    fn reach(
+        &mut self,
+        metric: &'m Metric,
+        allocations: &[(StableId, StableId)],
+        anchor: &StableId,
+        usage: &Usage<'_>,
+    ) {
         let key = (anchor.clone(), usage.dimension.clone());
         if !self.paths.contains_key(&key) {
             let resolved = self.resolve(anchor, usage);
@@ -243,9 +359,8 @@ impl<'m> Analysis<'m> {
         let Some(Some(path)) = self.paths.get(&key).cloned() else {
             return;
         };
-        let fans_out = path.steps.iter().any(|step| !step.traversal.is_single());
-        if fans_out {
-            self.allocate(metric, anchor, &path, usage);
+        if path.steps.iter().any(|step| !step.traversal.is_single()) {
+            self.allocate(metric, allocations, anchor, &path, usage);
         }
     }
 
@@ -259,7 +374,20 @@ impl<'m> Analysis<'m> {
             .iter()
             .map(|binding| &binding.dataset)
             .collect();
-        let all = graph::paths(self.model, anchor, &targets);
+        let Ok(all) = graph::paths(self.model, anchor, &targets) else {
+            // A truncated search proves neither uniqueness nor absence.
+            self.reject(rejection(
+                Code::UnsupportedSemanticConstruct,
+                usage.path.clone(),
+                [anchor.clone(), usage.dimension.dimension.clone()],
+                format!(
+                    "El grafo de relaciones entre {anchor} y {} supera el presupuesto de \
+                     búsqueda: no se puede demostrar un camino único.",
+                    usage.dimension.dimension
+                ),
+            ));
+            return None;
+        };
         let roles: BTreeSet<&str> = usage.dimension.roles.iter().map(String::as_str).collect();
         let candidates: Vec<Path<'m>> = if roles.is_empty() {
             match all.iter().find(|path| path.steps.is_empty()) {
@@ -283,25 +411,25 @@ impl<'m> Analysis<'m> {
                 None
             }
             many => {
+                let mut error = rejection(
+                    Code::AmbiguousRelationshipPath,
+                    usage.path.clone(),
+                    [anchor.clone(), usage.dimension.dimension.clone()],
+                    format!(
+                        "{} se alcanza desde {anchor} por {} caminos con significados distintos; \
+                         indica cuál con un rol.",
+                        usage.dimension.dimension,
+                        many.len()
+                    ),
+                );
                 // Machine-stable suggestions: the role set of each candidate.
-                let suggestions: Vec<String> = many
+                error.suggestion_codes = many
                     .iter()
                     .map(|path| {
                         let roles: Vec<&str> = path.roles().into_iter().collect();
                         format!("qualify-role:{}", roles.join("+"))
                     })
                     .collect();
-                let mut error = rejection(
-                    Code::AmbiguousRelationshipPath,
-                    usage.path.clone(),
-                    [anchor.clone(), usage.dimension.dimension.clone()],
-                    format!(
-                        "{} se alcanza desde {anchor} por {} caminos con significados distintos;                          indica cuál con un rol.",
-                        usage.dimension.dimension,
-                        many.len()
-                    ),
-                );
-                error.suggestion_codes = suggestions;
                 self.reject(error);
                 None
             }
@@ -387,64 +515,66 @@ impl<'m> Analysis<'m> {
         });
     }
 
-    /// A path that may multiply observations is legal only through the
-    /// bridge whose allocation the metric declares (§13.2).
+    /// A path that may multiply observations is legal only through a bridge
+    /// whose allocation the metric's lineage declares (§13.2).
     fn allocate(
         &mut self,
         metric: &'m Metric,
+        allocations: &[(StableId, StableId)],
         anchor: &StableId,
         path: &Path<'m>,
         usage: &Usage<'_>,
     ) {
         let used: BTreeSet<StableId> = path.relationships().into_iter().collect();
-        let bridge = metric.allocation_bridge.as_ref().and_then(|id| {
-            self.model.bridges.iter().find(|bridge| {
-                bridge.metadata.id() == id
-                    && &bridge.left_dataset == anchor
-                    && used.iter().all(|relationship| {
-                        relationship == &bridge.left_relationship
-                            || relationship == &bridge.right_relationship
-                    })
-            })
+        let declared = allocations.iter().find_map(|(declaring, id)| {
+            self.model
+                .bridges
+                .iter()
+                .find(|bridge| {
+                    bridge.metadata.id() == id
+                        && &bridge.left_dataset == anchor
+                        && bridge.allocation.is_some()
+                        && used.iter().all(|relationship| {
+                            relationship == &bridge.left_relationship
+                                || relationship == &bridge.right_relationship
+                        })
+                })
+                .map(|bridge| (declaring.clone(), bridge.metadata.id().clone()))
         });
-        match bridge {
-            Some(bridge) if bridge.allocation.is_some() => {
-                let id = bridge.metadata.id().clone();
-                self.obligations.insert(Obligation::ApplyBridgeAllocation {
-                    metric: metric.metadata.id().clone(),
-                    bridge: id.clone(),
-                });
-                self.obligations
-                    .insert(Obligation::ValidateAllocationNormalization { bridge: id });
-            }
-            _ => {
-                let mut refs = vec![metric.metadata.id().clone()];
-                refs.extend(path.relationships());
-                self.reject(rejection(
-                    Code::UnresolvedFanout,
-                    usage.path.clone(),
-                    refs,
-                    format!(
-                        "Agrupar {} por {} multiplica sus filas a través de {}: el resultado \
-                         contaría de más. Declara un puente con reparto o agrupa por otra dimensión.",
-                        metric.metadata.id(),
-                        usage.dimension.dimension,
-                        path.relationships()
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                ));
-            }
+        if let Some((declaring, bridge)) = declared {
+            self.obligations.insert(Obligation::ApplyBridgeAllocation {
+                metric: declaring,
+                bridge: bridge.clone(),
+            });
+            self.obligations
+                .insert(Obligation::ValidateAllocationNormalization { bridge });
+            return;
         }
+        let mut refs = vec![metric.metadata.id().clone()];
+        refs.extend(path.relationships());
+        self.reject(rejection(
+            Code::UnresolvedFanout,
+            usage.path.clone(),
+            refs,
+            format!(
+                "Agrupar {} por {} multiplica sus filas a través de {}: el resultado contaría \
+                 de más. Declara un puente con reparto o agrupa por otra dimensión.",
+                metric.metadata.id(),
+                usage.dimension.dimension,
+                path.relationships()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
     }
 
     /// Independent facts align only after each is aggregated at its own
     /// grain (§13.1, §14).
     fn align(&mut self, metrics: &[(&'m Metric, String)], requested: &[RequestedAtom]) {
         for (metric, _) in metrics {
-            for measure in self.lineage(metric) {
+            for measure in self.measures(metric) {
                 self.obligations.insert(Obligation::PreserveMetricGrain {
                     measure: measure.metadata.id().clone(),
                     grain: measure.input_grain.clone(),
@@ -521,8 +651,7 @@ impl<'m> Analysis<'m> {
             ..
         }) = &metric.window_behavior
         {
-            let requested_atoms = as_grain(requested);
-            if requested_atoms.as_ref() == Some(prerequisite_grain) {
+            if self.as_grain(requested).as_ref() == Some(prerequisite_grain) {
                 self.obligations.insert(Obligation::ApplyOrderedCumulative {
                     metric: id,
                     base: base_metric.clone(),
@@ -562,6 +691,39 @@ impl<'m> Analysis<'m> {
                 })
             }
         }
+    }
+
+    /// The requested grain as CSMIR atoms. A time bucket at exactly its
+    /// dimension's own grain, zone and calendar groups the same values as
+    /// the plain dimension (§8.1), so it is that dimension; any other
+    /// bucket has no plain-atom equivalent.
+    fn as_grain(&self, requested: &[RequestedAtom]) -> Option<Grain> {
+        requested
+            .iter()
+            .map(|atom| match atom {
+                RequestedAtom::Dimension(dimension) => Some(GrainAtom::DimensionRef {
+                    dimension: dimension.dimension.clone(),
+                    roles: dimension.roles.clone(),
+                }),
+                RequestedAtom::TimeBucket(time) => {
+                    let dimension = self.dimension(&time.dimension.dimension)?;
+                    let domain = self.domain(dimension)?;
+                    let same = domain.grain == time.grain
+                        && time
+                            .timezone
+                            .as_ref()
+                            .is_none_or(|zone| domain.timezone.as_ref() == Some(zone))
+                        && self
+                            .requested_calendar(time)
+                            .is_none_or(|calendar| calendar == domain.calendar);
+                    same.then(|| GrainAtom::DimensionRef {
+                        dimension: time.dimension.dimension.clone(),
+                        roles: time.dimension.roles.clone(),
+                    })
+                }
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Grain::new)
     }
 
     fn null_semantics(&mut self, measure: &'m Measure) {
@@ -641,9 +803,58 @@ impl<'m> Analysis<'m> {
         }
     }
 
-    /// Time bucketing (§17.1): an instant is converted to its business zone
-    /// before any calendar bucket; a derived date keeps the zone it was
-    /// derived in and only rolls up to coarser compatible grains.
+    /// The domain of a time dimension: the coarsest bucket any of its
+    /// (conformed) bindings derives or any dataset observes it at; a day for
+    /// plain dates; none for instants, which take a zone when bucketed.
+    fn domain(&self, dimension: &'m Dimension) -> Option<Domain> {
+        let id = dimension.metadata.id();
+        let mut buckets: Vec<&TimeBucket> = dimension
+            .bindings
+            .iter()
+            .filter_map(|binding| derivation(&binding.expression))
+            .collect();
+        for dataset in &self.model.datasets {
+            for atom in dataset.observation_grain.atoms() {
+                if let GrainAtom::TimeBucketRef(bucket) = atom
+                    && &bucket.source == id
+                {
+                    buckets.push(bucket);
+                }
+            }
+        }
+        if let Some(coarsest) = buckets.iter().max_by_key(|bucket| bucket.grain) {
+            return Some(Domain {
+                grain: coarsest.grain,
+                timezone: Some(coarsest.timezone.clone()),
+                calendar: coarsest.calendar.clone(),
+            });
+        }
+        let calendar = dimension
+            .time_semantics
+            .as_ref()
+            .map_or(CalendarProfile::Gregorian, |semantics| {
+                semantics.calendar.clone()
+            });
+        matches!(dimension.value_type, ValueType::Date).then_some(Domain {
+            grain: TimeGrain::Day,
+            timezone: None,
+            calendar,
+        })
+    }
+
+    /// The calendar profile a time selection asks for, if it names one.
+    fn requested_calendar(&self, time: &TimeDimensionSelection) -> Option<CalendarProfile> {
+        let id = time.calendar.as_ref()?;
+        self.model
+            .calendars
+            .iter()
+            .find(|calendar| calendar.metadata.id() == id)
+            .map(|calendar| calendar.profile.clone())
+    }
+
+    /// Time bucketing (§17.1, §8.1): an instant is converted to its business
+    /// zone before any calendar bucket; values already bucketed keep their
+    /// zone and calendar and only roll up to coarser compatible grains.
     fn time(&mut self, usage: &Usage<'_>, anchors: &BTreeSet<StableId>) {
         let Some(dimension) = self.dimension(&usage.dimension.dimension) else {
             return;
@@ -664,138 +875,182 @@ impl<'m> Analysis<'m> {
             else {
                 continue;
             };
-            match derivation(&binding.expression) {
-                Some(bucket) => self.derived(usage, dimension, &dataset, bucket),
-                None => self.raw(usage, dimension, &dataset),
-            }
-        }
-    }
-
-    fn derived(
-        &mut self,
-        usage: &Usage<'_>,
-        dimension: &'m Dimension,
-        dataset: &StableId,
-        bucket: &TimeBucket,
-    ) {
-        let id = dimension.metadata.id().clone();
-        let mut grain = bucket.grain;
-        if let Some(time) = usage.bucket {
-            if time
-                .timezone
-                .as_ref()
-                .is_some_and(|zone| zone != &bucket.timezone)
-            {
-                self.reject(rejection(
-                    Code::InvalidGrainTransition,
-                    format!("{}/timezone", usage.path),
-                    [id.clone()],
-                    format!(
-                        "{id} ya se calcula en la zona {}: no se puede volver a agrupar en otra.",
-                        bucket.timezone.as_str()
-                    ),
-                ));
-                return;
-            }
-            if !rolls_up(bucket.grain, time.grain) {
-                self.reject(rejection(
-                    Code::GrainRefinementUnsupported,
-                    usage.path.clone(),
-                    [id.clone()],
-                    format!(
-                        "{id} ya está agrupada por {:?}: no se puede pasar a {:?}.",
-                        bucket.grain, time.grain
-                    ),
-                ));
-                return;
-            }
-            grain = time.grain;
-        }
-        self.obligations
-            .insert(Obligation::ConvertTimezoneBeforeBucketing {
-                dimension: id,
-                dataset: dataset.clone(),
-                timezone: bucket.timezone.clone(),
-                grain,
-            });
-    }
-
-    fn raw(&mut self, usage: &Usage<'_>, dimension: &'m Dimension, dataset: &StableId) {
-        let Some(time) = usage.bucket else {
-            return;
-        };
-        let id = dimension.metadata.id().clone();
-        match &dimension.value_type {
-            ValueType::Date => {
-                if time.timezone.is_some() {
-                    self.reject(rejection(
-                        Code::InvalidGrainTransition,
-                        format!("{}/timezone", usage.path),
-                        [id.clone()],
-                        format!("{id} es una fecha de calendario: no tiene zona horaria."),
-                    ));
-                } else if time.grain < TimeGrain::Day {
-                    self.reject(rejection(
-                        Code::GrainRefinementUnsupported,
-                        usage.path.clone(),
-                        [id.clone()],
-                        format!(
-                            "{id} es una fecha: no se puede agrupar por {:?}.",
-                            time.grain
-                        ),
-                    ));
+            let derived = derivation(&binding.expression).cloned();
+            match usage.bucket {
+                Some(time) => self.bucket(usage, time, dimension, &dataset, derived.as_ref()),
+                None => {
+                    // A plain derived dimension still converts before its
+                    // own bucket.
+                    if let Some(bucket) = derived {
+                        self.obligations
+                            .insert(Obligation::ConvertTimezoneBeforeBucketing {
+                                dimension: dimension.metadata.id().clone(),
+                                dataset,
+                                timezone: bucket.timezone,
+                                calendar: bucket.calendar,
+                                grain: bucket.grain,
+                            });
+                    }
                 }
             }
-            ValueType::Timestamp {
-                timezone_semantics: TimestampSemantics::Instant,
-            } => {
+        }
+    }
+
+    fn bucket(
+        &mut self,
+        usage: &Usage<'_>,
+        time: &TimeDimensionSelection,
+        dimension: &'m Dimension,
+        dataset: &StableId,
+        derived: Option<&TimeBucket>,
+    ) {
+        let id = dimension.metadata.id().clone();
+        let mut requested_calendar = None;
+        if let Some(calendar) = &time.calendar {
+            let Some(profile) = self.requested_calendar(time) else {
+                self.reject(unknown(calendar, format!("{}/calendar", usage.path)));
+                return;
+            };
+            requested_calendar = Some(profile);
+        }
+        let domain = self.domain(dimension);
+        if let Some(domain) = &domain
+            && !self.within_domain(usage, time, &id, domain, requested_calendar.as_ref())
+        {
+            return;
+        }
+        let calendar = requested_calendar
+            .or_else(|| domain.as_ref().map(|domain| domain.calendar.clone()))
+            .unwrap_or(CalendarProfile::Gregorian);
+        let Ok(zone) = self.bucket_zone(usage, time, dimension, derived) else {
+            return;
+        };
+        self.obligations.insert(match zone {
+            Some(timezone) => Obligation::ConvertTimezoneBeforeBucketing {
+                dimension: id,
+                dataset: dataset.clone(),
+                timezone,
+                calendar,
+                grain: time.grain,
+            },
+            None => Obligation::ApplyCalendarBucket {
+                dimension: id,
+                dataset: dataset.clone(),
+                calendar,
+                grain: time.grain,
+            },
+        });
+    }
+
+    /// A bucket over already-bucketed values keeps their zone and calendar
+    /// and only rolls up (§8.1): the domain proves which transitions exist.
+    fn within_domain(
+        &mut self,
+        usage: &Usage<'_>,
+        time: &TimeDimensionSelection,
+        id: &StableId,
+        domain: &Domain,
+        requested_calendar: Option<&CalendarProfile>,
+    ) -> bool {
+        let (code, path, message) = match (&time.timezone, &domain.timezone) {
+            (Some(zone), Some(fixed)) if zone != fixed => (
+                Code::InvalidGrainTransition,
+                format!("{}/timezone", usage.path),
+                format!(
+                    "{id} ya se agrupó en la zona {}: no se puede volver a agrupar en otra.",
+                    fixed.as_str()
+                ),
+            ),
+            (Some(_), None) => (
+                Code::InvalidGrainTransition,
+                format!("{}/timezone", usage.path),
+                format!("{id} es una fecha de calendario: no tiene zona horaria."),
+            ),
+            _ if requested_calendar.is_some_and(|calendar| calendar != &domain.calendar) => (
+                Code::InvalidGrainTransition,
+                format!("{}/calendar", usage.path),
+                format!(
+                    "{id} ya está en el calendario {:?}: otro calendario partiría sus periodos.",
+                    domain.calendar
+                ),
+            ),
+            _ if !rolls_up(domain.grain, time.grain) => (
+                Code::GrainRefinementUnsupported,
+                usage.path.clone(),
+                format!(
+                    "Los valores de {id} están agrupados por {:?}: no se pueden repartir en {:?} sin una regla de reparto.",
+                    domain.grain, time.grain
+                ),
+            ),
+            _ => return true,
+        };
+        self.reject(rejection(code, path, [id.clone()], message));
+        false
+    }
+
+    /// Where the instant becomes a calendar value: the binding's own
+    /// derivation, or the zone of a bucket over a raw instant. `Ok(None)`
+    /// for values that are already calendar values.
+    fn bucket_zone(
+        &mut self,
+        usage: &Usage<'_>,
+        time: &TimeDimensionSelection,
+        dimension: &'m Dimension,
+        derived: Option<&TimeBucket>,
+    ) -> Result<Option<IanaZoneId>, ()> {
+        let id = dimension.metadata.id();
+        match (derived, &dimension.value_type) {
+            (Some(bucket), _) => Ok(Some(bucket.timezone.clone())),
+            (
+                None,
+                ValueType::Timestamp {
+                    timezone_semantics: TimestampSemantics::Instant,
+                },
+            ) => {
                 let zone = time.timezone.clone().or_else(|| {
                     dimension
                         .time_semantics
                         .as_ref()
                         .map(|semantics| semantics.timezone.clone())
                 });
-                match zone {
-                    Some(timezone) => {
-                        self.obligations
-                            .insert(Obligation::ConvertTimezoneBeforeBucketing {
-                                dimension: id,
-                                dataset: dataset.clone(),
-                                timezone,
-                                grain: time.grain,
-                            });
-                    }
-                    None => self.reject(rejection(
-                        Code::InvalidGrainTransition,
-                        format!("{}/timezone", usage.path),
-                        [id.clone()],
-                        format!(
-                            "{id} es un instante sin zona de negocio declarada: indica en qué \
-                             zona agrupar por {:?}.",
-                            time.grain
-                        ),
-                    )),
-                }
-            }
-            _ => {
-                if time.timezone.is_some() {
+                if zone.is_none() {
                     self.reject(rejection(
                         Code::InvalidGrainTransition,
                         format!("{}/timezone", usage.path),
                         [id.clone()],
-                        format!("{id} es una fecha y hora local: no admite otra zona."),
+                        format!(
+                            "{id} es un instante sin zona de negocio declarada: indica en qué zona agrupar por {:?}.",
+                            time.grain
+                        ),
                     ));
+                    return Err(());
                 }
+                Ok(zone)
             }
+            (None, ValueType::Timestamp { .. }) if time.timezone.is_some() => {
+                self.reject(rejection(
+                    Code::InvalidGrainTransition,
+                    format!("{}/timezone", usage.path),
+                    [id.clone()],
+                    format!("{id} es una fecha y hora local: no admite otra zona."),
+                ));
+                Err(())
+            }
+            _ => Ok(None),
         }
     }
 
     // ---- 9. Policies ---------------------------------------------------------------
 
-    /// Every mandatory policy on a dataset the request reads, or on a metric
-    /// it computes, must have its context bound (§20); the caller can only
-    /// narrow what the policy allows, never remove it.
-    fn policies(&mut self, metrics: &[(&'m Metric, String)]) {
+    /// Every mandatory policy on a dataset the request reads (sources, path
+    /// datasets, intrinsic filters) or on a metric of its lineage must have
+    /// its context bound and well typed (§20); the caller can only narrow
+    /// what the policy allows, never remove it.
+    fn policies(&mut self, closure: &[(&'m Metric, String)]) {
+        let lineage: BTreeSet<&StableId> = closure
+            .iter()
+            .map(|(metric, _)| metric.metadata.id())
+            .collect();
         let mut scoped: BTreeSet<(StableId, StableId)> = BTreeSet::new();
         for dataset in &self.datasets {
             if let Some(found) = graph::dataset_of(self.model, dataset) {
@@ -804,65 +1059,82 @@ impl<'m> Analysis<'m> {
                 }
             }
         }
-        for (metric, _) in metrics {
+        for (metric, _) in closure {
             for policy in &metric.policy_refs {
                 scoped.insert((policy.clone(), metric.metadata.id().clone()));
             }
         }
-        for (policy_id, scope) in scoped {
-            let Some(policy) = self
-                .model
-                .policies
-                .iter()
-                .find(|policy| policy.metadata.id() == &policy_id)
-            else {
-                continue;
+        // A policy scoped to an object of the lineage applies even if the
+        // object does not list it.
+        for policy in &self.model.policies {
+            let scope = match &policy.scope {
+                PolicyScope::Dataset(dataset) if self.datasets.contains(dataset) => dataset,
+                PolicyScope::Metric(metric) if lineage.contains(metric) => metric,
+                _ => continue,
             };
-            if policy.enforcement != Enforcement::Mandatory {
-                continue;
-            }
-            let mut bound = true;
-            for slot in policy.context_slots.iter().filter(|slot| slot.required) {
-                match self.context.slots.get(&slot.name) {
-                    None => {
-                        bound = false;
-                        self.reject(rejection(
-                            Code::PolicyContextMissing,
-                            format!("/context/slots/{}", slot.name),
-                            [policy_id.clone(), scope.clone()],
-                            format!(
-                                "La política obligatoria {policy_id} sobre {scope} necesita el \
-                                 valor de contexto {:?}.",
-                                slot.name
-                            ),
-                        ));
-                    }
-                    Some(value) if !compatible(&value.value_type(), &slot.value_type) => {
-                        bound = false;
-                        self.reject(rejection(
-                            Code::IncompatibleTypes,
-                            format!("/context/slots/{}", slot.name),
-                            [policy_id.clone()],
-                            format!(
-                                "El valor de contexto {:?} no es del tipo que declara la política \
-                                 {policy_id}.",
-                                slot.name
-                            ),
-                        ));
-                    }
-                    Some(_) => {}
+            scoped.insert((policy.metadata.id().clone(), scope.clone()));
+        }
+        for (policy_id, scope) in scoped {
+            self.attach(&policy_id, scope);
+        }
+    }
+
+    fn attach(&mut self, policy_id: &StableId, scope: StableId) {
+        let Some(policy) = self
+            .model
+            .policies
+            .iter()
+            .find(|policy| policy.metadata.id() == policy_id)
+        else {
+            return;
+        };
+        if policy.enforcement != Enforcement::Mandatory {
+            return;
+        }
+        let mut bound = true;
+        for slot in &policy.context_slots {
+            let path = format!("/context/slots/{}", slot.name);
+            match self.context.slots.get(&slot.name) {
+                None if slot.required => {
+                    bound = false;
+                    self.reject(rejection(
+                        Code::PolicyContextMissing,
+                        path,
+                        [policy_id.clone(), scope.clone()],
+                        format!(
+                            "La política obligatoria {policy_id} sobre {scope} necesita el valor \
+                             de contexto {:?}.",
+                            slot.name
+                        ),
+                    ));
                 }
+                // Every value supplied, required or not, must be exactly of
+                // the declared type and range.
+                Some(value) if !fits(value, &slot.value_type) => {
+                    bound = false;
+                    self.reject(rejection(
+                        Code::IncompatibleTypes,
+                        path,
+                        [policy_id.clone()],
+                        format!(
+                            "El valor de contexto {:?} no cabe en el tipo {:?} que declara la \
+                             política {policy_id}.",
+                            slot.name, slot.value_type
+                        ),
+                    ));
+                }
+                _ => {}
             }
-            if bound {
-                self.facts.insert(Fact::PolicyRequired {
-                    scope: scope.clone(),
-                    policy: policy_id.clone(),
-                });
-                self.obligations.insert(Obligation::ApplyMandatoryPolicy {
-                    policy: policy_id,
-                    scope,
-                });
-            }
+        }
+        if bound {
+            self.facts.insert(Fact::PolicyRequired {
+                scope: scope.clone(),
+                policy: policy_id.clone(),
+            });
+            self.obligations.insert(Obligation::ApplyMandatoryPolicy {
+                policy: policy_id.clone(),
+                scope,
+            });
         }
     }
 }
@@ -927,21 +1199,6 @@ fn bucket_of(axis: &GrainAtom, requested: &[RequestedAtom]) -> Option<TimeGrain>
     })
 }
 
-/// The requested grain as CSMIR atoms, when it has no time buckets.
-fn as_grain(requested: &[RequestedAtom]) -> Option<Grain> {
-    requested
-        .iter()
-        .map(|atom| match atom {
-            RequestedAtom::Dimension(dimension) => Some(GrainAtom::DimensionRef {
-                dimension: dimension.dimension.clone(),
-                roles: dimension.roles.clone(),
-            }),
-            RequestedAtom::TimeBucket(_) => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .map(Grain::new)
-}
-
 /// The dataset a path arrives at, walked from its anchor.
 fn arrival(anchor: &StableId, path: &Path<'_>) -> StableId {
     let mut at = anchor.clone();
@@ -979,11 +1236,59 @@ fn rolls_up(from: TimeGrain, to: TimeGrain) -> bool {
         || (from == Week && to == Week)
 }
 
-fn compatible(value: &ValueType, declared: &ValueType) -> bool {
+/// A context value is usable only if it is exactly representable in the
+/// declared type: integer range by width and sign, decimal precision and
+/// scale without loss, and the same type otherwise.
+fn fits(value: &Literal, declared: &ValueType) -> bool {
     match (value, declared) {
-        (ValueType::Integer { signed: a, .. }, ValueType::Integer { signed: b, .. }) => a == b,
-        (value, declared) => value == declared,
+        (Literal::SignedInteger(value), ValueType::Integer { signed: true, bits }) => {
+            let bits = bits.unwrap_or(64).min(128);
+            bits == 128 || {
+                let limit = 1_i128 << (bits - 1);
+                (-limit..limit).contains(value)
+            }
+        }
+        (
+            Literal::UnsignedInteger(value),
+            ValueType::Integer {
+                signed: false,
+                bits,
+            },
+        ) => {
+            let bits = bits.unwrap_or(64).min(128);
+            bits == 128 || value >> bits == 0
+        }
+        (Literal::Decimal(value), ValueType::Decimal(declared)) => decimal_fits(value, *declared),
+        (Literal::Float(value), ValueType::Float { bits: 32 }) => {
+            #[allow(clippy::cast_possible_truncation)] // the narrowing is the check
+            let narrowed = value.value() as f32;
+            narrowed.is_finite() && f64::from(narrowed).to_bits() == value.value().to_bits()
+        }
+        (Literal::Null(_), _) => false,
+        (value, declared) => &value.value_type() == declared,
     }
+}
+
+/// `value` written at the declared scale keeps every significant digit and
+/// fits the declared precision.
+fn decimal_fits(value: &DecimalValue, declared: DecimalType) -> bool {
+    let digits = value.coefficient().trim_start_matches('-');
+    let scale = usize::from(value.decimal_type().scale());
+    let significant = digits.trim_end_matches('0');
+    let trailing = digits.len() - significant.len();
+    let needed_scale = if significant.is_empty() {
+        0
+    } else {
+        scale.saturating_sub(trailing)
+    };
+    let whole = if digits.len() > scale {
+        digits[..digits.len() - scale].trim_start_matches('0').len()
+    } else {
+        0
+    };
+    let target_scale = usize::from(declared.scale());
+    needed_scale <= target_scale
+        && whole <= usize::from(declared.precision()).saturating_sub(target_scale)
 }
 
 fn class_name(class: AggregationClass) -> &'static str {
@@ -1000,4 +1305,55 @@ fn sorted(mut ids: Vec<StableId>) -> Vec<StableId> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use sef_model_ir::types::{DecimalType, DecimalValue, Literal, ValueType};
+
+    use super::fits;
+
+    fn decimal(coefficient: &str, precision: u8, scale: u8) -> Literal {
+        Literal::Decimal(
+            DecimalValue::new(
+                coefficient,
+                DecimalType::new(precision, scale).expect("type"),
+            )
+            .expect("value"),
+        )
+    }
+
+    fn declared(precision: u8, scale: u8) -> ValueType {
+        ValueType::Decimal(DecimalType::new(precision, scale).expect("type"))
+    }
+
+    #[test]
+    fn decimals_fit_only_without_loss() {
+        // 12.50 written as DECIMAL(5,2) fits DECIMAL(4,1) as 12.5 …
+        assert!(fits(&decimal("1250", 5, 2), &declared(4, 1)));
+        // … but 12.55 would lose a digit, and 123.4 has too many integers.
+        assert!(!fits(&decimal("1255", 5, 2), &declared(4, 1)));
+        assert!(!fits(&decimal("1234", 5, 1), &declared(3, 1)));
+        assert!(fits(&decimal("-0", 5, 2), &declared(1, 0)));
+    }
+
+    #[test]
+    fn integers_fit_their_sign_and_width() {
+        let int = |signed, bits| ValueType::Integer {
+            signed,
+            bits: Some(bits),
+        };
+        assert!(fits(&Literal::SignedInteger(127), &int(true, 8)));
+        assert!(!fits(&Literal::SignedInteger(128), &int(true, 8)));
+        assert!(fits(&Literal::UnsignedInteger(255), &int(false, 8)));
+        assert!(!fits(&Literal::UnsignedInteger(256), &int(false, 8)));
+        assert!(
+            !fits(&Literal::SignedInteger(1), &int(false, 8)),
+            "sign differs"
+        );
+        assert!(fits(&Literal::SignedInteger(i128::MAX), &int(true, 128)));
+        assert!(!fits(&Literal::Utf8("7".to_owned()), &int(true, 64)));
+    }
 }
