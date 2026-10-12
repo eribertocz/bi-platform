@@ -155,3 +155,130 @@ fn the_widest_decimal_stays_representable() {
     );
     assert_eq!((precision, scale), (75, 0));
 }
+
+// ---- Review of #92 --------------------------------------------------------------------
+
+fn integer_column(signed: bool, bits: u16) -> ScalarExpr {
+    ScalarExpr {
+        kind: ScalarExprKind::FieldRef(StableId::new("t/field/i").expect("id")),
+        value_type: ValueType::Integer {
+            signed,
+            bits: Some(bits),
+        },
+        unit: None,
+    }
+}
+
+/// Decimal digits of the largest magnitude, computed independently.
+fn magnitude_digits(signed: bool, bits: u16) -> u8 {
+    let largest = if signed {
+        1_u128 << (bits - 1)
+    } else if bits == 128 {
+        u128::MAX
+    } else {
+        (1_u128 << bits) - 1
+    };
+    u8::try_from(largest.to_string().len()).expect("digits")
+}
+
+#[test]
+fn a_remainder_of_wide_integers_fits_its_type() {
+    let modulo = ScalarFunction::Mod {
+        zero: ZeroDivisionPolicy::Null,
+    };
+    // UINT64::MAX mod 20000000000000000000 is UINT64::MAX: 20 digits.
+    let (value_type, _) = modulo
+        .result(&[integer_column(false, 64), column(38, 0)])
+        .expect("typed");
+    assert_eq!(decimal(&value_type), (20, 0));
+    // An INT128 against DECIMAL(38,0) keeps the 38 digits of the divisor.
+    let (value_type, _) = modulo
+        .result(&[integer_column(true, 128), column(38, 0)])
+        .expect("typed");
+    assert_eq!(decimal(&value_type), (38, 0));
+    // An unbounded integer has no exact digits to mix with a decimal.
+    let unbounded = ScalarExpr {
+        value_type: ValueType::Integer {
+            signed: true,
+            bits: None,
+        },
+        ..integer_column(true, 64)
+    };
+    assert!(modulo.result(&[unbounded, column(10, 2)]).is_err());
+}
+
+proptest! {
+    /// Every integer width and signedness against every decimal: the
+    /// remainder's digits are bounded by both operands, and the type holds them.
+    #[test]
+    fn remainders_of_integers_and_decimals_fit(
+        signed in any::<bool>(),
+        bits in proptest::sample::select(vec![8_u16, 16, 32, 64, 128]),
+        (p, s, _) in typed_value(),
+    ) {
+        let modulo = ScalarFunction::Mod { zero: ZeroDivisionPolicy::Null };
+        let (value_type, _) = modulo.result(&[integer_column(signed, bits), column(p, s)]).expect("typed");
+        let (rp, rs) = decimal(&value_type);
+        prop_assert_eq!(rs, s);
+        prop_assert!(rp >= magnitude_digits(signed, bits).min(p - s) + s);
+    }
+}
+
+#[test]
+fn greatest_and_least_only_take_ordered_types() {
+    let same = |value_type: ValueType| {
+        let value = ScalarExpr {
+            kind: ScalarExprKind::Literal(Literal::Null(value_type.clone())),
+            value_type,
+            unit: None,
+        };
+        [value.clone(), value]
+    };
+    for value_type in [
+        ValueType::Utf8,
+        ValueType::Boolean,
+        ValueType::Date,
+        ValueType::Integer {
+            signed: true,
+            bits: Some(64),
+        },
+    ] {
+        assert!(ScalarFunction::Greatest.result(&same(value_type)).is_ok());
+    }
+    for value_type in [
+        ValueType::Float { bits: 64 },
+        ValueType::OpaqueExtension {
+            namespace: "probe".to_owned(),
+            type_name: "unordered".to_owned(),
+        },
+        ValueType::List(Box::new(ValueType::Utf8)),
+    ] {
+        assert!(
+            ScalarFunction::Least
+                .result(&same(value_type.clone()))
+                .is_err(),
+            "{value_type:?}"
+        );
+    }
+}
+
+#[test]
+fn digits_stay_within_the_decimal_range() {
+    let at = |digits: i128| ScalarExpr {
+        kind: ScalarExprKind::Literal(Literal::SignedInteger(digits)),
+        ..places(0)
+    };
+    assert!(
+        ScalarFunction::Round
+            .result(&[column(18, 2), at(76)])
+            .is_ok()
+    );
+    for digits in [77, 255, 256] {
+        assert!(
+            ScalarFunction::Round
+                .result(&[column(18, 2), at(digits)])
+                .is_err(),
+            "{digits}"
+        );
+    }
+}
