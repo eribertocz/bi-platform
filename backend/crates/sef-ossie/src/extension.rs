@@ -119,10 +119,38 @@ pub enum SensitivityDeclaration {
     Secret,
 }
 
+/// Lifecycle declarations are closed: typos must not silently reactivate an object.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StatusDeclaration {
+    Active,
+    Deprecated {
+        sunset: Option<String>,
+        replacement: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassificationDeclaration {
+    Public,
+    #[default]
+    Internal,
+    Confidential,
+    Restricted,
+}
+
 /// `datasets[].custom_extensions`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetExtension {
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub status: Option<StatusDeclaration>,
+    #[serde(default)]
+    pub sensitivity: ClassificationDeclaration,
+
     #[serde(default)]
     version: u32,
     /// The entity the primary key identifies; the dataset name if absent.
@@ -175,6 +203,13 @@ pub struct GrainDeclaration {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldExtension {
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub status: Option<StatusDeclaration>,
+    #[serde(default)]
+    pub sensitivity: ClassificationDeclaration,
+
     #[serde(default)]
     version: u32,
     /// The model-wide dimension this field is a binding of. Fields of
@@ -279,6 +314,13 @@ pub enum OptionalityDeclaration {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricExtension {
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub status: Option<StatusDeclaration>,
+    #[serde(default)]
+    pub sensitivity: ClassificationDeclaration,
+
     #[serde(default)]
     version: u32,
     /// The dataset whose rows `COUNT(*)` counts.
@@ -447,11 +489,26 @@ pub(crate) fn read<T: DeserializeOwned + Default + Versioned>(
             format!("La extensión {VENDOR:?} necesita \"version\": {VERSION}."),
         ));
     }
+    if let Some(StatusDeclaration::Deprecated {
+        sunset: Some(sunset),
+        ..
+    }) = payload.status()
+        && sef_model_ir::time::iso_date_days(sunset).is_none()
+    {
+        return Err(Diagnostic::error(
+            Code::InvalidExtension,
+            format!("{path}/status/sunset"),
+            "sunset necesita una fecha ISO válida (AAAA-MM-DD).",
+        ));
+    }
     Ok(payload)
 }
 
 pub(crate) trait Versioned {
     fn version(&self) -> u32;
+    fn status(&self) -> Option<&StatusDeclaration> {
+        None
+    }
 }
 
 macro_rules! versioned {
@@ -463,10 +520,14 @@ macro_rules! versioned {
         }
     )+};
 }
-versioned!(
-    ModelExtension,
-    DatasetExtension,
-    FieldExtension,
-    RelationshipExtension,
-    MetricExtension
-);
+versioned!(ModelExtension, RelationshipExtension);
+
+macro_rules! governed {
+    ($($ty:ty),+) => {$(
+        impl Versioned for $ty {
+            fn version(&self) -> u32 { self.version }
+            fn status(&self) -> Option<&StatusDeclaration> { self.status.as_ref() }
+        }
+    )+};
+}
+governed!(DatasetExtension, FieldExtension, MetricExtension);

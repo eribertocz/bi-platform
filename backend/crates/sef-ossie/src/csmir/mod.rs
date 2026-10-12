@@ -22,6 +22,7 @@
 //! defaults that would change a number.
 
 mod contracts;
+mod governance;
 mod metric;
 pub(crate) mod scalar;
 
@@ -32,8 +33,8 @@ use sef_model_ir::grain::{Grain, GrainAtom};
 use sef_model_ir::identity::{SemanticVersion, StableId, valid_segment};
 use sef_model_ir::model::{
     CompiledSemanticModel, ConformanceContract, DatasetTimeRole, Dimension, DimensionBinding,
-    Entity, EntityKey, Field, FieldBinding, KeyBinding, ModelDefinition, Namespace, ObjectMetadata,
-    SemanticDataset, SourceBinding,
+    Entity, EntityKey, Field, FieldBinding, Governance, KeyBinding, ModelDefinition, Namespace,
+    ObjectMetadata, SemanticDataset, SourceBinding,
 };
 use sef_model_ir::policy::{Policy, PolicyScope};
 use sef_model_ir::relationships::{
@@ -45,6 +46,7 @@ use sef_model_ir::types::{StructField, ValueType};
 use sef_model_ir::units::Unit;
 use sqlparser::ast::Expr;
 
+use self::governance::Governed;
 use self::scalar::{Division, Failure, Names, Translator, describe, normalize};
 use crate::catalog::{Catalog, Column, Relation};
 use crate::diagnostic::{Code, Diagnostic};
@@ -350,6 +352,14 @@ impl<'a> Converter<'a> {
             let mut metadata = metadata;
             metadata.label.clone_from(&field.label);
             metadata.description.clone_from(&field.description);
+            match extension.governance(&self.ids, "field", Some(&state.segment)) {
+                Ok(governance) => metadata.governance = governance,
+                Err(failure) => {
+                    self.fail(&path, failure);
+                    return;
+                }
+            }
+
             if let Some(datatype) = field.datatype
                 && !compatible(datatype, &found.value_type)
             {
@@ -788,6 +798,13 @@ impl<'a> Converter<'a> {
             .dimension
             .clone()
             .unwrap_or_else(|| format!("{}.{}", self.model.datasets[d].name, field.ossie.name));
+        let governance = match self.dimension_governance(d, f) {
+            Ok(governance) => governance,
+            Err(failure) => {
+                self.fail(&path, failure);
+                return;
+            }
+        };
         let semantic_role = field.extension.semantic_role.clone();
         let tzdb = field
             .extension
@@ -829,6 +846,7 @@ impl<'a> Converter<'a> {
             return;
         };
         metadata.label = Some(label);
+        metadata.governance = governance;
         let binding = DimensionBinding {
             dataset: self.datasets[d].id.clone(),
             expression: expression.clone(),
@@ -849,6 +867,14 @@ impl<'a> Converter<'a> {
             );
             return;
         };
+        if state.metadata.governance != metadata.governance {
+            self.error(
+                Code::InvalidExtension,
+                format!("{path}/custom_extensions"),
+                "Los campos de una dimensión conformada deben declarar el mismo gobierno.",
+            );
+            return;
+        }
         if let Err(conflict) = state.absorb(binding, semantic_role, time_semantics) {
             let first = state.path.clone();
             self.error(
@@ -860,6 +886,15 @@ impl<'a> Converter<'a> {
                 ),
             );
         }
+    }
+
+    fn dimension_governance(&self, d: usize, f: usize) -> Result<Governance, Failure> {
+        let extension = &self.datasets[d].fields[f].extension;
+        let scope = extension
+            .dimension
+            .is_none()
+            .then_some(self.datasets[d].segment.as_str());
+        extension.governance(&self.ids, "dimension", scope)
     }
 
     /// The time semantics of a dimension bucketed with `DATE_TRUNC`: the
@@ -972,18 +1007,21 @@ impl<'a> Converter<'a> {
         }
     }
 
+    fn model_metadata(&self, options: &Options) -> Result<ObjectMetadata, Failure> {
+        let identity = self
+            .ids
+            .identity("model", &options.model)
+            .map_err(|_| Failure::new(Code::SemanticContract, "modelo inv\u{e1}lido"))?;
+        let mut metadata = ObjectMetadata::new(identity);
+        metadata.label = Some(self.model.name.clone());
+        metadata.description.clone_from(&self.model.description);
+        Ok(metadata)
+    }
+
     fn finish(self, options: &Options) -> Result<(ModelDefinition, Paths), Failure> {
         let internal =
             |what: &str| Failure::new(Code::SemanticContract, format!("{what} inválido"));
-        let model_identity = self
-            .ids
-            .identity("model", &options.model)
-            .map_err(|_| internal("modelo"))?;
-        let mut definition = ModelDefinition::new(ObjectMetadata {
-            identity: model_identity,
-            label: Some(self.model.name.clone()),
-            description: self.model.description.clone(),
-        });
+        let mut definition = ModelDefinition::new(self.model_metadata(options)?);
         definition.namespaces.push(Namespace {
             metadata: ObjectMetadata::new(
                 self.ids
@@ -1017,6 +1055,8 @@ impl<'a> Converter<'a> {
                     .identity("dataset", &state.segment)
                     .map_err(|_| internal("dataset"))?,
             );
+            let extension = &state.extension;
+            metadata.governance = extension.governance(&self.ids, "dataset", None)?;
             metadata.description.clone_from(
                 &self
                     .model

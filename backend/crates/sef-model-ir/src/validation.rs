@@ -11,7 +11,7 @@ use crate::grain::{Grain, GrainAtom};
 use crate::identity::{StableId, valid_segment};
 use crate::model::{
     AggregationClass, AggregationContract, ConformanceContract, ConversionRule, Dimension,
-    EntityKey, Field, Measure, Metric, ModelDefinition, SemanticDataset, TemporalTies,
+    EntityKey, Field, Lifecycle, Measure, Metric, ModelDefinition, SemanticDataset, TemporalTies,
     UnitConversion, WindowBehavior,
 };
 use crate::policy::{ContextSlot, PolicyScope};
@@ -132,7 +132,7 @@ impl<'a> Validator<'a> {
         for entity in &self.model.entities {
             collect_metadata!(entity.keys);
         }
-        for metadata in objects {
+        for metadata in &objects {
             let id = metadata.id();
             if !ids.insert(id) {
                 self.error(
@@ -140,6 +140,16 @@ impl<'a> Validator<'a> {
                     id,
                     "Semantic stable IDs must be unique",
                 );
+            }
+        }
+        for metadata in objects {
+            if let Lifecycle::Deprecated {
+                replacement: Some(target),
+                ..
+            } = &metadata.governance.lifecycle
+                && (!ids.contains(target) || target.kind() != metadata.id().kind())
+            {
+                self.missing(metadata.id(), target);
             }
         }
     }

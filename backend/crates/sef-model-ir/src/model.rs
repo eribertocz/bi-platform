@@ -13,11 +13,42 @@ use crate::time::{CalendarProfile, OrderTerm, TimeRole, TimeSemantics};
 use crate::types::{DecimalValue, ValueType};
 use crate::units::Unit;
 
+/// Catalog metadata; classification is not an authorization decision.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Governance {
+    pub owner: Option<String>,
+    pub tags: Vec<String>,
+    pub lifecycle: Lifecycle,
+    pub classification: Classification,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Lifecycle {
+    #[default]
+    Active,
+    Deprecated {
+        /// ISO YYYY-MM-DD, when a retirement date has been declared.
+        sunset: Option<String>,
+        replacement: Option<StableId>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Classification {
+    Public,
+    #[default]
+    Internal,
+    Confidential,
+    Restricted,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectMetadata {
     pub identity: ObjectIdentity,
     pub label: Option<String>,
     pub description: Option<String>,
+    /// Descriptive governance, deliberately excluded from canonical identity.
+    pub governance: Governance,
 }
 
 impl ObjectMetadata {
@@ -27,6 +58,7 @@ impl ObjectMetadata {
             identity,
             label: None,
             description: None,
+            governance: Governance::default(),
         }
     }
     #[must_use]

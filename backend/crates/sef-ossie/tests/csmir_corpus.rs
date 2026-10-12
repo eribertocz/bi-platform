@@ -128,6 +128,42 @@ fn assert_same_fingerprint(case: u8) {
         golden(case),
         "CASE-{case:03}: the Ossie document must compile to the corpus CSMIR"
     );
+    let mut governed = loaded.model;
+    let decorate = |extensions: &mut Vec<sef_ossie::document::CustomExtension>| {
+        let payload = serde_json::json!({"owner":"Finance", "tags":["audited"],
+            "status":{"state":"deprecated","sunset":"2028-02-29"}, "sensitivity":"confidential"});
+        if !extensions.iter().any(|e| e.vendor_name == "bi-platform") {
+            extensions.push(sef_ossie::document::CustomExtension {
+                vendor_name: "bi-platform".into(),
+                data: r#"{"version":1}"#.into(),
+            });
+        }
+        let extension = extensions
+            .iter_mut()
+            .find(|e| e.vendor_name == "bi-platform")
+            .expect("extension");
+        let mut value: serde_json::Value = serde_json::from_str(&extension.data).expect("payload");
+        value
+            .as_object_mut()
+            .expect("object")
+            .extend(payload.as_object().expect("governance").clone());
+        extension.data = value.to_string();
+    };
+    for dataset in &mut governed.datasets {
+        decorate(&mut dataset.custom_extensions);
+        for field in &mut dataset.fields {
+            decorate(&mut field.custom_extensions);
+        }
+    }
+    for metric in &mut governed.metrics {
+        decorate(&mut metric.custom_extensions);
+    }
+    let governed = compile(&governed, &catalog(case), &options).expect("governed corpus");
+    assert_eq!(
+        governed.content_hash().to_string(),
+        golden(case),
+        "governed CASE-{case:03}"
+    );
 }
 
 macro_rules! corpus_case {

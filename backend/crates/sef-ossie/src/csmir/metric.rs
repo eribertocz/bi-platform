@@ -15,6 +15,7 @@
 //!   anything else is recomputed from its components, never re-aggregated.
 //! - The native grain is the one all inputs share, or the declared one.
 
+use super::governance::Governed;
 use std::collections::{BTreeMap, BTreeSet};
 
 use sef_model_ir::expressions::{
@@ -478,6 +479,10 @@ impl Builder<'_, '_> {
         metadata.label = Some(format!("{}{suffix}", self.metric.name));
         if segment == self.metric.segment {
             metadata.description.clone_from(&self.metric.description);
+        }
+        if kind == "metric" && segment == self.metric.segment {
+            let extension = &self.metric.extension;
+            metadata.governance = extension.governance(&self.converter.ids, "metric", None)?;
         }
         Ok(metadata)
     }
