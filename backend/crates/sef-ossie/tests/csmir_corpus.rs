@@ -104,8 +104,27 @@ fn assert_same_fingerprint(case: u8, ansi: bool) {
     } else {
         text
     };
-    let loaded = sef_ossie::load(&text)
+    let mut loaded = sef_ossie::load(&text)
         .unwrap_or_else(|errors| panic!("CASE-{case:03} must load: {errors:#?}"));
+    // The handwritten corpus defines NULL for its two explicit ratios. ANSI
+    // must declare that policy to match this oracle rather than inherit it.
+    if ansi && matches!(case, 6 | 10) {
+        let extensions = &mut loaded.model.metrics[2].custom_extensions;
+        if let Some(extension) = extensions
+            .iter_mut()
+            .find(|e| e.vendor_name == "bi-platform")
+        {
+            let mut data: serde_json::Value =
+                serde_json::from_str(&extension.data).expect("extension");
+            data["zero_division"] = "null".into();
+            extension.data = data.to_string();
+        } else {
+            extensions.push(sef_ossie::document::CustomExtension {
+                vendor_name: "bi-platform".to_owned(),
+                data: r#"{"version":1,"zero_division":"null"}"#.to_owned(),
+            });
+        }
+    }
     // An as-of relationship cannot point at a unique key of its history:
     // Ossie warns, and our temporal extension states the match instead.
     let expected: &[Code] = if case == 13 {
@@ -146,7 +165,7 @@ macro_rules! corpus_case {
 }
 
 #[test]
-fn all_21_ansi_sql_documents_match_the_same_csmir_oracle() {
+fn all_21_ansi_sql_documents_match_the_oracle_with_its_explicit_null_policy() {
     for case in 1..=21 {
         assert_same_fingerprint(case, true);
     }

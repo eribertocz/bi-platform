@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use proptest::prelude::*;
-use sef_model_ir::expressions::{BooleanOp, ComparisonOp, ScalarExprKind};
+use sef_model_ir::expressions::{BooleanOp, ComparisonOp, MetricExprKind, ScalarExprKind};
 use sef_model_ir::identity::SourceHandle;
 use sef_model_ir::model::ModelDefinition;
 use sef_model_ir::relationships::Optionality;
 use sef_model_ir::time::TimestampSemantics;
-use sef_model_ir::types::{DecimalType, ValueType};
+use sef_model_ir::types::{DecimalType, RoundingMode, ValueType, ZeroDivisionPolicy};
 use sef_ossie::catalog::{Catalog, Column, Relation};
 use sef_ossie::csmir::{Options, compile, to_csmir};
 use sef_ossie::document::{
@@ -423,6 +423,202 @@ fn a_division_without_its_result_type_is_rejected() {
         Code::TypeMismatch,
         "/metrics/2/expression/dialects/0/expression",
     );
+}
+
+fn zero_extension(policy: Option<&str>) -> Vec<CustomExtension> {
+    policy.map_or_else(Vec::new, |policy| {
+        ours(&format!(r#"{{"version":1,"zero_division":"{policy}"}}"#))
+    })
+}
+
+fn ratio_zero(definition: &ModelDefinition) -> ZeroDivisionPolicy {
+    let MetricExprKind::Ratio {
+        zero_denominator,
+        rounding,
+        ..
+    } = &definition.metrics[2].expression.kind
+    else {
+        panic!("expected CASE-006 ratio");
+    };
+    assert_eq!(*rounding, Some(RoundingMode::HalfEven));
+    *zero_denominator
+}
+
+#[test]
+fn division_defaults_and_explicit_overrides_in_metrics() {
+    for (dialect, policy, expected) in [
+        (Dialect::AnsiSql, None, ZeroDivisionPolicy::Error),
+        (Dialect::OssieSql2026, None, ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("null"), ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("error"), ZeroDivisionPolicy::Error),
+        (
+            Dialect::OssieSql2026,
+            Some("error"),
+            ZeroDivisionPolicy::Error,
+        ),
+    ] {
+        let mut model = document(6);
+        model.metrics[2].expression.dialects[0].dialect = dialect;
+        model.metrics[2].custom_extensions = zero_extension(policy);
+        let loaded = sef_ossie::load(&sef_ossie::to_json(&model).expect("JSON")).expect("load");
+        assert_eq!(
+            ratio_zero(&convert(6, &loaded.model).expect("loaded")),
+            expected
+        );
+        assert_eq!(ratio_zero(&convert(6, &model).expect("direct")), expected);
+    }
+}
+
+fn scalar_zero(scalar: &sef_model_ir::expressions::ScalarExpr) -> ZeroDivisionPolicy {
+    let ScalarExprKind::Arithmetic { contract, .. } = &scalar.kind else {
+        panic!("division");
+    };
+    assert_eq!(contract.rounding, Some(RoundingMode::HalfEven));
+    contract.zero_division.expect("division policy")
+}
+
+#[test]
+fn division_policy_in_fields_survives_dimension_binding_and_metric_inlining() {
+    for (dialect, policy, expected) in [
+        (Dialect::AnsiSql, None, ZeroDivisionPolicy::Error),
+        (Dialect::OssieSql2026, None, ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("null"), ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("error"), ZeroDivisionPolicy::Error),
+        (
+            Dialect::OssieSql2026,
+            Some("error"),
+            ZeroDivisionPolicy::Error,
+        ),
+    ] {
+        let mut model = document(1);
+        let mut field = model.datasets[0].fields[2].clone();
+        field.name = "amount_ratio".to_owned();
+        field.expression.dialects = vec![candidate(dialect, "CAST(amount / 0 AS DECIMAL(18, 2))")];
+        field
+            .dimension
+            .clone_from(&model.datasets[0].fields[1].dimension);
+        field.custom_extensions = zero_extension(policy);
+        model.datasets[0].fields.push(field);
+        model.metrics[0].expression = portable("SUM(sales.amount_ratio)");
+        let loaded = sef_ossie::load(&sef_ossie::to_json(&model).expect("JSON")).expect("load");
+        for model in [&model, &loaded.model] {
+            let definition = convert(1, model).expect("field ratio");
+            let dimension = definition
+                .dimensions
+                .iter()
+                .find(|d| d.metadata.id().as_str().ends_with("/sales.amount_ratio"))
+                .expect("dimension");
+            assert_eq!(scalar_zero(&dimension.bindings[0].expression), expected);
+            assert_eq!(
+                scalar_zero(
+                    definition.measures[0]
+                        .scalar_expression
+                        .as_ref()
+                        .expect("measure")
+                ),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn ansi_scalar_division_inside_aggregate_uses_the_metric_policy() {
+    for (policy, expected) in [
+        (None, ZeroDivisionPolicy::Error),
+        (Some("null"), ZeroDivisionPolicy::Null),
+    ] {
+        let mut model = document(1);
+        model.metrics[0].expression.dialects = vec![candidate(
+            Dialect::AnsiSql,
+            "SUM(CAST(sales.amount / 0 AS DECIMAL(18, 2)))",
+        )];
+        model.metrics[0].custom_extensions = zero_extension(policy);
+        let definition = convert(1, &model).expect("aggregate scalar");
+        assert_eq!(
+            scalar_zero(
+                definition.measures[0]
+                    .scalar_expression
+                    .as_ref()
+                    .expect("measure")
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn explicit_rounding_and_zero_policy_reach_the_aggregate_argument() {
+    let mut model = document(1);
+    model.metrics[0].expression.dialects = vec![candidate(
+        Dialect::AnsiSql,
+        "SUM(CAST(sales.amount / 0 AS DECIMAL(18, 2)))",
+    )];
+    model.metrics[0].custom_extensions =
+        ours(r#"{"version":1,"rounding":"half_up","zero_division":"null"}"#);
+    let definition = convert(1, &model).expect("explicit aggregate policy");
+    let scalar = definition.measures[0]
+        .scalar_expression
+        .as_ref()
+        .expect("measure");
+    let ScalarExprKind::Arithmetic { contract, .. } = &scalar.kind else {
+        panic!("division");
+    };
+    assert_eq!(contract.rounding, Some(RoundingMode::HalfUp));
+    assert_eq!(contract.zero_division, Some(ZeroDivisionPolicy::Null));
+}
+
+#[test]
+fn invalid_field_zero_policy_is_rejected_without_falling_back() {
+    let mut model = document(1);
+    model.datasets[0].fields[2].expression.dialects[0].dialect = Dialect::AnsiSql;
+    for data in [
+        r#"{"version":1,"zero_division":"ignore"}"#,
+        r#"{"version":1,"zero_divison":"null"}"#,
+    ] {
+        model.datasets[0].fields[2].custom_extensions = ours(data);
+        rejects(
+            convert(1, &model),
+            Code::InvalidExtension,
+            "/datasets/0/fields/2/custom_extensions/0/data",
+        );
+    }
+}
+
+#[test]
+fn ansi_average_keeps_null_for_an_empty_set() {
+    let mut model = document(1);
+    let mut average = metric("average_sale", "CAST(AVG(sales.amount) AS DECIMAL(18, 2))");
+    average.expression.dialects[0].dialect = Dialect::AnsiSql;
+    model.metrics.push(average);
+    let definition = convert(1, &model).expect("average");
+    let average = definition
+        .metrics
+        .iter()
+        .find(|m| m.metadata.id().as_str().ends_with("/average_sale"))
+        .expect("average metric");
+    let MetricExprKind::Ratio {
+        zero_denominator, ..
+    } = average.expression.kind
+    else {
+        panic!("ratio");
+    };
+    assert_eq!(zero_denominator, ZeroDivisionPolicy::Null);
+}
+
+proptest! {
+    #[test]
+    fn ratio_policy_follows_selected_dialect_and_declaration(ossie in any::<bool>(), reverse in any::<bool>(), policy in 0u8..3) {
+        let mut model = document(6);
+        let text = model.metrics[2].expression.dialects[0].expression.clone();
+        let expression = &mut model.metrics[2].expression;
+        expression.dialects = vec![candidate(Dialect::AnsiSql, &text)];
+        if ossie { expression.dialects.push(candidate(Dialect::OssieSql2026, &text)); }
+        if reverse { expression.dialects.reverse(); }
+        model.metrics[2].custom_extensions = zero_extension(match policy { 1 => Some("null"), 2 => Some("error"), _ => None });
+        let expected = match policy { 1 => ZeroDivisionPolicy::Null, 2 => ZeroDivisionPolicy::Error, _ if ossie => ZeroDivisionPolicy::Null, _ => ZeroDivisionPolicy::Error };
+        prop_assert_eq!(ratio_zero(&convert(6, &model).expect("ratio")), expected);
+    }
 }
 
 #[test]

@@ -9,7 +9,8 @@
 //!   generates `<metric>_numerator`/`_denominator` sub-metrics.
 //! - A division states its result type: `CAST(a / b AS DECIMAL(p, s))` is
 //!   an exact ratio rounded half-even (or as the extension says), with
-//!   `NULL` for a zero denominator unless the extension asks for an error.
+//!   a zero-denominator error in `ANSI_SQL` and NULL in `OSSIE_SQL_2026`,
+//!   unless the extension explicitly overrides the policy.
 //!   `AVG(x)` is the ratio of `SUM(x)` and `COUNT(x)`.
 //! - Sums and differences of fully additive metrics stay fully additive;
 //!   anything else is recomputed from its components, never re-aggregated.
@@ -46,7 +47,6 @@ use crate::diagnostic::Code;
 use crate::extension::{
     self, AggregationDeclaration, BehaviorDeclaration, ClassDeclaration, MeasureDeclaration,
     MetricExtension, OrderDeclaration, RoundingDeclaration, SelectionDeclaration, TiesDeclaration,
-    ZeroDivisionDeclaration,
 };
 use crate::ids;
 
@@ -68,6 +68,7 @@ struct MetricState {
     path: String,
     expression_path: String,
     extension: MetricExtension,
+    division: Division,
     ast: Option<Expr>,
 }
 
@@ -90,6 +91,7 @@ pub(super) fn metrics(converter: &mut Converter<'_>) {
             crate::expression::Context::Metric,
         );
         names.insert(crate::validate::normalize_identifier(&metric.name), i);
+        let division = Division::for_expression(&metric.expression, extension.zero_division);
         states.push(MetricState {
             segment: ids::segment(&metric.name),
             name: metric.name.clone(),
@@ -97,6 +99,7 @@ pub(super) fn metrics(converter: &mut Converter<'_>) {
             path,
             expression_path,
             extension,
+            division,
             ast,
         });
     }
@@ -166,6 +169,7 @@ fn dataset_measures(converter: &mut Converter<'_>) {
                 path: path.clone(),
                 expression_path: path.clone(),
                 extension,
+                division: Division::default(),
                 ast: None,
             };
             // The full language check (as for metrics) rejects what a measure
@@ -598,7 +602,7 @@ impl Builder<'_, '_> {
             BinaryOperator::Divide => {
                 let numerator = self.expr(left)?;
                 let denominator = self.expr(right)?;
-                return self.ratio(numerator, denominator, None);
+                return self.ratio(numerator, denominator, None, self.zero());
             }
             other => {
                 return Err(not_representable(&format!(
@@ -632,7 +636,7 @@ impl Builder<'_, '_> {
         if let Some((numerator, denominator)) = division(inner) {
             let numerator = self.expr(numerator)?;
             let denominator = self.expr(denominator)?;
-            return self.ratio(numerator, denominator, Some(target));
+            return self.ratio(numerator, denominator, Some(target), self.zero());
         }
         if let Expr::Function(function) = strip(inner)
             && function_name(function) == "AVG"
@@ -980,10 +984,7 @@ impl Builder<'_, '_> {
     }
 
     fn zero(&self) -> ZeroDivisionPolicy {
-        match self.metric.extension.zero_division {
-            None | Some(ZeroDivisionDeclaration::Null) => ZeroDivisionPolicy::Null,
-            Some(ZeroDivisionDeclaration::Error) => ZeroDivisionPolicy::Error,
-        }
+        self.metric.division.zero
     }
 
     /// `numerator / denominator` at `target`: exact decimal or float.
@@ -992,6 +993,7 @@ impl Builder<'_, '_> {
         numerator: MetricExpr,
         denominator: MetricExpr,
         target: Option<ValueType>,
+        zero: ZeroDivisionPolicy,
     ) -> Result<MetricExpr, Failure> {
         let target = match target {
             Some(target) => target,
@@ -1024,7 +1026,7 @@ impl Builder<'_, '_> {
             kind: MetricExprKind::Ratio {
                 numerator: Box::new(numerator),
                 denominator: Box::new(denominator),
-                zero_denominator: self.zero(),
+                zero_denominator: zero,
                 rounding,
             },
             value_type: target,
@@ -1047,7 +1049,14 @@ impl Builder<'_, '_> {
         count.name = sqlparser::ast::ObjectName::from(vec![sqlparser::ast::Ident::new("COUNT")]);
         let numerator = self.synthesize(&sum)?;
         let denominator = self.synthesize(&count)?;
-        self.ratio(numerator, denominator, target)
+        // AVG is NULL for an empty set; its synthesized SUM/COUNT is not an
+        // explicit SQL division. Preserve any explicit extension override.
+        let zero = self
+            .metric
+            .extension
+            .zero_division
+            .map_or(ZeroDivisionPolicy::Null, |_| self.zero());
+        self.ratio(numerator, denominator, target, zero)
     }
 
     /// The one dataset an aggregate reads, or the declared one for `COUNT(*)`.
@@ -1091,6 +1100,10 @@ impl Builder<'_, '_> {
             _ => (false, false),
         };
         let (aggregation, null_semantics) = aggregation(&name, distinct, wildcard)?;
+        let division = Division {
+            rounding: self.rounding(),
+            zero: self.zero(),
+        };
         let mut scope = MetricScope {
             converter: &mut *self.converter,
             used: BTreeSet::new(),
@@ -1105,7 +1118,7 @@ impl Builder<'_, '_> {
             Some(
                 Translator {
                     names: &mut scope,
-                    division: Division::default(),
+                    division,
                 }
                 .translate(argument)?,
             )
@@ -1259,8 +1272,9 @@ impl Names for MetricScope<'_, '_> {
             .ast
             .clone()
             .ok_or_else(|| Failure::new(Code::UnknownReference, "El campo tiene errores."))?;
+        let division = field.division;
         let timezone = converter.timezone(d, f);
-        converter.row_expression(d, &ast, timezone)
+        converter.row_expression(d, &ast, timezone, division)
     }
 
     fn timezone(&self) -> Option<&IanaZoneId> {

@@ -206,6 +206,7 @@ struct FieldState<'a> {
     path: String,
     expression_path: String,
     extension: FieldExtension,
+    division: Division,
     ast: Option<Expr>,
     /// The CSMIR field, when the expression is a bare column.
     column: Option<StableId>,
@@ -391,6 +392,7 @@ impl<'a> Converter<'a> {
                 "time_role y unit describen una columna; este campo es calculado.",
             );
         }
+        let division = Division::for_expression(&field.expression, extension.zero_division);
         state.fields.push(FieldState {
             ossie: field,
             normalized: normalize_identifier(&field.name),
@@ -398,6 +400,7 @@ impl<'a> Converter<'a> {
             path,
             expression_path,
             extension,
+            division,
             ast,
             column,
         });
@@ -715,7 +718,8 @@ impl<'a> Converter<'a> {
                     continue;
                 };
                 let timezone = self.timezone(d, f);
-                match self.row_expression(d, &ast, timezone) {
+                let division = self.datasets[d].fields[f].division;
+                match self.row_expression(d, &ast, timezone, division) {
                     Ok(expression) => self.check_datatype(d, f, &expression.value_type),
                     Err(failure) => self.fail(&path, failure),
                 }
@@ -756,6 +760,7 @@ impl<'a> Converter<'a> {
         d: usize,
         ast: &Expr,
         timezone: Option<IanaZoneId>,
+        division: Division,
     ) -> Result<ScalarExpr, Failure> {
         let mut scope = RowScope {
             converter: self,
@@ -764,7 +769,7 @@ impl<'a> Converter<'a> {
         };
         Translator {
             names: &mut scope,
-            division: Division::default(),
+            division,
         }
         .translate(ast)
     }
@@ -811,7 +816,8 @@ impl<'a> Converter<'a> {
             }
             (None, Some(ast)) => {
                 let timezone = self.timezone(d, f);
-                self.row_expression(d, &ast, timezone)
+                let division = self.datasets[d].fields[f].division;
+                self.row_expression(d, &ast, timezone, division)
             }
             (None, None) => return,
         };

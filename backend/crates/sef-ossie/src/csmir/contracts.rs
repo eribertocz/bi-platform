@@ -192,7 +192,7 @@ impl Converter<'_> {
     ) -> Result<Allocation, Failure> {
         let ast = crate::expression::parse(&declared.weight)
             .map_err(|diagnostic| Failure::new(diagnostic.code, diagnostic.message))?;
-        let weight = self.row_expression(bridge, &ast, None)?;
+        let weight = self.row_expression(bridge, &ast, None, super::scalar::Division::default())?;
         let ValueType::Decimal(decimal) = weight.value_type else {
             return Err(Failure::new(
                 Code::TypeMismatch,

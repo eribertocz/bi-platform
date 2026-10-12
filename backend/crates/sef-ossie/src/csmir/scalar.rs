@@ -92,6 +92,32 @@ impl Default for Division {
     }
 }
 
+impl Division {
+    /// Defaults follow the selected dialect, including when alternatives are
+    /// reordered. An explicit extension takes precedence over that default.
+    pub(crate) fn for_expression(
+        expression: &crate::document::Expression,
+        declared: Option<crate::extension::ZeroDivisionDeclaration>,
+    ) -> Self {
+        use crate::document::Dialect;
+        use crate::extension::ZeroDivisionDeclaration;
+        let zero = match declared {
+            Some(ZeroDivisionDeclaration::Error) => ZeroDivisionPolicy::Error,
+            None if expression
+                .executable()
+                .is_some_and(|(_, e)| e.dialect == Dialect::AnsiSql) =>
+            {
+                ZeroDivisionPolicy::Error
+            }
+            Some(ZeroDivisionDeclaration::Null) | None => ZeroDivisionPolicy::Null,
+        };
+        Self {
+            zero,
+            ..Self::default()
+        }
+    }
+}
+
 pub(crate) struct Translator<'n, N: Names> {
     pub names: &'n mut N,
     pub division: Division,
