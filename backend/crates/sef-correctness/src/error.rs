@@ -1,11 +1,11 @@
-//! Structured semantic errors (`04_CORRECTNESS_AND_PLANNING.md`, Part I
-//! §21): stable codes, never backend strings. A rejection produces no plan.
+//! Rejections as the stable semantic diagnostic (`04_CORRECTNESS_AND_PLANNING.md`
+//! Part VIII §32), shared with model compilation: code, phase, refs and
+//! evidence are the machine contract; the message is for humans only.
 
-use std::fmt;
-
+use sef_model_ir::diagnostic::{Diagnostic, ErrorCode, Evidence, Phase, Severity};
 use sef_model_ir::identity::StableId;
 
-/// Where in the analysis a rejection arises (§21.1).
+/// The analysis area a code belongs to (§21.1), for grouping in reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ErrorDomain {
     Query,
@@ -17,6 +17,7 @@ pub enum ErrorDomain {
     Time,
     Policy,
     Unsupported,
+    Model,
 }
 
 impl ErrorDomain {
@@ -32,115 +33,83 @@ impl ErrorDomain {
             Self::Time => "TIME",
             Self::Policy => "POLICY",
             Self::Unsupported => "UNSUPPORTED",
-        }
-    }
-}
-
-/// Stable external codes (§21.2). Model-domain codes, including an
-/// unproven cardinality (`INVALID_RELATIONSHIP_CONTRACT`), are reported by
-/// CSMIR compilation, which is this engine's precondition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SemanticErrorCode {
-    AmbiguousRelationshipPath,
-    InvalidRelationshipRole,
-    UnresolvedFanout,
-    InvalidGrainTransition,
-    GrainRefinementUnsupported,
-    IllegalReaggregation,
-    IllegalTemporalReaggregation,
-    IncompatibleTypes,
-    InvalidWindowSemantics,
-    PolicyContextMissing,
-    UnsupportedSemanticConstruct,
-}
-
-impl SemanticErrorCode {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::AmbiguousRelationshipPath => "AMBIGUOUS_RELATIONSHIP_PATH",
-            Self::InvalidRelationshipRole => "INVALID_RELATIONSHIP_ROLE",
-            Self::UnresolvedFanout => "UNRESOLVED_FANOUT",
-            Self::InvalidGrainTransition => "INVALID_GRAIN_TRANSITION",
-            Self::GrainRefinementUnsupported => "GRAIN_REFINEMENT_UNSUPPORTED",
-            Self::IllegalReaggregation => "ILLEGAL_REAGGREGATION",
-            Self::IllegalTemporalReaggregation => "ILLEGAL_TEMPORAL_REAGGREGATION",
-            Self::IncompatibleTypes => "INCOMPATIBLE_TYPES",
-            Self::InvalidWindowSemantics => "INVALID_WINDOW_SEMANTICS",
-            Self::PolicyContextMissing => "POLICY_CONTEXT_MISSING",
-            Self::UnsupportedSemanticConstruct => "UNSUPPORTED_SEMANTIC_CONSTRUCT",
+            Self::Model => "MODEL",
         }
     }
 
+    /// The domain of a diagnostic code.
     #[must_use]
-    pub const fn domain(self) -> ErrorDomain {
-        match self {
-            Self::AmbiguousRelationshipPath | Self::InvalidRelationshipRole => {
-                ErrorDomain::Relationship
+    pub const fn of(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::AmbiguousRelationshipPath | ErrorCode::InvalidRelationshipRole => {
+                Self::Relationship
             }
-            Self::UnresolvedFanout => ErrorDomain::Fanout,
-            Self::InvalidGrainTransition
-            | Self::GrainRefinementUnsupported
-            | Self::IllegalReaggregation => ErrorDomain::Grain,
-            Self::IllegalTemporalReaggregation => ErrorDomain::Time,
-            Self::IncompatibleTypes => ErrorDomain::TypeUnit,
-            Self::InvalidWindowSemantics => ErrorDomain::Metric,
-            Self::PolicyContextMissing => ErrorDomain::Policy,
-            Self::UnsupportedSemanticConstruct => ErrorDomain::Unsupported,
+            ErrorCode::UnresolvedFanout => Self::Fanout,
+            ErrorCode::InvalidGrainTransition
+            | ErrorCode::GrainRefinementUnsupported
+            | ErrorCode::IllegalReaggregation
+            | ErrorCode::InvalidGrain => Self::Grain,
+            ErrorCode::IllegalTemporalReaggregation | ErrorCode::AmbiguousTemporalSelection => {
+                Self::Time
+            }
+            ErrorCode::IncompatibleTypes
+            | ErrorCode::IncompatibleUnits
+            | ErrorCode::MissingUnitConversion => Self::TypeUnit,
+            ErrorCode::InvalidWindowSemantics | ErrorCode::InvalidMetricRecomposition => {
+                Self::Metric
+            }
+            ErrorCode::PolicyContextMissing | ErrorCode::PolicyViolation => Self::Policy,
+            ErrorCode::UnsupportedSemanticConstruct => Self::Unsupported,
+            _ => Self::Model,
         }
     }
 }
 
-/// One rejection: what, where in the query, which model objects, and why.
-/// Suggestions help the caller disambiguate; they never mutate the query.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SemanticError {
-    pub code: SemanticErrorCode,
-    /// JSON path into the bound query (`/blocks/0/selections/1`).
-    pub path: String,
-    pub object_refs: Vec<StableId>,
-    pub message: String,
-    pub suggestions: Vec<String>,
-}
-
-impl SemanticError {
-    pub(crate) fn new(
-        code: SemanticErrorCode,
-        path: impl Into<String>,
-        object_refs: impl IntoIterator<Item = StableId>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            code,
-            path: path.into(),
-            object_refs: object_refs.into_iter().collect(),
-            message: message.into(),
-            suggestions: Vec::new(),
-        }
-    }
-
-    pub(crate) fn suggest(mut self, suggestions: impl IntoIterator<Item = String>) -> Self {
-        self.suggestions.extend(suggestions);
-        self
-    }
-
-    #[must_use]
-    pub fn domain(&self) -> ErrorDomain {
-        self.code.domain()
+/// A correctness rejection: `path` is where in the bound query it arises,
+/// `refs` the model objects involved (the first one is primary).
+pub(crate) fn rejection(
+    code: ErrorCode,
+    path: impl Into<String>,
+    refs: impl IntoIterator<Item = StableId>,
+    message: impl Into<String>,
+) -> Diagnostic {
+    let mut refs = refs.into_iter();
+    Diagnostic {
+        schema_version: "0.1",
+        code,
+        phase: Phase::Correctness,
+        severity: Severity::Error,
+        primary_ref: refs.next(),
+        related_refs: refs.collect(),
+        query_refs: vec![path.into()],
+        evidence: vec![Evidence::Constraint {
+            name: code.as_str().to_owned(),
+        }],
+        suggestion_codes: Vec::new(),
+        message: message.into(),
+        source_span: None,
     }
 }
 
-impl fmt::Display for SemanticError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} {}: {}",
-            self.code.domain().as_str(),
-            self.code.as_str(),
-            self.path,
-            self.message
+/// Canonical order of diagnostics: by query location, then code and refs,
+/// so the same rejection always reads the same.
+pub(crate) fn canonical(mut found: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    found.sort_by(|a, b| {
+        (
+            &a.query_refs,
+            a.code,
+            &a.primary_ref,
+            &a.related_refs,
+            &a.message,
         )
-    }
+            .cmp(&(
+                &b.query_refs,
+                b.code,
+                &b.primary_ref,
+                &b.related_refs,
+                &b.message,
+            ))
+    });
+    found.dedup();
+    found
 }
-
-impl std::error::Error for SemanticError {}

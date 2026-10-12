@@ -21,7 +21,9 @@ use sef_query_ir::query::{
     SemanticQueryBlock, SemanticQuerySet, TimeDimensionSelection,
 };
 
-use crate::error::{SemanticError, SemanticErrorCode as Code};
+use sef_model_ir::diagnostic::{Diagnostic, ErrorCode as Code};
+
+use crate::error::{canonical, rejection};
 use crate::graph::{self, Path, Traversal};
 use crate::outcome::{BlockValidation, Fact, Obligation, ValidatedQuery, atom_text};
 
@@ -35,13 +37,13 @@ pub struct SemanticContext {
 /// Proves a bound query meaningful against a compiled model, or rejects it.
 ///
 /// # Errors
-/// Every [`SemanticError`] found, in canonical order. A rejected query
-/// produces no facts and no obligations.
+/// Every rejection found, as stable diagnostics (phase `Correctness`) in
+/// canonical order. A rejected query produces no facts and no obligations.
 pub fn validate(
     model: &CompiledSemanticModel,
     query: &SemanticQuerySet,
     context: &SemanticContext,
-) -> Result<ValidatedQuery, Vec<SemanticError>> {
+) -> Result<ValidatedQuery, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut blocks = Vec::with_capacity(query.blocks.len());
     for (b, block) in query.blocks.iter().enumerate() {
@@ -56,9 +58,7 @@ pub fn validate(
             blocks,
         })
     } else {
-        errors.sort();
-        errors.dedup();
-        Err(errors)
+        Err(canonical(errors))
     }
 }
 
@@ -76,7 +76,7 @@ struct Analysis<'m> {
     path: String,
     facts: BTreeSet<Fact>,
     obligations: BTreeSet<Obligation>,
-    errors: Vec<SemanticError>,
+    errors: Vec<Diagnostic>,
     /// Resolved paths by (anchor dataset, dimension); `None` once rejected.
     paths: BTreeMap<(StableId, QualifiedDimensionRef), Option<Path<'m>>>,
     /// Datasets whose rows the request reads, for policy attachment.
@@ -97,11 +97,11 @@ impl<'m> Analysis<'m> {
         }
     }
 
-    fn reject(&mut self, error: SemanticError) {
+    fn reject(&mut self, error: Diagnostic) {
         self.errors.push(error);
     }
 
-    fn block(mut self, block: &SemanticQueryBlock) -> Result<BlockValidation, Vec<SemanticError>> {
+    fn block(mut self, block: &SemanticQueryBlock) -> Result<BlockValidation, Vec<Diagnostic>> {
         let requested = block.requested_grain();
         self.facts.insert(Fact::RequestedGrain(requested.clone()));
         let usages = self.usages(block);
@@ -283,27 +283,26 @@ impl<'m> Analysis<'m> {
                 None
             }
             many => {
+                // Machine-stable suggestions: the role set of each candidate.
                 let suggestions: Vec<String> = many
                     .iter()
                     .map(|path| {
                         let roles: Vec<&str> = path.roles().into_iter().collect();
-                        format!("Califica la dimensión con el rol {}.", roles.join(" + "))
+                        format!("qualify-role:{}", roles.join("+"))
                     })
                     .collect();
-                self.reject(
-                    SemanticError::new(
-                        Code::AmbiguousRelationshipPath,
-                        usage.path.clone(),
-                        [anchor.clone(), usage.dimension.dimension.clone()],
-                        format!(
-                            "{} se alcanza desde {anchor} por {} caminos con significados distintos; \
-                             indica cuál con un rol.",
-                            usage.dimension.dimension,
-                            many.len()
-                        ),
-                    )
-                    .suggest(suggestions),
+                let mut error = rejection(
+                    Code::AmbiguousRelationshipPath,
+                    usage.path.clone(),
+                    [anchor.clone(), usage.dimension.dimension.clone()],
+                    format!(
+                        "{} se alcanza desde {anchor} por {} caminos con significados distintos;                          indica cuál con un rol.",
+                        usage.dimension.dimension,
+                        many.len()
+                    ),
                 );
+                error.suggestion_codes = suggestions;
+                self.reject(error);
                 None
             }
         }
@@ -312,7 +311,7 @@ impl<'m> Analysis<'m> {
     fn unreachable(&mut self, anchor: &StableId, usage: &Usage<'_>, all: &[Path<'m>]) {
         let dimension = &usage.dimension.dimension;
         if !usage.dimension.roles.is_empty() && !all.is_empty() {
-            self.reject(SemanticError::new(
+            self.reject(rejection(
                 Code::InvalidRelationshipRole,
                 usage.path.clone(),
                 [anchor.clone(), dimension.clone()],
@@ -346,7 +345,7 @@ impl<'m> Analysis<'m> {
                 format!("Ninguna relación lleva de {anchor} a {dimension}."),
             )
         };
-        self.reject(SemanticError::new(
+        self.reject(rejection(
             code,
             usage.path.clone(),
             [anchor.clone(), dimension.clone()],
@@ -421,7 +420,7 @@ impl<'m> Analysis<'m> {
             _ => {
                 let mut refs = vec![metric.metadata.id().clone()];
                 refs.extend(path.relationships());
-                self.reject(SemanticError::new(
+                self.reject(rejection(
                     Code::UnresolvedFanout,
                     usage.path.clone(),
                     refs,
@@ -497,7 +496,7 @@ impl<'m> Analysis<'m> {
         for rule in &metric.aggregation_contract.axis_rules {
             if rule.behavior == AxisBehavior::Forbidden && !grouped_exactly(&rule.axis, requested) {
                 let temporal = self.is_temporal_axis(&rule.axis);
-                self.reject(SemanticError::new(
+                self.reject(rejection(
                     if temporal {
                         Code::IllegalTemporalReaggregation
                     } else {
@@ -531,7 +530,7 @@ impl<'m> Analysis<'m> {
                     partition_by: partition_by.clone(),
                 });
             } else {
-                self.reject(SemanticError::new(
+                self.reject(rejection(
                     Code::InvalidWindowSemantics,
                     path,
                     [id.clone(), base_metric.clone()],
@@ -627,7 +626,7 @@ impl<'m> Analysis<'m> {
                 AxisBehavior::PeriodEnd | AxisBehavior::PeriodStart
             );
             if selects && !grouped_exactly(&rule.axis, requested) {
-                self.reject(SemanticError::new(
+                self.reject(rejection(
                     Code::IllegalTemporalReaggregation,
                     path,
                     [id.clone()],
@@ -687,7 +686,7 @@ impl<'m> Analysis<'m> {
                 .as_ref()
                 .is_some_and(|zone| zone != &bucket.timezone)
             {
-                self.reject(SemanticError::new(
+                self.reject(rejection(
                     Code::InvalidGrainTransition,
                     format!("{}/timezone", usage.path),
                     [id.clone()],
@@ -699,7 +698,7 @@ impl<'m> Analysis<'m> {
                 return;
             }
             if !rolls_up(bucket.grain, time.grain) {
-                self.reject(SemanticError::new(
+                self.reject(rejection(
                     Code::GrainRefinementUnsupported,
                     usage.path.clone(),
                     [id.clone()],
@@ -729,14 +728,14 @@ impl<'m> Analysis<'m> {
         match &dimension.value_type {
             ValueType::Date => {
                 if time.timezone.is_some() {
-                    self.reject(SemanticError::new(
+                    self.reject(rejection(
                         Code::InvalidGrainTransition,
                         format!("{}/timezone", usage.path),
                         [id.clone()],
                         format!("{id} es una fecha de calendario: no tiene zona horaria."),
                     ));
                 } else if time.grain < TimeGrain::Day {
-                    self.reject(SemanticError::new(
+                    self.reject(rejection(
                         Code::GrainRefinementUnsupported,
                         usage.path.clone(),
                         [id.clone()],
@@ -766,7 +765,7 @@ impl<'m> Analysis<'m> {
                                 grain: time.grain,
                             });
                     }
-                    None => self.reject(SemanticError::new(
+                    None => self.reject(rejection(
                         Code::InvalidGrainTransition,
                         format!("{}/timezone", usage.path),
                         [id.clone()],
@@ -780,7 +779,7 @@ impl<'m> Analysis<'m> {
             }
             _ => {
                 if time.timezone.is_some() {
-                    self.reject(SemanticError::new(
+                    self.reject(rejection(
                         Code::InvalidGrainTransition,
                         format!("{}/timezone", usage.path),
                         [id.clone()],
@@ -827,7 +826,7 @@ impl<'m> Analysis<'m> {
                 match self.context.slots.get(&slot.name) {
                     None => {
                         bound = false;
-                        self.reject(SemanticError::new(
+                        self.reject(rejection(
                             Code::PolicyContextMissing,
                             format!("/context/slots/{}", slot.name),
                             [policy_id.clone(), scope.clone()],
@@ -840,7 +839,7 @@ impl<'m> Analysis<'m> {
                     }
                     Some(value) if !compatible(&value.value_type(), &slot.value_type) => {
                         bound = false;
-                        self.reject(SemanticError::new(
+                        self.reject(rejection(
                             Code::IncompatibleTypes,
                             format!("/context/slots/{}", slot.name),
                             [policy_id.clone()],
@@ -870,8 +869,8 @@ impl<'m> Analysis<'m> {
 
 // ---- Helpers ---------------------------------------------------------------------
 
-fn unknown(id: &StableId, path: String) -> SemanticError {
-    SemanticError::new(
+fn unknown(id: &StableId, path: String) -> Diagnostic {
+    rejection(
         Code::UnsupportedSemanticConstruct,
         path,
         [id.clone()],

@@ -5,7 +5,8 @@
 mod common;
 
 use common::{bound, dimension, metric, model, query, zoned};
-use sef_correctness::{SemanticContext, SemanticErrorCode as Code, ValidatedQuery, validate};
+use sef_correctness::{SemanticContext, ValidatedQuery, validate};
+use sef_model_ir::diagnostic::{Diagnostic, ErrorCode as Code};
 use sef_model_ir::model::{CompiledSemanticModel, ModelDefinition};
 use sef_model_ir::time::TimeGrain;
 use sef_model_ir::types::Literal;
@@ -23,7 +24,7 @@ fn check(
     model: &CompiledSemanticModel,
     request: &UnboundQuerySet,
     context: &SemanticContext,
-) -> Result<ValidatedQuery, Vec<sef_correctness::SemanticError>> {
+) -> Result<ValidatedQuery, Vec<Diagnostic>> {
     let query = sef_query_ir::bind(request, model.definition())
         .unwrap_or_else(|errors| panic!("must bind: {errors:#?}"));
     validate(model, &query, context)
@@ -38,9 +39,8 @@ fn rejects(
 ) {
     let errors = check(model, request, context).expect_err("must be rejected");
     assert!(
-        errors
-            .iter()
-            .any(|error| error.code == code && error.path == path),
+        errors.iter().any(|error| error.code == code
+            && error.query_refs.first().map(String::as_str) == Some(path)),
         "expected {} at {path}, got:\n{}",
         code.as_str(),
         errors
@@ -251,6 +251,7 @@ fn a_policy_value_of_the_wrong_type_is_rejected() {
         errors
             .iter()
             .any(|error| error.code == Code::IncompatibleTypes
-                && error.path == "/context/slots/tenant_id")
+                && error.query_refs.first().map(String::as_str)
+                    == Some("/context/slots/tenant_id"))
     );
 }

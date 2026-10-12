@@ -27,6 +27,15 @@ pub enum ErrorCode {
     DivisionByZero,
     InvalidCanonicalValue,
     InvalidGrain,
+    // Query correctness (`04_CORRECTNESS_AND_PLANNING.md` Part I §21.2).
+    AmbiguousRelationshipPath,
+    InvalidRelationshipRole,
+    UnresolvedFanout,
+    InvalidGrainTransition,
+    GrainRefinementUnsupported,
+    IllegalReaggregation,
+    IllegalTemporalReaggregation,
+    PolicyContextMissing,
 }
 
 impl ErrorCode {
@@ -57,13 +66,24 @@ impl ErrorCode {
             Self::DivisionByZero => "DIVISION_BY_ZERO",
             Self::InvalidCanonicalValue => "INVALID_CANONICAL_VALUE",
             Self::InvalidGrain => "INVALID_GRAIN",
+            Self::AmbiguousRelationshipPath => "AMBIGUOUS_RELATIONSHIP_PATH",
+            Self::InvalidRelationshipRole => "INVALID_RELATIONSHIP_ROLE",
+            Self::UnresolvedFanout => "UNRESOLVED_FANOUT",
+            Self::InvalidGrainTransition => "INVALID_GRAIN_TRANSITION",
+            Self::GrainRefinementUnsupported => "GRAIN_REFINEMENT_UNSUPPORTED",
+            Self::IllegalReaggregation => "ILLEGAL_REAGGREGATION",
+            Self::IllegalTemporalReaggregation => "ILLEGAL_TEMPORAL_REAGGREGATION",
+            Self::PolicyContextMissing => "POLICY_CONTEXT_MISSING",
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
+    /// Compiling the semantic model (CSMIR).
     Model,
+    /// Validating a bound query against a compiled model.
+    Correctness,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

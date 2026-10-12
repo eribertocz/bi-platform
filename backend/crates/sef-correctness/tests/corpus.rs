@@ -9,7 +9,8 @@ mod common;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use sef_correctness::{SemanticContext, SemanticErrorCode as Code, ValidatedQuery, validate};
+use sef_correctness::{SemanticContext, ValidatedQuery, validate};
+use sef_model_ir::diagnostic::{Diagnostic, ErrorCode as Code, Evidence};
 use sef_model_ir::types::Literal;
 use sef_ossie::document::{Dialect, DialectExpression, Expression, Metric};
 use sef_query_ir::unbound::{UnboundDimension, UnboundItem, UnboundSelection};
@@ -30,7 +31,7 @@ fn validated(case: u8) -> ValidatedQuery {
         .unwrap_or_else(|errors| panic!("CASE-{case:03} must validate: {errors:#?}"))
 }
 
-fn rejected(case: u8) -> Vec<sef_correctness::SemanticError> {
+fn rejected(case: u8) -> Vec<Diagnostic> {
     validate(&common::model(case), &common::bound(case), &context(case))
         .expect_err("must be rejected")
 }
@@ -150,8 +151,8 @@ fn case_016_rejects_the_ambiguous_customer_role() {
         errors
             .iter()
             .any(|error| error.code == Code::AmbiguousRelationshipPath
-                && error.path == "/blocks/0/selections/1"
-                && error.suggestions.len() == 2)
+                && error.query_refs.first().map(String::as_str) == Some("/blocks/0/selections/1")
+                && error.suggestion_codes.len() == 2)
     );
 }
 
@@ -179,30 +180,34 @@ fn case_016_validates_once_the_role_is_stated() {
 fn case_017_never_reaches_the_engine() {
     // The corpus document holds the two valid metrics; the requested
     // `combined = revenue_usd + revenue_bob` is rejected when the model
-    // compiles (`expected/error.json`: INCOMPATIBLE_UNITS naming USD and
-    // BOB), so no query can ever reach the engine with it.
-    let errors = common::compiled_with(17, |document| {
-        document.metrics.push(Metric {
-            name: "combined".to_owned(),
-            expression: Expression {
-                dialects: vec![DialectExpression {
-                    dialect: Dialect::OssieSql2026,
-                    expression: "revenue_usd + revenue_bob".to_owned(),
-                }],
-            },
-            description: None,
-            datatype: None,
-            ai_context: None,
-            custom_extensions: Vec::new(),
-        });
-    })
-    .expect_err("incompatible units");
+    // compiles, with the structured evidence of `expected/error.json`
+    // (INCOMPATIBLE_UNITS naming USD and BOB): no query can reach the engine.
+    let mut document = common::document(17);
+    document.metrics.push(Metric {
+        name: "combined".to_owned(),
+        expression: Expression {
+            dialects: vec![DialectExpression {
+                dialect: Dialect::OssieSql2026,
+                expression: "revenue_usd + revenue_bob".to_owned(),
+            }],
+        },
+        description: None,
+        datatype: None,
+        ai_context: None,
+        custom_extensions: Vec::new(),
+    });
+    let definition =
+        sef_ossie::csmir::to_csmir(&document, &common::catalog(17), &common::options(17))
+            .expect("the document converts; the units clash in CSMIR");
+    let errors = definition.compile().expect_err("incompatible units");
     assert!(
         errors
             .iter()
-            .any(|error| error.message.contains("INCOMPATIBLE_UNITS")
-                && error.message.contains("USD")
-                && error.message.contains("BOB")),
+            .any(|error| error.code == Code::IncompatibleUnits
+                && error.evidence.contains(&Evidence::TypeMismatch {
+                    expected: "USD".to_owned(),
+                    actual: "BOB".to_owned(),
+                })),
         "{errors:#?}"
     );
 }
@@ -230,7 +235,8 @@ fn case_015_without_its_tenant_is_rejected() {
         errors
             .iter()
             .any(|error| error.code == Code::PolicyContextMissing
-                && error.path == "/context/slots/tenant_id")
+                && error.query_refs.first().map(String::as_str)
+                    == Some("/context/slots/tenant_id"))
     );
 }
 

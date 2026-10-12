@@ -60,21 +60,21 @@ pub fn model(case: u8) -> CompiledSemanticModel {
 
 /// Compiles the corpus document of `case` against its catalog.
 pub fn compiled(case: u8) -> Result<CompiledSemanticModel, Vec<sef_ossie::Diagnostic>> {
-    compiled_with(case, |_| {})
+    compile(&document(case), &catalog(case), &options(case))
 }
 
-/// Compiles the corpus document of `case`, changed first by `change`.
-pub fn compiled_with(
-    case: u8,
-    change: impl FnOnce(&mut sef_ossie::SemanticModel),
-) -> Result<CompiledSemanticModel, Vec<sef_ossie::Diagnostic>> {
-    let mut document = sef_ossie::load(&read(&format!("CASE-{case:03}.yaml")))
+/// The Ossie document of `case`.
+pub fn document(case: u8) -> sef_ossie::SemanticModel {
+    sef_ossie::load(&read(&format!("CASE-{case:03}.yaml")))
         .expect("corpus document")
-        .model;
-    change(&mut document);
+        .model
+}
+
+/// The typed catalog of `case`.
+pub fn catalog(case: u8) -> Catalog {
     let relations: BTreeMap<String, BTreeMap<String, String>> =
         serde_saphyr::from_str(&read(&format!("CASE-{case:03}.catalog.yaml"))).expect("catalog");
-    let catalog = Catalog {
+    Catalog {
         relations: relations
             .into_iter()
             .map(|(name, columns)| {
@@ -97,12 +97,14 @@ pub fn compiled_with(
                 (name, relation)
             })
             .collect(),
-    };
-    let options = Options {
+    }
+}
+
+pub fn options(case: u8) -> Options {
+    Options {
         namespace: "corpus".to_owned(),
         model: format!("case-{case:03}"),
-    };
-    compile(&document, &catalog, &options)
+    }
 }
 
 pub fn metric(name: &str) -> UnboundSelection {
