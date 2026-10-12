@@ -35,8 +35,15 @@ Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; �
 | Registro de **quién consultó qué y cuándo** | 🔄 Auditoría con cadena de hashes (#71, acción `query`) |
 
 **Mejora: el "recibo del número".**
-- Cada resultado lleva la huella de la consulta (SQIR), la versión del modelo (CSMIR), la huella del plan (SEIR) y la versión de datos de DuckLake.
-- Con eso cualquier número se **reproduce exactamente** meses después y se demuestra qué definición y qué datos lo produjeron.
+- Cada resultado lleva un recibo con:
+  - la consulta canónica (SQIR), no solo su huella, porque una huella no reconstruye la consulta;
+  - la versión del modelo (CSMIR) y la huella del plan (SEIR);
+  - el origen de los datos, según el modo (ADR 0009):
+    - **materializado**: la versión de DuckLake que se leyó;
+    - **en vivo**: la fuente, el instante de la lectura y sus límites. No hay versión que prometer.
+- El recibo declara su **capacidad de reproducción**:
+  - **exacta** solo mientras se conserven todas las versiones necesarias, dentro de la retención declarada del lago;
+  - **solo explicable** si la versión de datos expiró o la consulta fue en vivo: se demuestra qué definición se usó y qué se observó, sin prometer el mismo resultado.
 
 ## 3. Seguridad por diseño
 **La seguridad se aplica antes de que los datos salgan del motor; nunca solo en el frontend.**
@@ -48,8 +55,8 @@ Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; �
 | Roles, permisos granulares y mínimo privilegio | ⏳ Motor de permisos con denegación por defecto (ADR 0010, #69) |
 | SSO: OIDC | 🔄 #70 |
 | SSO: SAML y SCIM | ⏳ Después de G2, para entornos empresariales |
-| Datos sensibles nunca sin filtrar hacia el frontend | ✅ Punto único de aplicación (ADR 0010) |
-| El modo avanzado de gráficos no puede saltarse la seguridad | ✅ Los datos ya llegan filtrados; ver la mejora |
+| Datos sensibles nunca sin filtrar hacia el frontend | 🔄 Punto único decidido (ADR 0010) pero **aún no integrado**: hoy una sesión consulta todas las filas sintéticas. Las piezas (#69, #70, #83 y #86) todavía no forman una vía de consulta |
+| El modo avanzado de gráficos no puede saltarse la seguridad | ⏳ Cuando el punto único esté integrado, los datos llegarán ya filtrados; ver la mejora |
 
 **Mejora: el modo avanzado de ECharts es un riesgo de inyección (XSS).**
 - Sus opciones admiten **funciones JavaScript** (por ejemplo `formatter`) y HTML en los *tooltips*.
@@ -67,7 +74,10 @@ Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; �
 | Caché semántica, no de SQL | ⏳ Bloqueada hasta el punto único (ADR 0010) |
 | *Time travel* | ⏳ Versiones de DuckLake ("ver como estaba el martes") |
 
-**Mejora: la clave de la caché.** Incluye la consulta canónica, la versión del modelo y de los datos, **y el contexto de seguridad de quien pregunta**. Sin ese último componente, un usuario podría recibir el resultado guardado de otro con más permisos.
+**Mejora: la clave de la caché.**
+- Incluye la consulta canónica, la versión del modelo y de los datos, **y la huella de la decisión de permisos** de quien pregunta: versión de las políticas y atributos que intervinieron (ADR 0010 §1 y ADR 0012).
+- Sin ese componente, un usuario podría recibir el resultado guardado de otro con más permisos.
+- El contexto del usuario no basta. Al cambiar una política o un atributo (una revocación), la huella cambia y lo cacheado deja de servir.
 
 ## 5. Separación de capas
 **El frontend nunca conoce la estructura física de las tablas.**
@@ -93,7 +103,9 @@ Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; �
 - **Avanzado:** casi todo el objeto de ECharts, solo JSON y validado (ley 3); los datos llegan ya filtrados.
 
 **Mejora:**
-- Los tres niveles son vistas del **mismo** contrato visual (`VisualSpec`, G4), así que se puede bajar de nivel sin perder nada.
+- Los tres niveles son vistas del **mismo** contrato visual (`VisualSpec`, G4).
+- Al bajar de nivel, el contrato se conserva completo: el nivel básico **señala** las opciones que no sabe editar y las deja intactas. Nunca las reescribe ni las pierde en silencio.
+- No toda opción avanzada tiene representación básica, ni se promete.
 - La misma idea vale para todo el producto: lienzo o código en el ELT, formulario o YAML en las métricas.
 
 ## 7. Rendimiento predecible
@@ -131,7 +143,9 @@ Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; �
 - ⏳ Tasa de aciertos de la caché.
 - ⏳ Alertas de degradación.
 
-**Mejora: reproducir desde el log.** El log de cada consulta guarda su recibo (ley 2), no el SQL. Como el motor es determinista, la consulta problemática se reproduce exactamente con el mismo modelo y los mismos datos.
+**Mejora: reproducir desde el log.**
+- El log de cada consulta guarda su recibo (ley 2), no el SQL.
+- Como el motor es determinista, la consulta problemática se reproduce exactamente con el mismo modelo y los mismos datos, **si el recibo declara reproducción exacta** y esos datos siguen retenidos.
 
 ## 10. Extensibilidad controlada
 **Se extiende sin romper el núcleo.**
@@ -140,7 +154,7 @@ Para cada ley se indica cómo la cumple el proyecto (✅ hecho; 🔄 en curso; �
 |---|---|
 | Conectores aislados | ✅ Adaptadores (ADR 0008) |
 | Visualizaciones nuevas sin tocar el motor | ⏳ Registro de renderizadores sobre `VisualSpec` (G4) |
-| API pública estable | ✅ OpenAPI versionada; el motor también como biblioteca y como servicio (ADR 0011) |
+| API pública estable | ✅ OpenAPI versionada. ⏳ El motor como biblioteca al cerrar G2 y como servicio más adelante (ADR 0011) |
 | Modo avanzado aislado | Ver la ley 3 |
 
 ## Tres leyes que añadimos
