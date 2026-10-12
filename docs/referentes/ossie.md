@@ -4,6 +4,7 @@
 - Especificación núcleo: `core-spec/spec.md`, versión **0.2.0.dev0 (borrador, mutable)**, con JSON Schema en `core-spec/ossie-schema.json`.
 - Lenguaje de expresiones: `core-spec/expression_language.md`, estado *Proposed Final*. Su grupo de trabajo incluye Snowflake, Databricks, dbt Labs, Cube, Lightdash, ThoughtSpot, Salesforce, Starburst y Malloy.
 - Última etiqueta publicada: `osi-0.1.1-rc1`.
+- Estructura completa del estándar, lenguaje de expresiones, propuestas en curso y lo que le falta: [`ossie-especificacion.md`](ossie-especificacion.md).
 
 **Decisión de base:** compatibilidad con Ossie por diseño (memoria del proyecto; M10 §6.2: "primera apuesta de interoperabilidad semántica").
 
@@ -107,3 +108,31 @@ Es lo que es SEF, con su corpus de 21 casos. Con Ossie nativo y el corpus como c
    Propiedades con proptest.
 4. **Ossie → CSMIR:** relaciones muchos-a-uno con cardinalidad *declarada sin verificar*, métricas descompuestas en medidas primitivas y nuestras extensiones (`vendor_name: bi-platform`) para tiempo, unidades, políticas, formatos y conexión.
 5. **CSMIR → Ossie** para exportar, con **lista explícita de pérdidas**. Prueba de ida y vuelta sobre los modelos del corpus: la misma huella de CSMIR.
+
+## Cobertura por fases (objetivo del propietario, 2026-10-11)
+Lista de comprobación viva de lo que el motor entiende de Ossie 0.2.0.dev0.
+
+**Leyenda:**
+- ✅ **Hecho:** con pruebas, en `main` o en un PR abierto.
+- 🔄 **En curso.**
+- ⏳ **Pendiente,** con su Issue.
+
+**Formatos:** YAML y JSON, en lectura y en escritura (`sef_ossie::load`, `to_yaml`, `to_json`; YAML 1.2 contiene JSON). La prueba `backend/crates/sef-ossie/tests/conformance.rs` valida cada documento emitido contra `ossie-schema.json` y comprueba que vuelve igual desde YAML y desde JSON.
+
+| Fase | Capacidad | Estado |
+|---|---|---|
+| Básica | `version`, `name`, `datasets`, `source`, `fields`, `metrics`, `expression.dialects`; validación contra el esquema oficial | ✅ (#51, #54) |
+| Básica | Métrica simple (`SUM(orders.amount)`) | ✅ Ossie → CSMIR (#63) |
+| Básica | Calcular `ANSI_SQL` cuando falte `OSSIE_SQL_2026` | ⏳ #74 |
+| Básica | SQL generado desde el `source` del dataset | ⏳ planificador #46 y adaptador DuckDB #47 |
+| Intermedia | `description`; `primary_key`; `unique_keys`; `relationships` (también compuestas); `datatype` (comprobado contra el catálogo) | ✅ (#63) |
+| Intermedia | `dimension.is_time`; `ai_context` (texto o `instructions`/`synonyms`/`examples`) | ✅ validados (#51). ⏳ Llegan a la API, la UI y la IA con #75. |
+| Intermedia | Varios dialectos | ✅ se conservan. Solo se ejecuta el portable (`OSSIE_SQL_2026` y, con #74, `ANSI_SQL`); los de otros motores nunca se ejecutan en DuckDB. |
+| Intermedia | *Joins* automáticos por `relationships`; GROUP BY y filtros por dimensión | 🔄 consulta semántica (#73). ⏳ Corrección #45, planificador #46 y ejecución #47. |
+| Avanzada | Ratios, CASE, ventanas acumuladas, métricas entre datasets, campos calculados, `custom_extensions`, validación semántica, `Opaque` | ✅ los 21 casos del corpus (#63, #72) |
+| Avanzada | SQL sobre métricas (estilo Rill/MetricFlow) | ⏳ se compila a SQIR (#73) |
+| Avanzada | Exportación e importación (MetricFlow, Cube, LookML…) | ⏳ CSMIR → Ossie (#48, parte 4) y, después, los conversores del proyecto Ossie |
+| Completa | Seguridad por filas | ✅ en el modelo (#72). ⏳ Aplicada con #69 (ADR 0010). |
+| Completa | Linaje, frescura y confianza | ✅ Linaje: dependencias tipadas en CSMIR. ⏳ Frescura (por instantánea de DuckLake) y confianza (certificación, M10): pendientes. |
+| Completa | Pre-agregaciones | ⏳ G4 (medidas de *rollup* ya modelables, caso 018) |
+| Completa | Lenguaje de expresiones completo, varios modelos y ontología | ⏳ cuando el estándar lo publique; se seguirá su hoja de ruta (tabla anterior) |
