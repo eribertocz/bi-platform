@@ -18,6 +18,29 @@ El motor semántico **no contiene ningún motor de datos**.
 
 La decisión «un solo motor» (ADR 0001, #25) se refiere a otra cosa: el motor **interno** de la plataforma (lago DuckLake, ELT, caché, materializado) es DuckDB. El motor semántico puede consultar en vivo otros motores, como ClickHouse, a través de sus conectores (ADR 0002 y 0009).
 
+### Qué propone el documento con DataFusion y Polars, y cómo lo cubrimos
+DataFusion y Polars son **motores de ejecución**: calculan de verdad (agregan, agrupan, unen). El documento propone meter uno **dentro** del motor semántico (su capa 5) para que también calcule.
+
+Nosotros separamos **decidir** de **calcular**:
+
+```
+Ossie ──► motor semántico ──► plan certificado ──► conector ──► motor que calcula
+          (qué calcular y por qué                    (traduce)    DuckDB · ClickHouse · PostgreSQL
+           es correcto)
+```
+
+El papel de DataFusion o Polars lo cumple **DuckDB**, un motor del mismo tipo (columnar y vectorial), **fuera** del núcleo y detrás de su conector. Añadir otro duplicaría DuckDB; Polars salió del núcleo por decisión del propietario (#25).
+
+### Columnar, Arrow y lo demás, en la plataforma
+
+| Término del documento | Qué es | Dónde está |
+|---|---|---|
+| Columnar | Guardar y procesar por columnas: para sumar un importe solo se lee esa columna | DuckDB procesa por columnas; DuckLake guarda en Parquet (columnar) |
+| Arrow y *zero-copy* | Formato columnar estándar en memoria, que pasa entre componentes sin copiar ni convertir | Intercambio motor ↔ servidor para volúmenes grandes (ADR 0008); JSON exacto en pantallas |
+| Ejecución vectorial | Procesar bloques de miles de valores a la vez | DuckDB |
+| *Streaming* | Devolver resultados por lotes según salen | Arrow por lotes; falta usarlo en la API para respuestas grandes |
+| *Pre-aggregations* y *aggregate awareness* | Resúmenes ya calculados y elegir el menor que responde **correctamente** | Decisiones 1 y 2 del ELT («acelerar»), con prueba de que da la misma cifra |
+
 ## Ya contemplado o construido
 
 | Propuesta del documento | Dónde está |
@@ -58,7 +81,7 @@ La decisión «un solo motor» (ADR 0001, #25) se refiere a otra cosa: el motor 
 
 | Propuesta | Motivo |
 |---|---|
-| Motor de ejecución propio o extender DataFusion | El motor interno es DuckDB (ADR 0001, #25), ya vectorial y columnar; otros motores entran como conectores. Un motor de ejecución propio son años de trabajo sin mejorar la exactitud |
+| Motor de ejecución dentro del núcleo (propio, DataFusion o Polars) | Ese papel ya lo cumple DuckDB (ADR 0001, #25), columnar y vectorial, fuera del núcleo y detrás de su conector; otros motores entran también como conectores. Uno propio son años de trabajo sin mejorar la exactitud |
 | Optimizador por costes desde ya | Primero lo correcto: toda optimización tendrá que demostrar que da lo mismo que el plan de referencia certificado (§23 de la parte II de `docs/semantica/04_CORRECTNESS_AND_PLANNING.md`) |
 | Clúster distribuido (estilo Ballista) | Innecesario a la escala actual; el motor como servicio (ADR 0011) cubre el crecimiento previsible |
 | Tokio para ejecutar consultas | Las llamadas al motor bloquean y no pueden ir dentro de Tokio (AGENTS.md); por eso existe `bi-runtime` |
