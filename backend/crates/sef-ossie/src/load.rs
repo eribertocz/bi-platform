@@ -70,12 +70,22 @@ pub fn parse(text: &str) -> Result<SemanticModel, Diagnostic> {
     })
 }
 
-/// The document as YAML.
+/// The document as YAML that reads back to exactly the same model.
 ///
 /// # Errors
 /// Only if a value cannot be represented, which the typed model prevents.
 pub fn to_yaml(model: &SemanticModel) -> Result<String, serde_saphyr::ser::Error> {
-    serde_saphyr::to_string(model)
+    let plain = serde_saphyr::to_string(model)?;
+    // serde-saphyr 1.3 leaves strings unquoted when they start or end with
+    // a non-ASCII space (U+2000…), which its own reader then trims: the
+    // text would change on the way back. Plain style when it reads back
+    // identically; every string quoted otherwise.
+    if parse(&plain).is_ok_and(|read| &read == model) {
+        return Ok(plain);
+    }
+    let mut quoted = serde_saphyr::SerializerOptions::default();
+    quoted.quote_all = true;
+    serde_saphyr::to_string_with_options(model, quoted)
 }
 
 /// The document as pretty-printed JSON.
