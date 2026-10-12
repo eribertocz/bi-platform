@@ -1576,6 +1576,26 @@ impl<'a> Validator<'a> {
                     self.missing(owner, conversion);
                 }
             }
+            ScalarExprKind::Function {
+                function,
+                arguments,
+            } => {
+                for argument in arguments {
+                    self.scalar(argument, owner, dataset, slots, depth + 1);
+                }
+                match function.result(arguments) {
+                    Ok((value_type, unit)) => {
+                        self.same(
+                            &expr.value_type,
+                            expr.unit.as_ref(),
+                            &value_type,
+                            unit.as_ref(),
+                            owner,
+                        );
+                    }
+                    Err(reason) => self.error(ErrorCode::IncompatibleTypes, owner, reason),
+                }
+            }
         }
     }
 

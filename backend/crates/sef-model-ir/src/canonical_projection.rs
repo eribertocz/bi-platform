@@ -328,6 +328,10 @@ fn canonical_case_branch((condition, value): &(ScalarExpr, ScalarExpr)) -> C {
 }
 
 impl Canonical for ScalarExprKind {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per scalar node keeps the canonical encoding auditable in one place"
+    )]
     fn canonical_value(&self) -> C {
         match self {
             Self::Literal(value) => {
@@ -423,6 +427,27 @@ impl Canonical for ScalarExprKind {
                     ("conversion", conversion.canonical_value()),
                 ],
             ),
+            Self::Function {
+                function,
+                arguments,
+            } => C::record(
+                "scalar.function",
+                [
+                    ("function", function.canonical_value()),
+                    ("arguments", C::sequence(arguments)),
+                ],
+            ),
+        }
+    }
+}
+
+impl Canonical for crate::functions::ScalarFunction {
+    fn canonical_value(&self) -> C {
+        match self {
+            Self::Mod { zero } => {
+                C::record("function.mod", [("zero_division", zero.canonical_value())])
+            }
+            other => C::text(other.code()),
         }
     }
 }
