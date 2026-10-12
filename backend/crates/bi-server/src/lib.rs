@@ -1,6 +1,7 @@
 //! bi-platform API server: Axum HTTP layer over the modular monolith.
 
 pub mod analytics;
+pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod db;
