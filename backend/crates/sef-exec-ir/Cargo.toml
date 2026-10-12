@@ -1,0 +1,26 @@
+[package]
+name = "sef-exec-ir"
+description = "Semantic execution IR (SEIR) of the Semantic Execution Fabric: content-addressed semantic plan DAG"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+sef-model-ir = { path = "../sef-model-ir" }
+sef-query-ir = { path = "../sef-query-ir" }
+
+[dev-dependencies]
+proptest.workspace = true
+
+# The workspace set plus SEF's: no unwrap, expect or panic in library code.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

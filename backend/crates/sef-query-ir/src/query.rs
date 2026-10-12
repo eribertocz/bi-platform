@@ -265,6 +265,21 @@ impl Canonical for TimeDimensionSelection {
     }
 }
 
+impl Canonical for RequestedAtom {
+    fn canonical_value(&self) -> C {
+        match self {
+            Self::Dimension(dimension) => C::record(
+                "requested-atom.dimension",
+                [("dimension", dimension.canonical_value())],
+            ),
+            Self::TimeBucket(time) => C::record(
+                "requested-atom.time-bucket",
+                [("time", time.canonical_value())],
+            ),
+        }
+    }
+}
+
 impl Canonical for FilterTarget {
     fn canonical_value(&self) -> C {
         match self {
