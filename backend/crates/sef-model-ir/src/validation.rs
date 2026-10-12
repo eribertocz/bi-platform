@@ -142,15 +142,70 @@ impl<'a> Validator<'a> {
                 );
             }
         }
-        for metadata in objects {
+        let mut replacements = BTreeMap::new();
+        for metadata in &objects {
+            let governance = &metadata.governance;
+            let mut tags = BTreeSet::new();
+            if governance
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.trim().is_empty())
+                || governance
+                    .tags
+                    .iter()
+                    .any(|tag| tag.trim().is_empty() || !tags.insert(tag))
+            {
+                self.error(
+                    ErrorCode::InvalidCanonicalValue,
+                    metadata.id(),
+                    "Governance owner and tags must be nonempty; tags must be unique",
+                );
+            }
+            if let Lifecycle::Deprecated {
+                sunset: Some(date), ..
+            } = &governance.lifecycle
+                && crate::time::iso_date_days(date).is_none()
+            {
+                self.error(
+                    ErrorCode::InvalidTemporalContract,
+                    metadata.id(),
+                    "Governance sunset must be a valid ISO date (YYYY-MM-DD)",
+                );
+            }
             if let Lifecycle::Deprecated {
                 replacement: Some(target),
                 ..
             } = &metadata.governance.lifecycle
-                && (!ids.contains(target) || target.kind() != metadata.id().kind())
             {
-                self.missing(metadata.id(), target);
+                if !ids.contains(target) || target.kind() != metadata.id().kind() {
+                    self.missing(metadata.id(), target);
+                } else {
+                    replacements.insert(metadata.id(), target);
+                }
             }
+        }
+        // Walk each functional graph once: completed tails need no further traversal.
+        let mut completed = BTreeSet::new();
+        for start in replacements.keys() {
+            let mut path = BTreeSet::new();
+            let mut current = *start;
+            while !completed.contains(current) {
+                if !path.insert(current) {
+                    for id in &path {
+                        self.error(
+                            ErrorCode::InvalidModelReference,
+                            id,
+                            "Governance replacement chain contains a cycle",
+                        );
+                    }
+                    break;
+                }
+                let Some(next) = replacements.get(current) else {
+                    break;
+                };
+                current = next;
+            }
+            completed.extend(path);
         }
     }
 

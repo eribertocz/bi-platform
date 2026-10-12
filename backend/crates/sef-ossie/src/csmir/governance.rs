@@ -14,6 +14,17 @@ fn convert(
     status: Option<&StatusDeclaration>,
     sensitivity: ClassificationDeclaration,
 ) -> Result<Governance, Failure> {
+    let mut unique_tags = std::collections::BTreeSet::new();
+    if owner.is_some_and(|owner| owner.trim().is_empty())
+        || tags
+            .iter()
+            .any(|tag| tag.trim().is_empty() || !unique_tags.insert(tag))
+    {
+        return Err(Failure::new(
+            Code::InvalidExtension,
+            "Owner y etiquetas no pueden estar vacíos; las etiquetas deben ser únicas.",
+        ));
+    }
     let lifecycle = match status {
         None | Some(StatusDeclaration::Active) => Lifecycle::Active,
         Some(StatusDeclaration::Deprecated {

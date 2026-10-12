@@ -351,14 +351,149 @@ fn unresolved_replacements_are_model_reference_errors() {
     );
 }
 
+#[test]
+fn dimension_replacements_use_the_destination_dimension() {
+    for qualified in [false, true] {
+        let (mut doc, catalog, options) = fixture();
+        doc.datasets[0].fields[0].dimension = doc.datasets[0].fields[1].dimension.clone();
+        extend(
+            &mut doc.datasets[0].fields[0].custom_extensions,
+            &json!({"status":{"state":"deprecated","replacement": if qualified {"sales.region"} else {"region"}}}),
+        );
+        let model = definition(&doc, &catalog, &options);
+        let dimension = model
+            .dimensions
+            .iter()
+            .find(|d| d.metadata.id().as_str() == "corpus/dimension/sales.sale_id")
+            .expect("dimension");
+        assert_eq!(
+            dimension.metadata.governance.lifecycle,
+            Lifecycle::Deprecated {
+                sunset: None,
+                replacement: Some(StableId::new("corpus/dimension/region").expect("id")),
+            }
+        );
+        model.compile().expect("conformed destination");
+    }
+}
+
+#[test]
+fn dimension_replacement_rejects_a_field_without_a_dimension() {
+    let (mut doc, catalog, options) = fixture();
+    extend(
+        &mut doc.datasets[0].fields[1].custom_extensions,
+        &json!({"status":{"state":"deprecated","replacement":"amount"}}),
+    );
+    let errors = to_csmir(&doc, &catalog, &options).expect_err("not a dimension");
+    assert!(
+        errors.iter().any(|e| e.code == Code::UnknownReference
+            && e.message.contains("no alimenta ninguna dimensión"))
+    );
+}
+
+#[test]
+fn direct_csmir_rejects_self_replacement_and_cycles() {
+    let (doc, catalog, options) = fixture();
+    let baseline = definition(&doc, &catalog, &options);
+    let mut model = baseline.clone();
+    let id = model.metrics[0].metadata.id().clone();
+    model.metrics[0].metadata.governance.lifecycle = Lifecycle::Deprecated {
+        sunset: None,
+        replacement: Some(id.clone()),
+    };
+    let errors = model.compile().expect_err("self replacement");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.code == ErrorCode::InvalidModelReference
+                && e.primary_ref.as_ref() == Some(&id))
+    );
+    let mut doc = doc;
+    let mut next = doc.metrics[0].clone();
+    next.name = "next_revenue".into();
+    doc.metrics.push(next);
+    let mut model = definition(&doc, &catalog, &options);
+    let next_id = model.metrics[1].metadata.id().clone();
+    model.metrics[0].metadata.governance.lifecycle = Lifecycle::Deprecated {
+        sunset: None,
+        replacement: Some(next_id),
+    };
+    model
+        .clone()
+        .compile()
+        .expect("acyclic chain to active object");
+    model.metrics[1].metadata.governance.lifecycle = Lifecycle::Deprecated {
+        sunset: None,
+        replacement: Some(id),
+    };
+    let errors = model.compile().expect_err("cycle");
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::InvalidModelReference)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn direct_csmir_rejects_invalid_sunset_and_empty_or_duplicate_governance() {
+    let (doc, catalog, options) = fixture();
+    let baseline = definition(&doc, &catalog, &options);
+    for date in ["not-a-date", "2027-02-29", "2028-02-30", "2028-2-01"] {
+        let mut model = baseline.clone();
+        model.metrics[0].metadata.governance.lifecycle = Lifecycle::Deprecated {
+            sunset: Some(date.into()),
+            replacement: None,
+        };
+        assert!(
+            model
+                .compile()
+                .expect_err("invalid sunset")
+                .iter()
+                .any(|e| e.code == ErrorCode::InvalidTemporalContract)
+        );
+    }
+    for payload in [
+        json!({"owner":""}),
+        json!({"owner":"   "}),
+        json!({"tags":[""]}),
+        json!({"tags":["a","a"]}),
+    ] {
+        let mut doc = doc.clone();
+        decorate(&mut doc, &payload);
+        assert!(
+            to_csmir(&doc, &catalog, &options)
+                .expect_err("invalid governance")
+                .iter()
+                .any(|e| e.code == Code::InvalidExtension)
+        );
+    }
+    for (owner, tags) in [(Some(""), vec![]), (None, vec![""]), (None, vec!["a", "a"])] {
+        let mut model = baseline.clone();
+        model.metrics[0].metadata.governance.owner = owner.map(str::to_owned);
+        model.metrics[0].metadata.governance.tags = tags.into_iter().map(str::to_owned).collect();
+        assert!(
+            model
+                .compile()
+                .expect_err("invalid direct governance")
+                .iter()
+                .any(|e| e.code == ErrorCode::InvalidCanonicalValue)
+        );
+    }
+}
+
 proptest! {
     #[test]
     fn governance_never_changes_fingerprints(
-        owner in proptest::option::of(".*"), tags in proptest::collection::vec(".*", 0..8),
+        owner in proptest::option::of("[a-zA-Z][a-zA-Z0-9 ]{0,20}"), tags in proptest::collection::btree_set("[a-zA-Z][a-zA-Z0-9]{0,20}", 0..8),
         deprecated in any::<bool>(), sensitivity in 0usize..4, has_replacement in any::<bool>(),
         year in 1u16..10000, month in 1u8..13, day in 1u8..29, has_sunset in any::<bool>(),
     ) {
         let (mut doc, catalog, options) = fixture();
+        let mut next = doc.metrics[0].clone();
+        next.name = "next_revenue".into();
+        doc.metrics.push(next);
         let baseline = compile(&doc, &catalog, &options).expect("baseline");
         let status = if deprecated {
             json!({"state":"deprecated", "sunset": has_sunset.then(|| format!("{year:04}-{month:02}-{day:02}"))})
@@ -366,20 +501,13 @@ proptest! {
         decorate(&mut doc, &json!({"owner":owner,"tags":tags,"status":status,
             "sensitivity":(["public","internal","confidential","restricted"][sensitivity])}));
         let mut governed = definition(&doc, &catalog, &options);
+        governed.metrics[1].metadata.governance.lifecycle = Lifecycle::Active;
         // Direct CSMIR clients also retain fingerprint invariance for resolved replacements.
         if deprecated && has_replacement {
-            let replace = |metadata: &mut sef_model_ir::model::ObjectMetadata| {
-                let target = metadata.id().clone();
-                if let Lifecycle::Deprecated { replacement, .. } = &mut metadata.governance.lifecycle {
-                    *replacement = Some(target);
-                }
-            };
-            for dataset in &mut governed.datasets {
-                replace(&mut dataset.metadata);
-                for field in &mut dataset.fields { replace(&mut field.metadata); }
+            let target = governed.metrics[1].metadata.id().clone();
+            if let Lifecycle::Deprecated { replacement, .. } = &mut governed.metrics[0].metadata.governance.lifecycle {
+                *replacement = Some(target);
             }
-            for dimension in &mut governed.dimensions { replace(&mut dimension.metadata); }
-            for metric in &mut governed.metrics { replace(&mut metric.metadata); }
         }
         let governed = governed.compile().expect("governed");
         prop_assert_eq!(baseline.content_hash(), governed.content_hash());

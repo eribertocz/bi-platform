@@ -894,7 +894,45 @@ impl<'a> Converter<'a> {
             .dimension
             .is_none()
             .then_some(self.datasets[d].segment.as_str());
-        extension.governance(&self.ids, "dimension", scope)
+        let mut governance = extension.governance(&self.ids, "dimension", scope)?;
+        if let Some(crate::extension::StatusDeclaration::Deprecated {
+            replacement: Some(name),
+            ..
+        }) = &extension.status
+        {
+            let (dataset, field_name) = match name.split_once('.') {
+                Some((dataset, field)) => (self.dataset_index(dataset), field),
+                None => (Some(d), name.as_str()),
+            };
+            if let Some(dataset) = dataset
+                && let Some(field) = self.datasets[dataset]
+                    .fields
+                    .iter()
+                    .find(|field| field.segment == ids::segment(field_name))
+            {
+                if field.ossie.dimension.is_none() {
+                    return Err(Failure::new(
+                        Code::UnknownReference,
+                        "El campo de reemplazo no alimenta ninguna dimensión.",
+                    ));
+                }
+                let segment = field.extension.dimension.as_deref().map_or_else(
+                    || format!("{}.{}", self.datasets[dataset].segment, field.segment),
+                    ids::segment,
+                );
+                if let sef_model_ir::model::Lifecycle::Deprecated { replacement, .. } =
+                    &mut governance.lifecycle
+                {
+                    *replacement = Some(self.ids.id("dimension", &segment).map_err(|_| {
+                        Failure::new(
+                            Code::InvalidIdentifier,
+                            "Reemplazo sin identificador estable.",
+                        )
+                    })?);
+                }
+            }
+        }
+        Ok(governance)
     }
 
     /// The time semantics of a dimension bucketed with `DATE_TRUNC`: the
