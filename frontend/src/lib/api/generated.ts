@@ -175,6 +175,35 @@ export interface components {
     };
     /** @enum {string} */
     HealthStatus: 'ok' | 'degraded' | 'unavailable';
+    /** @description Context is descriptive, never executable or a semantic name alias. */
+    ModelAiContext: string | components['schemas']['ModelAiContextObject'];
+    ModelAiContextObject: {
+      examples?: string[] | null;
+      instructions?: string | null;
+      synonyms?: string[] | null;
+    } & {
+      [key: string]: unknown;
+    };
+    ModelAnnotation: {
+      ai_context?: components['schemas']['ModelAiContext'] | null;
+      /** @description Explicit declaration; null means the datatype supplies the default. */
+      declared_is_time?: boolean | null;
+      description?: string | null;
+      /** @description Effective time role for fields/dimensions; null for a metric. */
+      is_time?: boolean | null;
+      label?: string | null;
+      /** @description Ossie declaration name, useful when a dimension has several origins. */
+      name: string;
+      /** @description JSON pointer in this Ossie file, identifying the declaration. */
+      path: string;
+    };
+    ModelDataset: {
+      ai_context?: components['schemas']['ModelAiContext'] | null;
+      description?: string | null;
+      /** @description All declared fields, including computed fields that CSMIR inlines. */
+      fields: components['schemas']['ModelField'][];
+      name: string;
+    };
     ModelDiagnostic: {
       code: string;
       /** Format: int64 */
@@ -186,9 +215,17 @@ export interface components {
       path: string;
       severity: components['schemas']['DiagnosticSeverity'];
     };
+    ModelField: {
+      annotation: components['schemas']['ModelAnnotation'];
+      is_dimension: boolean;
+      name: string;
+    };
     /** @description An invalid file never exposes metadata from a previous successful load. */
     ModelFile:
       | {
+          ai_context?: components['schemas']['ModelAiContext'] | null;
+          datasets: components['schemas']['ModelDataset'][];
+          description?: string | null;
           diagnostics: components['schemas']['ModelDiagnostic'][];
           dimensions: components['schemas']['ModelMember'][];
           file: string;
@@ -206,6 +243,8 @@ export interface components {
           status: 'invalid';
         };
     ModelMember: {
+      /** @description Metadata per Ossie origin; conformed dimensions keep every binding. */
+      annotations: components['schemas']['ModelAnnotation'][];
       /** @description Exact logical type, e.g. INT64, DECIMAL(18,2), TIMESTAMPTZ (instant). */
       data_type: string;
       id: string;

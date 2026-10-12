@@ -1,8 +1,15 @@
 version: '0.2.0.dev0'
 name: Ventas
+description: Métricas de ventas del proyecto.
+ai_context:
+  instructions: Utiliza nombres de métricas inequívocos.
+  synonyms: [operaciones comerciales]
 datasets:
   - name: sales
     source: lake.main.sales
+    description: Una fila por pedido.
+    ai_context:
+      synonyms: [pedidos]
     primary_key: [order_id]
     fields:
       - name: order_id
@@ -11,11 +18,28 @@ datasets:
             - dialect: OSSIE_SQL_2026
               expression: order_id
       - name: region
+        label: Región comercial
+        description: Región donde se realizó la venta.
+        ai_context:
+          synonyms: [zona comercial]
+          examples: [Norte]
+          vendor_hint: {category: geography}
         expression:
           dialects:
             - dialect: OSSIE_SQL_2026
               expression: region
         dimension: {}
+      - name: ordered_at
+        label: Fecha del pedido
+        description: Instante en que se realizó el pedido.
+        datatype: DateTimeTz
+        dimension: {}
+        ai_context:
+          synonyms: [fecha de venta]
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: ordered_at
       - name: amount
         expression:
           dialects:
@@ -23,6 +47,9 @@ datasets:
               expression: amount
 metrics:
   - name: importe_total
+    description: Suma exacta del importe de las ventas.
+    ai_context:
+      synonyms: [facturación]
     expression:
       dialects:
         - dialect: OSSIE_SQL_2026

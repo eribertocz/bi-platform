@@ -184,6 +184,12 @@ fn float_precision_selects_the_width_or_is_rejected() {
     ] {
         let (mut model, catalog) = sales();
         model.metrics[0].expression = portable(&format!("SUM(CAST(sales.amount AS {target}))"));
+        assert!(
+            sef_ossie::validate::validate(&model)
+                .iter()
+                .all(|d| !d.is_error()),
+            "{target}"
+        );
         match expected {
             Some(bits) => {
                 let converted = convert(&model, &catalog).expect(target);

@@ -17,5 +17,6 @@ Cada registro contiene: contexto, decisión, alternativas descartadas, consecuen
 | [0009](0009-modos-de-datos-y-persistencia-opcional.md) | Modos de datos: consultar en vivo, guardar resultados o pipeline; SOURCE, RAW, SILVER y GOLD lógicos y opcionales; lo operativo separado de la lógica | Aprobada 2026-10-11 | Matiza 0002, 0003, 0004 §6 y 0005 |
 | [0010](0010-seguridad-del-blueprint-en-g2.md) | Punto único de aplicación de permisos; motor de permisos, auditoría mínima y OIDC en G2; WCAG 2.2 AA | Aprobada 2026-10-11 | Amplía el gate G2 del roadmap y concreta el blueprint del propietario |
 | [0011](0011-motor-semantico-como-producto.md) | El motor semántico como producto: dentro de bi-platform, como biblioteca y como servicio independiente; Apache-2.0 para toda bi-platform | Aprobada 2026-10-11 | Amplía 0006 y 0008 |
+| [0012](0012-motor-de-permisos-cedar.md) | Motor de permisos: Cedar dentro del motor semántico (RBAC + ABAC, CLS en tres niveles; RLS sigue en CSMIR) | Aprobada 2026-10-12 | Concreta 0010 §A |
 
 Plantilla: copiar un registro existente y numerar con el siguiente número libre.

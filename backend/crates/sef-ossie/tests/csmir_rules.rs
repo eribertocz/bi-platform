@@ -7,18 +7,114 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use proptest::prelude::*;
-use sef_model_ir::expressions::{BooleanOp, ComparisonOp, ScalarExprKind};
+use sef_model_ir::expressions::{BooleanOp, ComparisonOp, MetricExprKind, ScalarExprKind};
 use sef_model_ir::identity::SourceHandle;
 use sef_model_ir::model::ModelDefinition;
 use sef_model_ir::relationships::Optionality;
 use sef_model_ir::time::TimestampSemantics;
-use sef_model_ir::types::{DecimalType, ValueType};
+use sef_model_ir::types::{DecimalType, RoundingMode, ValueType, ZeroDivisionPolicy};
 use sef_ossie::catalog::{Catalog, Column, Relation};
 use sef_ossie::csmir::{Options, compile, to_csmir};
 use sef_ossie::document::{
     CustomExtension, Dialect, DialectExpression, Expression, Field, Metric, SemanticModel,
 };
 use sef_ossie::{Code, Diagnostic};
+
+#[test]
+fn compiled_document_keeps_each_conformed_dimension_origin() {
+    let mut model = document(1);
+    let mut second = model.datasets[0].clone();
+    second.name = "other_sales".into();
+    second.fields[1].description = Some("Another description".into());
+    model.datasets.push(second);
+    let compiled = sef_ossie::csmir::compile_document(&model, &catalog(1), &options(1))
+        .expect("metadata fixture");
+    let id = compiled.semantic.definition().dimensions[0].metadata.id();
+    assert_eq!(
+        compiled.origins(id),
+        ["/datasets/0/fields/1", "/datasets/1/fields/1"]
+    );
+    assert_eq!(compiled.document(), &model);
+}
+
+#[test]
+fn ai_synonyms_never_resolve_expression_names() {
+    let mut model = document(1);
+    model.datasets[0].fields[2].ai_context = Some(sef_ossie::document::AiContext::Structured(
+        sef_ossie::document::StructuredAiContext {
+            synonyms: Some(vec!["billing".into()]),
+            ..Default::default()
+        },
+    ));
+    model.metrics[0].expression.dialects[0].expression = "SUM(sales.billing)".into();
+    let errors =
+        compile(&model, &catalog(1), &options(1)).expect_err("synonyms are not identifiers");
+    assert!(
+        errors
+            .iter()
+            .any(|d| d.code == Code::UnknownReference || d.code == Code::UnknownColumn)
+    );
+}
+
+#[test]
+fn time_on_inferred_text_is_a_warning_and_preserves_the_hash() {
+    let mut model = document(1);
+    let baseline = compile(&model, &catalog(1), &options(1)).expect("metadata fixture");
+    model.datasets[0].fields[1]
+        .dimension
+        .as_mut()
+        .expect("metadata fixture")
+        .is_time = Some(true);
+    let compiled = sef_ossie::csmir::compile_document(&model, &catalog(1), &options(1))
+        .expect("metadata fixture");
+    assert_eq!(compiled.semantic.content_hash(), baseline.content_hash());
+    assert_eq!(compiled.warnings.len(), 1);
+    assert_eq!(compiled.warnings[0].code, Code::NonTemporalTimeRole);
+    assert_eq!(compiled.warnings[0].severity, sef_ossie::Severity::Warning);
+    assert_eq!(
+        compiled.warnings[0].path,
+        "/datasets/0/fields/1/dimension/is_time"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+    #[test]
+    fn presentation_context_does_not_change_hashes_and_roundtrips(
+        text in ".{0,80}", key in "[a-z][a-z0-9_]{0,15}", explicit in any::<bool>(),
+    ) {
+        let mut model = document(1);
+        let baseline = compile(&model, &catalog(1), &options(1)).expect("metadata fixture");
+        let context = sef_ossie::document::AiContext::Structured(sef_ossie::document::StructuredAiContext {
+            instructions: Some(text.clone()), synonyms: Some(vec![text.clone()]), examples: Some(vec![text.clone()]),
+            other: BTreeMap::from([(format!("vendor_{key}"), serde_json::json!({"nested": [null, true, text]}))]),
+        });
+        model.description = Some(text.clone());
+        model.ai_context = Some(context.clone());
+        for dataset in &mut model.datasets {
+            dataset.description = Some(text.clone());
+            dataset.ai_context = Some(context.clone());
+            for field in &mut dataset.fields {
+                field.description = Some(text.clone());
+                field.label = Some(text.clone());
+                field.ai_context = Some(context.clone());
+                if let Some(dimension) = &mut field.dimension { dimension.is_time = Some(explicit); }
+            }
+        }
+        for metric in &mut model.metrics { metric.description = Some(text.clone()); metric.ai_context = Some(context.clone()); }
+        let compiled = sef_ossie::csmir::compile_document(&model, &catalog(1), &options(1)).expect("metadata fixture");
+        prop_assert_eq!(baseline.content_hash(), compiled.semantic.content_hash());
+        for id in baseline.definition().datasets.iter().map(|d| d.metadata.id())
+            .chain(baseline.definition().dimensions.iter().map(|d| d.metadata.id()))
+            .chain(baseline.definition().metrics.iter().map(|m| m.metadata.id())) {
+            prop_assert_eq!(baseline.object_hash(id), compiled.semantic.object_hash(id));
+        }
+        for serialized in [sef_ossie::to_yaml(compiled.document()).expect("metadata fixture"), sef_ossie::to_json(compiled.document()).expect("metadata fixture")] {
+            let restored = sef_ossie::load(&serialized).expect("metadata fixture").model;
+            prop_assert_eq!(&restored, &model);
+        }
+    }
+}
 
 fn read(file: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -110,6 +206,240 @@ fn portable(text: &str) -> Expression {
     }
 }
 
+fn candidate(dialect: Dialect, expression: &str) -> DialectExpression {
+    DialectExpression {
+        dialect,
+        expression: expression.to_owned(),
+    }
+}
+
+#[test]
+fn different_ansi_expression_warns_and_ossie_wins_in_either_order() {
+    let base = document(1);
+    let expected = *compile(&base, &catalog(1), &options(1))
+        .expect("oracle")
+        .content_hash();
+    for reverse in [false, true] {
+        let mut model = base.clone();
+        model.metrics[0].expression.dialects = vec![
+            candidate(Dialect::AnsiSql, "MAX(sales.amount)"),
+            candidate(Dialect::OssieSql2026, "SUM(sales.amount)"),
+        ];
+        if reverse {
+            model.metrics[0].expression.dialects.reverse();
+        }
+        let loaded = sef_ossie::load(&sef_ossie::to_json(&model).expect("JSON")).expect("load");
+        assert_eq!(loaded.warnings.len(), 1);
+        let warning = &loaded.warnings[0];
+        assert_eq!(warning.code, Code::DialectPrecedence);
+        assert_eq!(
+            warning.path,
+            format!(
+                "/metrics/0/expression/dialects/{}/expression",
+                usize::from(reverse)
+            )
+        );
+        assert!(warning.message.contains("OSSIE_SQL_2026"));
+        assert_eq!(
+            compile(&loaded.model, &catalog(1), &options(1))
+                .expect("compile")
+                .content_hash(),
+            &expected
+        );
+        assert_eq!(loaded.model, model, "alternatives survive export");
+    }
+}
+
+#[test]
+fn identical_expressions_in_distinct_dialects_do_not_warn() {
+    let mut model = document(1);
+    model.metrics[0]
+        .expression
+        .dialects
+        .push(candidate(Dialect::AnsiSql, "SUM(sales.amount)"));
+    assert_eq!(
+        sef_ossie::validate::validate(&model),
+        Vec::<Diagnostic>::new()
+    );
+    assert!(convert(1, &model).is_ok());
+}
+
+#[test]
+fn every_repeated_dialect_is_rejected_in_fields_and_metrics_even_when_identical() {
+    for dialect in all_dialects() {
+        for identical in [false, true] {
+            for field in [false, true] {
+                let mut model = document(1);
+                let text = if field { "amount" } else { "SUM(sales.amount)" };
+                let expression = if field {
+                    &mut model.datasets[0].fields[2].expression
+                } else {
+                    &mut model.metrics[0].expression
+                };
+                expression.dialects = vec![
+                    candidate(dialect, text),
+                    candidate(dialect, if identical { text } else { "42" }),
+                ];
+                let path = if field {
+                    "/datasets/0/fields/2"
+                } else {
+                    "/metrics/0"
+                };
+                let path = format!("{path}/expression/dialects/1/dialect");
+                let loaded = sef_ossie::load(&sef_ossie::to_yaml(&model).expect("YAML"))
+                    .expect_err("duplicate");
+                assert!(
+                    loaded
+                        .iter()
+                        .any(|d| d.code == Code::DuplicateDialect && d.path == path)
+                );
+                rejects(convert(1, &model), Code::DuplicateDialect, &path);
+            }
+        }
+    }
+}
+
+fn all_dialects() -> Vec<Dialect> {
+    vec![
+        Dialect::AnsiSql,
+        Dialect::OssieSql2026,
+        Dialect::Snowflake,
+        Dialect::Databricks,
+        Dialect::BigQuery,
+        Dialect::Dax,
+        Dialect::Mdx,
+        Dialect::Tableau,
+        Dialect::Maql,
+        Dialect::Sigma,
+        Dialect::ThoughtSpot,
+        Dialect::HolisticsAql,
+    ]
+}
+
+#[test]
+fn ansi_rejections_have_the_same_paths_in_validation_and_direct_conversion() {
+    for (text, code) in [
+        (
+            "SELECT SUM(sales.amount) FROM sales",
+            Code::UnsupportedConstruct,
+        ),
+        (
+            "SUM((SELECT amount FROM sales))",
+            Code::UnsupportedConstruct,
+        ),
+        ("COUNT_IF(sales.amount > 0)", Code::UnsupportedConstruct),
+    ] {
+        let mut model = document(1);
+        model.metrics[0].expression.dialects = vec![candidate(Dialect::AnsiSql, text)];
+        let path = "/metrics/0/expression/dialects/0/expression";
+        let found = sef_ossie::validate::validate(&model);
+        assert!(
+            found.iter().any(|d| d.code == code && d.path == path),
+            "{found:?}"
+        );
+        rejects(convert(1, &model), code, path);
+    }
+    let mut model = document(1);
+    model.metrics[0].expression.dialects =
+        vec![candidate(Dialect::AnsiSql, "MEDIAN(sales.amount)")];
+    assert_eq!(
+        sef_ossie::validate::validate(&model),
+        Vec::<Diagnostic>::new()
+    );
+    rejects(
+        convert(1, &model),
+        Code::NotRepresentable,
+        "/metrics/0/expression/dialects/0/expression",
+    );
+}
+
+#[test]
+fn ansi_fields_cannot_aggregate_and_a_bad_preferred_expression_never_falls_back() {
+    let mut model = document(1);
+    model.datasets[0].fields[2].expression.dialects =
+        vec![candidate(Dialect::AnsiSql, "SUM(amount)")];
+    rejects(
+        convert(1, &model),
+        Code::AggregateInField,
+        "/datasets/0/fields/2/expression/dialects/0/expression",
+    );
+    let mut model = document(1);
+    model.metrics[0].expression.dialects = vec![
+        candidate(Dialect::AnsiSql, "SUM(sales.amount)"),
+        candidate(Dialect::OssieSql2026, "MEDIAN(sales.amount)"),
+    ];
+    rejects(
+        convert(1, &model),
+        Code::NotRepresentable,
+        "/metrics/0/expression/dialects/1/expression",
+    );
+    model.metrics[0].expression.dialects = vec![
+        candidate(Dialect::OssieSql2026, "SUM(sales.amount)"),
+        candidate(Dialect::AnsiSql, "COUNT_IF(sales.amount > 0)"),
+    ];
+    rejects(
+        convert(1, &model),
+        Code::UnsupportedConstruct,
+        "/metrics/0/expression/dialects/1/expression",
+    );
+}
+
+#[test]
+fn both_dialects_enforce_resource_budgets_at_both_entry_points() {
+    let too_wide = format!(
+        "SUM(CASE {} ELSE 0 END)",
+        "WHEN sales.amount = 1 THEN 1 ".repeat(600)
+    );
+    let too_deep = format!("{}sales.amount{}", "(".repeat(40), ")".repeat(40));
+    let too_structural = format!("SUM({})", vec!["sales.amount"; 130].join(" + "));
+    let too_many_bytes = " ".repeat(sef_ossie::load::MAX_DOCUMENT_BYTES + 1);
+    for dialect in [Dialect::AnsiSql, Dialect::OssieSql2026] {
+        for text in [&too_wide, &too_deep, &too_structural, &too_many_bytes] {
+            let mut model = document(1);
+            model.metrics[0].expression.dialects = vec![candidate(dialect, text)];
+            let found = sef_ossie::validate::validate(&model);
+            let path = "/metrics/0/expression/dialects/0/expression";
+            assert!(
+                found
+                    .iter()
+                    .any(|d| d.code == Code::ExpressionTooLarge && d.path == path),
+                "{found:?}"
+            );
+            rejects(convert(1, &model), Code::ExpressionTooLarge, path);
+        }
+    }
+}
+
+proptest! {
+    #[test]
+    fn dialect_order_and_opaque_vendor_text_cannot_change_the_fingerprint(
+        ranks in prop::collection::vec(any::<u32>(), 12),
+        ossie in any::<bool>(),
+        ansi in any::<bool>(),
+        vendor_text in "[ -~]{0,80}",
+    ) {
+        let base = document(1);
+        let mut model = base.clone();
+        let mut candidates: Vec<_> = all_dialects().into_iter().enumerate()
+            .filter(|(_, dialect)| (*dialect != Dialect::OssieSql2026 || ossie) && (*dialect != Dialect::AnsiSql || ansi))
+            .map(|(i, dialect)| (ranks[i], candidate(dialect, if matches!(dialect, Dialect::OssieSql2026 | Dialect::AnsiSql) { "SUM(sales.amount)" } else { &vendor_text })))
+            .collect();
+        candidates.sort_by_key(|(rank, _)| *rank);
+        model.metrics[0].expression.dialects = candidates.into_iter().map(|(_, candidate)| candidate).collect();
+        prop_assert!(sef_ossie::validate::validate(&model).is_empty());
+        let round_trip = sef_ossie::load(&sef_ossie::to_json(&model).expect("JSON")).expect("load");
+        prop_assert_eq!(&round_trip.model, &model);
+        if ossie || ansi {
+            let expected = *compile(&base, &catalog(1), &options(1)).expect("oracle").content_hash();
+            let actual = *compile(&model, &catalog(1), &options(1)).expect("compile").content_hash();
+            prop_assert_eq!(actual, expected);
+        } else {
+            let found = convert(1, &model).expect_err("vendor SQL cannot execute");
+            prop_assert!(found.iter().any(|d| d.code == Code::NotRepresentable && d.path == "/metrics/0/expression/dialects"));
+        }
+    }
+}
+
 fn ours(data: &str) -> Vec<CustomExtension> {
     vec![CustomExtension {
         vendor_name: "bi-platform".to_owned(),
@@ -189,6 +519,202 @@ fn a_division_without_its_result_type_is_rejected() {
         Code::TypeMismatch,
         "/metrics/2/expression/dialects/0/expression",
     );
+}
+
+fn zero_extension(policy: Option<&str>) -> Vec<CustomExtension> {
+    policy.map_or_else(Vec::new, |policy| {
+        ours(&format!(r#"{{"version":1,"zero_division":"{policy}"}}"#))
+    })
+}
+
+fn ratio_zero(definition: &ModelDefinition) -> ZeroDivisionPolicy {
+    let MetricExprKind::Ratio {
+        zero_denominator,
+        rounding,
+        ..
+    } = &definition.metrics[2].expression.kind
+    else {
+        panic!("expected CASE-006 ratio");
+    };
+    assert_eq!(*rounding, Some(RoundingMode::HalfEven));
+    *zero_denominator
+}
+
+#[test]
+fn division_defaults_and_explicit_overrides_in_metrics() {
+    for (dialect, policy, expected) in [
+        (Dialect::AnsiSql, None, ZeroDivisionPolicy::Error),
+        (Dialect::OssieSql2026, None, ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("null"), ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("error"), ZeroDivisionPolicy::Error),
+        (
+            Dialect::OssieSql2026,
+            Some("error"),
+            ZeroDivisionPolicy::Error,
+        ),
+    ] {
+        let mut model = document(6);
+        model.metrics[2].expression.dialects[0].dialect = dialect;
+        model.metrics[2].custom_extensions = zero_extension(policy);
+        let loaded = sef_ossie::load(&sef_ossie::to_json(&model).expect("JSON")).expect("load");
+        assert_eq!(
+            ratio_zero(&convert(6, &loaded.model).expect("loaded")),
+            expected
+        );
+        assert_eq!(ratio_zero(&convert(6, &model).expect("direct")), expected);
+    }
+}
+
+fn scalar_zero(scalar: &sef_model_ir::expressions::ScalarExpr) -> ZeroDivisionPolicy {
+    let ScalarExprKind::Arithmetic { contract, .. } = &scalar.kind else {
+        panic!("division");
+    };
+    assert_eq!(contract.rounding, Some(RoundingMode::HalfEven));
+    contract.zero_division.expect("division policy")
+}
+
+#[test]
+fn division_policy_in_fields_survives_dimension_binding_and_metric_inlining() {
+    for (dialect, policy, expected) in [
+        (Dialect::AnsiSql, None, ZeroDivisionPolicy::Error),
+        (Dialect::OssieSql2026, None, ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("null"), ZeroDivisionPolicy::Null),
+        (Dialect::AnsiSql, Some("error"), ZeroDivisionPolicy::Error),
+        (
+            Dialect::OssieSql2026,
+            Some("error"),
+            ZeroDivisionPolicy::Error,
+        ),
+    ] {
+        let mut model = document(1);
+        let mut field = model.datasets[0].fields[2].clone();
+        field.name = "amount_ratio".to_owned();
+        field.expression.dialects = vec![candidate(dialect, "CAST(amount / 0 AS DECIMAL(18, 2))")];
+        field
+            .dimension
+            .clone_from(&model.datasets[0].fields[1].dimension);
+        field.custom_extensions = zero_extension(policy);
+        model.datasets[0].fields.push(field);
+        model.metrics[0].expression = portable("SUM(sales.amount_ratio)");
+        let loaded = sef_ossie::load(&sef_ossie::to_json(&model).expect("JSON")).expect("load");
+        for model in [&model, &loaded.model] {
+            let definition = convert(1, model).expect("field ratio");
+            let dimension = definition
+                .dimensions
+                .iter()
+                .find(|d| d.metadata.id().as_str().ends_with("/sales.amount_ratio"))
+                .expect("dimension");
+            assert_eq!(scalar_zero(&dimension.bindings[0].expression), expected);
+            assert_eq!(
+                scalar_zero(
+                    definition.measures[0]
+                        .scalar_expression
+                        .as_ref()
+                        .expect("measure")
+                ),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn ansi_scalar_division_inside_aggregate_uses_the_metric_policy() {
+    for (policy, expected) in [
+        (None, ZeroDivisionPolicy::Error),
+        (Some("null"), ZeroDivisionPolicy::Null),
+    ] {
+        let mut model = document(1);
+        model.metrics[0].expression.dialects = vec![candidate(
+            Dialect::AnsiSql,
+            "SUM(CAST(sales.amount / 0 AS DECIMAL(18, 2)))",
+        )];
+        model.metrics[0].custom_extensions = zero_extension(policy);
+        let definition = convert(1, &model).expect("aggregate scalar");
+        assert_eq!(
+            scalar_zero(
+                definition.measures[0]
+                    .scalar_expression
+                    .as_ref()
+                    .expect("measure")
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn explicit_rounding_and_zero_policy_reach_the_aggregate_argument() {
+    let mut model = document(1);
+    model.metrics[0].expression.dialects = vec![candidate(
+        Dialect::AnsiSql,
+        "SUM(CAST(sales.amount / 0 AS DECIMAL(18, 2)))",
+    )];
+    model.metrics[0].custom_extensions =
+        ours(r#"{"version":1,"rounding":"half_up","zero_division":"null"}"#);
+    let definition = convert(1, &model).expect("explicit aggregate policy");
+    let scalar = definition.measures[0]
+        .scalar_expression
+        .as_ref()
+        .expect("measure");
+    let ScalarExprKind::Arithmetic { contract, .. } = &scalar.kind else {
+        panic!("division");
+    };
+    assert_eq!(contract.rounding, Some(RoundingMode::HalfUp));
+    assert_eq!(contract.zero_division, Some(ZeroDivisionPolicy::Null));
+}
+
+#[test]
+fn invalid_field_zero_policy_is_rejected_without_falling_back() {
+    let mut model = document(1);
+    model.datasets[0].fields[2].expression.dialects[0].dialect = Dialect::AnsiSql;
+    for data in [
+        r#"{"version":1,"zero_division":"ignore"}"#,
+        r#"{"version":1,"zero_divison":"null"}"#,
+    ] {
+        model.datasets[0].fields[2].custom_extensions = ours(data);
+        rejects(
+            convert(1, &model),
+            Code::InvalidExtension,
+            "/datasets/0/fields/2/custom_extensions/0/data",
+        );
+    }
+}
+
+#[test]
+fn ansi_average_keeps_null_for_an_empty_set() {
+    let mut model = document(1);
+    let mut average = metric("average_sale", "CAST(AVG(sales.amount) AS DECIMAL(18, 2))");
+    average.expression.dialects[0].dialect = Dialect::AnsiSql;
+    model.metrics.push(average);
+    let definition = convert(1, &model).expect("average");
+    let average = definition
+        .metrics
+        .iter()
+        .find(|m| m.metadata.id().as_str().ends_with("/average_sale"))
+        .expect("average metric");
+    let MetricExprKind::Ratio {
+        zero_denominator, ..
+    } = average.expression.kind
+    else {
+        panic!("ratio");
+    };
+    assert_eq!(zero_denominator, ZeroDivisionPolicy::Null);
+}
+
+proptest! {
+    #[test]
+    fn ratio_policy_follows_selected_dialect_and_declaration(ossie in any::<bool>(), reverse in any::<bool>(), policy in 0u8..3) {
+        let mut model = document(6);
+        let text = model.metrics[2].expression.dialects[0].expression.clone();
+        let expression = &mut model.metrics[2].expression;
+        expression.dialects = vec![candidate(Dialect::AnsiSql, &text)];
+        if ossie { expression.dialects.push(candidate(Dialect::OssieSql2026, &text)); }
+        if reverse { expression.dialects.reverse(); }
+        model.metrics[2].custom_extensions = zero_extension(match policy { 1 => Some("null"), 2 => Some("error"), _ => None });
+        let expected = match policy { 1 => ZeroDivisionPolicy::Null, 2 => ZeroDivisionPolicy::Error, _ if ossie => ZeroDivisionPolicy::Null, _ => ZeroDivisionPolicy::Error };
+        prop_assert_eq!(ratio_zero(&convert(6, &model).expect("ratio")), expected);
+    }
 }
 
 #[test]
@@ -333,9 +859,9 @@ fn a_conformed_dimension_needs_one_type() {
 }
 
 #[test]
-fn only_the_portable_dialect_has_meaning() {
+fn vendor_dialects_are_not_computed() {
     let mut model = document(1);
-    model.metrics[0].expression.dialects[0].dialect = Dialect::AnsiSql;
+    model.metrics[0].expression.dialects[0].dialect = Dialect::Snowflake;
     rejects(
         convert(1, &model),
         Code::NotRepresentable,

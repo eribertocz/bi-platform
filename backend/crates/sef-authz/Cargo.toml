@@ -1,0 +1,28 @@
+[package]
+name = "sef-authz"
+description = "Authorization core of the Semantic Execution Fabric: Cedar decisions that deny by default and on any error, column-level security and immutable policy snapshots"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+# ADR 0012: exact version, no experimental features and no extension
+# functions until a policy needs one.
+cedar-policy = { version = "=4.13.0", default-features = false }
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+# The workspace set plus SEF's: no unwrap, expect or panic in library code.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

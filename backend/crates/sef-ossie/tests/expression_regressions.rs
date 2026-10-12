@@ -556,8 +556,8 @@ fn identifiers_require_ansi_quotes_and_128_characters_per_part() {
 }
 
 #[test]
-fn ansi_sql_is_preserved_as_opaque_and_ossie_is_checked_at_its_path() {
-    let text = "version: 0.2.0.dev0\nname: m\ndatasets:\n  - name: d\n    source: t\n    fields:\n      - name: x\n        expression:\n          dialects:\n            - dialect: ANSI_SQL\n              expression: x IS TRUE\n";
+fn vendor_sql_is_preserved_as_opaque_and_computable_sql_is_checked_at_its_path() {
+    let text = "version: 0.2.0.dev0\nname: m\ndatasets:\n  - name: d\n    source: t\n    fields:\n      - name: x\n        expression:\n          dialects:\n            - dialect: SNOWFLAKE\n              expression: x IS TRUE\n";
     let loaded = load(text).unwrap();
     let exported = to_json(&loaded.model).unwrap();
     assert_eq!(load(&exported).unwrap().model, loaded.model);
@@ -565,12 +565,14 @@ fn ansi_sql_is_preserved_as_opaque_and_ossie_is_checked_at_its_path() {
         loaded.model.datasets[0].fields[0].expression.dialects[0].expression,
         "x IS TRUE"
     );
-    let errors = load(&text.replace("ANSI_SQL", "OSSIE_SQL_2026")).unwrap_err();
-    assert_eq!(errors[0].code, Code::UnsupportedConstruct);
-    assert_eq!(
-        errors[0].path,
-        "/datasets/0/fields/0/expression/dialects/0/expression"
-    );
+    for dialect in ["ANSI_SQL", "OSSIE_SQL_2026"] {
+        let errors = load(&text.replace("SNOWFLAKE", dialect)).unwrap_err();
+        assert_eq!(errors[0].code, Code::UnsupportedConstruct);
+        assert_eq!(
+            errors[0].path,
+            "/datasets/0/fields/0/expression/dialects/0/expression"
+        );
+    }
 }
 
 proptest! {
