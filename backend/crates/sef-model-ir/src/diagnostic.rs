@@ -36,6 +36,10 @@ pub enum ErrorCode {
     IllegalReaggregation,
     IllegalTemporalReaggregation,
     PolicyContextMissing,
+    // Planner capability (`04_CORRECTNESS_AND_PLANNING.md` Part II §25, §33).
+    PlannerObligationUnsatisfied,
+    PlannerInternalInvariantViolation,
+    PlannerIncomplete,
 }
 
 impl ErrorCode {
@@ -74,6 +78,9 @@ impl ErrorCode {
             Self::IllegalReaggregation => "ILLEGAL_REAGGREGATION",
             Self::IllegalTemporalReaggregation => "ILLEGAL_TEMPORAL_REAGGREGATION",
             Self::PolicyContextMissing => "POLICY_CONTEXT_MISSING",
+            Self::PlannerObligationUnsatisfied => "PLANNER_OBLIGATION_UNSATISFIED",
+            Self::PlannerInternalInvariantViolation => "PLANNER_INTERNAL_INVARIANT_VIOLATION",
+            Self::PlannerIncomplete => "PLANNER_INCOMPLETE",
         }
     }
 }
@@ -84,6 +91,8 @@ pub enum Phase {
     Model,
     /// Validating a bound query against a compiled model.
     Correctness,
+    /// Building the semantic plan (SEIR) of a validated query.
+    Planning,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

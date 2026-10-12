@@ -3514,6 +3514,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sef-exec-ir"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sef-model-ir",
+ "sef-query-ir",
+]
+
+[[package]]
 name = "sef-model-ir"
 version = "0.1.0"
 dependencies = [
@@ -3534,6 +3543,19 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sqlparser",
+]
+
+[[package]]
+name = "sef-planner"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sef-correctness",
+ "sef-exec-ir",
+ "sef-model-ir",
+ "sef-ossie",
+ "sef-query-ir",
+ "serde-saphyr",
 ]
 
 [[package]]

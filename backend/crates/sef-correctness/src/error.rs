@@ -18,6 +18,7 @@ pub enum ErrorDomain {
     Policy,
     Unsupported,
     Model,
+    Planner,
 }
 
 impl ErrorDomain {
@@ -34,6 +35,7 @@ impl ErrorDomain {
             Self::Policy => "POLICY",
             Self::Unsupported => "UNSUPPORTED",
             Self::Model => "MODEL",
+            Self::Planner => "PLANNER",
         }
     }
 
@@ -60,6 +62,9 @@ impl ErrorDomain {
             }
             ErrorCode::PolicyContextMissing | ErrorCode::PolicyViolation => Self::Policy,
             ErrorCode::UnsupportedSemanticConstruct => Self::Unsupported,
+            ErrorCode::PlannerObligationUnsatisfied
+            | ErrorCode::PlannerInternalInvariantViolation
+            | ErrorCode::PlannerIncomplete => Self::Planner,
             _ => Self::Model,
         }
     }
