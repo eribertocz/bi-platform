@@ -1,6 +1,6 @@
 # 0012 — Motor de permisos: Cedar dentro del motor semántico
 
-**Estado:** propuesta técnica de Claude (2026-10-11), con la revisión de seguridad de Codex incorporada (2026-10-12). Pendiente de su verificación. **Concreta:** [0010](0010-seguridad-del-blueprint-en-g2.md) §A (punto único y motor de permisos con denegación por defecto), que pedía elegir el motor en su propio ADR tras leer el código de los candidatos. **Se apoya en:** ADR 0011 (permisos dentro del motor), las leyes 3 y 11 (`docs/producto/leyes-bi.md`) y el modelo de seguridad del propietario (documento 6, PR #85).
+**Estado:** aprobada el 2026-10-12 (Claude y Codex, decisión técnica), con la revisión de seguridad de Codex incorporada. **Concreta:** [0010](0010-seguridad-del-blueprint-en-g2.md) §A (punto único y motor de permisos con denegación por defecto), que pedía elegir el motor en su propio ADR tras leer el código de los candidatos. **Se apoya en:** ADR 0011 (permisos dentro del motor), las leyes 3 y 11 (`docs/producto/leyes-bi.md`) y el modelo de seguridad del propietario (documento 6, PR #85).
 
 ## Contexto
 El motor de permisos (Issue #69) decide **quién puede hacer qué sobre qué objeto**: métrica, dimensión, dataset, dashboard, modelo, fuente o usuario. Debe:
