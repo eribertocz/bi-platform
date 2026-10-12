@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::authorize::authorize;
+use crate::authorize::{authorize, coherent};
 use crate::contract::{Action, Context, Principal, Resource, ResourceKind};
 use crate::decision::{Constraint, Decision, Encoder, Fingerprint, Reason};
 use crate::snapshot::PolicySnapshot;
@@ -61,7 +61,9 @@ pub struct QueryDecision {
     pub allowed: bool,
     /// [`Reason::Permitted`], or the reason of the first denied use.
     pub reason: Reason,
-    /// The first denied use, in the order the query listed them.
+    /// The first denied use, in the order the query listed them; `None`
+    /// when the request as a whole is invalid (no use, or one object
+    /// described in contradictory ways).
     pub denied: Option<(ResourceKind, String, Usage)>,
     /// Masks to apply; empty when the query is denied.
     pub constraints: Vec<Constraint>,
@@ -80,7 +82,28 @@ pub fn authorize_query(
     uses: &[Use],
     context: &Context,
 ) -> QueryDecision {
+    // The whole scope, always: the snapshot (a revocation), who asks, the
+    // context and every use, whatever the outcome.
     let mut encoder = Encoder::new("sef-authz/query");
+    encoder.text(snapshot.version());
+    encoder.principal(principal);
+    encoder.attributes(context.iter());
+    encoder.count(uses.len());
+    for item in uses {
+        encoder.text(item.usage.code());
+        encoder.resource(&item.resource);
+    }
+    // A query uses at least one object, and describes each object once.
+    if uses.is_empty() || !coherent(snapshot, principal, uses.iter().map(|u| &u.resource)) {
+        return QueryDecision {
+            allowed: false,
+            reason: Reason::InvalidRequest,
+            denied: None,
+            constraints: Vec::new(),
+            decisions: Vec::new(),
+            fingerprint: encoder.finish(),
+        };
+    }
     let mut decisions = Vec::new();
     let mut masks = BTreeSet::new();
     let mut denied = None;

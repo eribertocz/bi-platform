@@ -104,7 +104,7 @@ impl Encoder {
         self.0.update(value);
     }
 
-    fn count(&mut self, value: usize) {
+    pub(crate) fn count(&mut self, value: usize) {
         self.0.update(*b"n");
         self.0.update((value as u64).to_be_bytes());
     }

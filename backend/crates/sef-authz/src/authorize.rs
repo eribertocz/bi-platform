@@ -42,7 +42,7 @@ pub fn authorize(
     };
     let (Some(request), Some(entities)) = (
         request(snapshot, principal, action, resource, context),
-        entities(snapshot, principal, resource),
+        entities(snapshot, principal, std::iter::once(resource)),
     ) else {
         return decision(false, Reason::InvalidRequest, Vec::new());
     };
@@ -132,10 +132,21 @@ fn collect<'a>(
 
 /// The principal, its roles, the resource and its containers, validated
 /// against the schema.
-fn entities(
+/// Whether the principal and every resource of one request describe each
+/// object once and consistently, and match the schema together: a query
+/// cannot show an object as one thing in one use and another in the next.
+pub(crate) fn coherent<'a>(
     snapshot: &PolicySnapshot,
-    principal: &Principal,
-    resource: &Resource,
+    principal: &'a Principal,
+    resources: impl IntoIterator<Item = &'a Resource>,
+) -> bool {
+    entities(snapshot, principal, resources).is_some()
+}
+
+fn entities<'a>(
+    snapshot: &PolicySnapshot,
+    principal: &'a Principal,
+    resources: impl IntoIterator<Item = &'a Resource>,
 ) -> Option<Entities> {
     let mut found = Collected::new();
     let mut roles = Vec::new();
@@ -150,7 +161,7 @@ fn entities(
         &principal.attributes,
         roles,
     )?;
-    let mut pending = vec![resource];
+    let mut pending: Vec<&Resource> = resources.into_iter().collect();
     while let Some(current) = pending.pop() {
         let parents = current
             .parents
