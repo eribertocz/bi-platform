@@ -113,6 +113,16 @@ permisos por sí mismos y el acceso sigue limitado a datos sintéticos hasta que
 existan políticas semánticas. Cerrar sesión revoca el acceso a BI; la sesión
 SSO corporativa la controla el proveedor.
 
+Inicio y callback comparten admisión por proceso: cubo global de 120 fichas
+(recarga de 2/s) y por IP del socket de 20 fichas (una cada 3 s), con un máximo
+de 4096 clientes activos. No se confía en `Forwarded` ni `X-Forwarded-For`:
+tras un proxy los usuarios comparten el límite de su IP. El rechazo devuelve
+429 antes de contactar al proveedor o escribir en PostgreSQL; se cuenta en
+`bi_oidc_login{code="rate_limited"}` y en logs agregados cada minuto, sin IP.
+Los callbacks admitidos conservan la auditoría completa. PostgreSQL limita
+a 1024 intentos vivos entre todas las instancias: al llenarse devuelve 503
+sin insertar ni emitir cookie, con comprobación e inserción serializadas.
+
 Prueba reproducible (Keycloak y PostgreSQL exclusivos para esta batería):
 desde la raíz, `docker compose -f compose.oidc.yaml up -d` (o `podman compose`).
 Espera a que responda `http://127.0.0.1:18071/realms/bi-test/.well-known/openid-configuration`.

@@ -4,10 +4,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write as _;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
-use axum::extract::{Extension, Query, State};
+use axum::extract::{ConnectInfo, Extension, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{
@@ -30,6 +32,107 @@ use crate::{AppState, auth, config::ConfigError, problem::Problem};
 const BINDING_COOKIE: &str = "bi_oidc";
 const ATTEMPT_SECONDS: u64 = 300;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_LIVE_ATTEMPTS: i64 = 1024;
+const GLOBAL_BURST: f64 = 120.0;
+const CLIENT_BURST: f64 = 20.0;
+const MAX_CLIENTS: usize = 4096;
+
+struct Bucket {
+    tokens: f64,
+    updated: Instant,
+}
+impl Bucket {
+    fn refill(&mut self, now: Instant, burst: f64, rate: f64) {
+        self.tokens =
+            (self.tokens + now.duration_since(self.updated).as_secs_f64() * rate).min(burst);
+        self.updated = now;
+    }
+}
+pub(crate) struct Admission {
+    global: Bucket,
+    clients: BTreeMap<IpAddr, Bucket>,
+    rejected: u64,
+    last_log: Option<Instant>,
+}
+impl Admission {
+    fn new(now: Instant) -> Self {
+        Self {
+            global: Bucket {
+                tokens: GLOBAL_BURST,
+                updated: now,
+            },
+            clients: BTreeMap::new(),
+            rejected: 0,
+            last_log: None,
+        }
+    }
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        self.global.refill(now, GLOBAL_BURST, 2.0);
+        if self.global.tokens < 1.0 {
+            return false;
+        }
+        if !self.clients.contains_key(&ip) && self.clients.len() >= MAX_CLIENTS {
+            // Only discard fully replenished buckets; rotating IPs cannot reset an active limit.
+            self.clients
+                .retain(|_, bucket| now.duration_since(bucket.updated) < Duration::from_secs(60));
+            if self.clients.len() >= MAX_CLIENTS {
+                return false;
+            }
+        }
+        let client = self.clients.entry(ip).or_insert(Bucket {
+            tokens: CLIENT_BURST,
+            updated: now,
+        });
+        client.refill(now, CLIENT_BURST, 1.0 / 3.0);
+        if client.tokens < 1.0 {
+            return false;
+        }
+        client.tokens -= 1.0;
+        self.global.tokens -= 1.0;
+        true
+    }
+}
+type AdmissionLimit = Arc<Mutex<Admission>>;
+
+fn admit(
+    state: &AppState,
+    id: &RequestId,
+    limit: &AdmissionLimit,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+) -> Option<Response> {
+    // Never trust Forwarded/X-Forwarded-For from an anonymous caller. Without
+    // transport information, all callers share one conservative client bucket.
+    let ip = peer.map_or(IpAddr::from([0, 0, 0, 0]), |Extension(peer)| peer.0.ip());
+    let mut admission = limit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if admission.allow(ip, now) {
+        return None;
+    }
+    state.metrics.oidc_login("rate_limited");
+    admission.rejected = admission.rejected.saturating_add(1);
+    if admission
+        .last_log
+        .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(60))
+    {
+        tracing::warn!(
+            event_code = "rate_limited",
+            rejected = admission.rejected,
+            "OIDC admission rejections in interval"
+        );
+        admission.rejected = 0;
+        admission.last_log = Some(now);
+    }
+    Some(
+        (
+            [(header::REFERRER_POLICY, "no-referrer")],
+            auth::problem(StatusCode::TOO_MANY_REQUESTS, "rate_limited", id),
+        )
+            .into_response(),
+    )
+}
+
 type DiscoveredClient = CoreClient<
     EndpointSet,
     EndpointNotSet,
@@ -398,13 +501,19 @@ pub(crate) struct NoParameters {}
         (status = 400, description = "Parámetros no permitidos", body = Problem),
         (status = 403, description = "Origin inválido", body = Problem),
         (status = 404, description = "OIDC deshabilitado", body = Problem),
-        (status = 503, description = "Proveedor o PostgreSQL no disponible", body = Problem)))]
+        (status = 429, description = "Admisión OIDC limitada", body = Problem),
+        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible", body = Problem)))]
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,
+    Extension(limit): Extension<AdmissionLimit>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     query: Result<Query<NoParameters>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    if let Some(response) = admit(&state, &id, &limit, peer) {
+        return response;
+    }
     let Some(config) = &state.auth.oidc else {
         return failure(&state, StatusCode::NOT_FOUND, "oidc_disabled", &id);
     };
@@ -464,11 +573,15 @@ pub(crate) async fn start(
         previous,
     )
     .await;
-    if result.is_err() {
+    if !matches!(result, Ok(true)) {
         return failure(
             &state,
             StatusCode::SERVICE_UNAVAILABLE,
-            "session_store_unavailable",
+            if matches!(result, Ok(false)) {
+                "oidc_attempt_capacity"
+            } else {
+                "session_store_unavailable"
+            },
             &id,
         );
     }
@@ -491,14 +604,28 @@ async fn save_attempt(
     nonce: String,
     verifier: String,
     previous: Option<Vec<u8>>,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    // Serialize cleanup/count/insert across processes sharing this database.
+    sqlx::query("LOCK TABLE bi_meta.oidc_attempts IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM bi_meta.oidc_attempts WHERE expires_at <= clock_timestamp()")
         .execute(&mut *tx)
         .await?;
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bi_meta.oidc_attempts WHERE expires_at > clock_timestamp()",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if live >= MAX_LIVE_ATTEMPTS {
+        tx.commit().await?;
+        return Ok(false);
+    }
     sqlx::query("INSERT INTO bi_meta.oidc_attempts (state_hash, browser_hash, nonce, verifier, previous_session) VALUES ($1, $2, $3, $4, $5)")
         .bind(state_hash).bind(browser_hash).bind(nonce).bind(verifier).bind(previous).execute(&mut *tx).await?;
-    tx.commit().await
+    tx.commit().await?;
+    Ok(true)
 }
 
 #[derive(Deserialize)]
@@ -518,13 +645,19 @@ pub(crate) struct Callback {
     responses((status = 303, description = "Sesión de servidor creada; cookie HttpOnly SameSite=Strict"),
         (status = 401, description = "Intento o token inválido", body = Problem),
         (status = 404, description = "OIDC deshabilitado", body = Problem),
-        (status = 503, description = "Proveedor o PostgreSQL no disponible", body = Problem)))]
+        (status = 429, description = "Admisión OIDC limitada", body = Problem),
+        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible", body = Problem)))]
 pub(crate) async fn callback(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,
+    Extension(limit): Extension<AdmissionLimit>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
 ) -> Response {
+    if let Some(response) = admit(&state, &id, &limit, peer) {
+        return response;
+    }
     let mut response = complete(&state, &id, &headers, query).await;
     if response.status() == StatusCode::UNAUTHORIZED {
         let result = async {
@@ -756,11 +889,16 @@ async fn login_event(id: &RequestId, user: Option<&str>) -> Result<bi_audit::Eve
 }
 
 pub(crate) fn routes() -> axum::Router<AppState> {
+    routes_with_limit(Arc::new(Mutex::new(Admission::new(Instant::now()))))
+}
+
+fn routes_with_limit(limit: AdmissionLimit) -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
         .route("/api/v1/oidc/config", get(available))
         .route("/api/v1/oidc/start", post(start))
         .route("/api/v1/oidc/callback", get(callback))
+        .layer(Extension(limit))
 }
 
 #[cfg(test)]

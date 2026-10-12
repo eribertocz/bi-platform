@@ -166,9 +166,7 @@ impl QueryMetrics {
 
     pub(crate) fn oidc_login(&self, result: &'static str) {
         if let Some(metrics) = &self.0 {
-            metrics
-                .oidc_logins
-                .add(1, &[KeyValue::new("result", result)]);
+            metrics.oidc_logins.add(1, &[KeyValue::new("code", result)]);
         }
     }
 

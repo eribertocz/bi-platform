@@ -193,7 +193,7 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
             "bi_query_execute" => vec!["engine", "result", "workload"],
             "bi_result_serialize" => vec!["format"],
             "bi_query_rejected" => vec!["reason", "workload"],
-            "bi_oidc_login" => vec!["result"],
+            "bi_oidc_login" => vec!["code"],
             "bi_query_inflight"
             | "bi_query_queued"
             | "bi_query_capacity"
@@ -211,7 +211,7 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
                 "workload" => &["interactive"],
                 "engine" => &["duckdb"],
                 "format" => &["json"],
-                "result" if p.name == "bi_oidc_login" => &["oidc_disabled"],
+                "code" if p.name == "bi_oidc_login" => &["oidc_disabled", "rate_limited"],
                 "result" => &["ok", "error", "busy", "timeout", "unavailable", "cancelled"],
                 "reason" => &[
                     "invalid_query",
@@ -261,7 +261,7 @@ async fn oidc_denial_exports_a_closed_outcome_without_private_labels() {
     assert_eq!(response.headers()["x-request-id"], "private-request-id");
     let points = capture.points();
     assert_eq!(
-        count(&points, "bi_oidc_login", Some(("result", "oidc_disabled"))),
+        count(&points, "bi_oidc_login", Some(("code", "oidc_disabled"))),
         1
     );
     assert!(!format!("{points:?}").contains("private-"));

@@ -512,7 +512,16 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description Proveedor o PostgreSQL no disponible */
+      /** @description Admisión OIDC limitada */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Proveedor, PostgreSQL o capacidad de intentos no disponible */
       503: {
         headers: {
           [name: string]: unknown;
@@ -588,7 +597,16 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description Proveedor o PostgreSQL no disponible */
+      /** @description Admisión OIDC limitada */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Proveedor, PostgreSQL o capacidad de intentos no disponible */
       503: {
         headers: {
           [name: string]: unknown;

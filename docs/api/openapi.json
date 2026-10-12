@@ -220,8 +220,18 @@
               }
             }
           },
+          "429": {
+            "description": "Admisión OIDC limitada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Proveedor o PostgreSQL no disponible",
+            "description": "Proveedor, PostgreSQL o capacidad de intentos no disponible",
             "content": {
               "application/json": {
                 "schema": {
@@ -302,8 +312,18 @@
               }
             }
           },
+          "429": {
+            "description": "Admisión OIDC limitada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Proveedor o PostgreSQL no disponible",
+            "description": "Proveedor, PostgreSQL o capacidad de intentos no disponible",
             "content": {
               "application/json": {
                 "schema": {

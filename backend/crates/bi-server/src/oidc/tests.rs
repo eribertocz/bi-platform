@@ -105,6 +105,59 @@ async fn audit_events_never_include_callback_input_or_credentials() {
     }
 }
 
+#[test]
+fn admission_limits_clients_globally_and_refills_without_sleep() {
+    let now = Instant::now();
+    let ip = IpAddr::from([127, 0, 0, 1]);
+    let mut limit = Admission::new(now);
+    for _ in 0..20 {
+        assert!(limit.allow(ip, now));
+    }
+    assert!(!limit.allow(ip, now));
+    assert!(limit.allow(ip, now + Duration::from_secs(3)));
+    assert!(!limit.allow(ip, now + Duration::from_secs(3)));
+    let mut limit = Admission::new(now);
+    for n in 0..120 {
+        assert!(limit.allow(IpAddr::from([10, 0, 0, n]), now));
+    }
+    assert!(!limit.allow(ip, now));
+    assert!(limit.allow(ip, now + Duration::from_millis(500)));
+}
+
+#[test]
+fn client_map_is_bounded_and_active_buckets_are_not_evicted() {
+    let now = Instant::now();
+    let mut limit = Admission::new(now);
+    for n in 0..MAX_CLIENTS {
+        limit.clients.insert(
+            IpAddr::from(u32::try_from(n).unwrap().to_be_bytes()),
+            Bucket {
+                tokens: 0.0,
+                updated: now,
+            },
+        );
+    }
+    let ip = IpAddr::from([127, 0, 0, 1]);
+    assert!(!limit.allow(ip, now));
+    assert_eq!(limit.clients.len(), MAX_CLIENTS);
+    assert!(limit.allow(ip, now + Duration::from_secs(60)));
+    assert_eq!(limit.clients.len(), 1);
+}
+
+proptest! {
+    #[test]
+    fn admission_never_exceeds_either_burst(clients in prop::collection::vec(0u8..30, 0..300)) {
+        let now = Instant::now();
+        let mut limit = Admission::new(now);
+        let mut counts = BTreeMap::new();
+        for client in clients {
+            if limit.allow(IpAddr::from([10, 0, 0, client]), now) { *counts.entry(client).or_insert(0usize) += 1; }
+        }
+        prop_assert!(counts.values().all(|count| *count <= 20));
+        prop_assert!(counts.values().sum::<usize>() <= 120);
+    }
+}
+
 #[cfg(feature = "postgres-tests")]
 mod real {
     use super::*;
@@ -411,6 +464,192 @@ mod real {
         );
     }
 
+    #[sqlx::test(migrations = false)]
+    async fn http_limits_reject_both_routes_without_provider_or_writes(pool: PgPool) {
+        use opentelemetry::metrics::MeterProvider as _;
+        let db = crate::db::Database::start(pool.clone());
+        assert!(db.wait_until_migrated().await);
+        let mut state = AppState::new(db);
+        state.auth.oidc = Some(config(
+            "http://127.0.0.1:1/realms/unreachable",
+            "bi-platform",
+        ));
+        let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporter::default();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        state.metrics =
+            crate::metrics::QueryMetrics::new(&provider.meter("test"), &state.analytics);
+        let limit = Arc::new(Mutex::new(Admission::new(Instant::now())));
+        let app = routes_with_limit(limit.clone())
+            .layer(Extension(RequestId::new("admission-test".parse().unwrap())))
+            .with_state(state);
+        let ip = IpAddr::from([192, 0, 2, 1]);
+        // Every combination must fail before discovery, attempts and callback audit.
+        for global in [false, true] {
+            for (method, path) in [
+                ("POST", "/api/v1/oidc/start"),
+                ("GET", "/api/v1/oidc/callback"),
+            ] {
+                {
+                    let now = Instant::now();
+                    let mut admission = limit.lock().unwrap();
+                    *admission = Admission::new(now);
+                    if global {
+                        admission.global.tokens = 0.0;
+                    } else {
+                        admission.clients.insert(
+                            ip,
+                            Bucket {
+                                tokens: 0.0,
+                                updated: now,
+                            },
+                        );
+                    }
+                }
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .extension(ConnectInfo(SocketAddr::new(ip, 1234)))
+                    .header("x-forwarded-for", "192.0.2.99")
+                    .header("origin", "http://127.0.0.1:8080")
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+                assert!(!response.headers().contains_key(header::SET_COOKIE));
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert!(std::str::from_utf8(&body).unwrap().contains("rate_limited"));
+            }
+        }
+        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.oidc_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.audit_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(attempts, 0);
+        assert_eq!(audited, 0);
+        provider.force_flush().unwrap();
+        let metrics = exporter.get_finished_metrics().unwrap();
+        let point = metrics
+            .iter()
+            .flat_map(opentelemetry_sdk::metrics::data::ResourceMetrics::scope_metrics)
+            .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+            .find(|m| m.name() == "bi_oidc_login")
+            .unwrap();
+        let opentelemetry_sdk::metrics::data::AggregatedMetrics::U64(
+            opentelemetry_sdk::metrics::data::MetricData::Sum(sum),
+        ) = point.data()
+        else {
+            panic!("expected counter");
+        };
+        let point = sum.data_points().next().unwrap();
+        assert_eq!(point.value(), 4);
+        assert!(
+            point
+                .attributes()
+                .any(|a| a.key.as_str() == "code" && a.value.as_str() == "rate_limited")
+        );
+        // Admitted rejections still append to the audit chain.
+        *limit.lock().unwrap() = Admission::new(Instant::now());
+        limit.lock().unwrap().global.tokens = 1.0;
+        assert_eq!(
+            send(&app, "GET", "/api/v1/oidc/callback", None, None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/api/v1/oidc/start",
+                None,
+                Some("http://127.0.0.1:8080")
+            )
+            .await
+            .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.audit_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audited, 1);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn live_attempt_capacity_is_atomic_and_http_returns_503(pool: PgPool) {
+        let db = crate::db::Database::start(pool.clone());
+        assert!(db.wait_until_migrated().await);
+        sqlx::query("INSERT INTO bi_meta.oidc_attempts (state_hash, browser_hash, nonce, verifier) SELECT sha256(n::text::bytea), sha256(n::text::bytea), 'nonce', 'verifier' FROM generate_series(1, $1) n")
+            .bind(MAX_LIVE_ATTEMPTS - 1).execute(&pool).await.unwrap();
+        let (a, b) = tokio::join!(
+            save_attempt(
+                pool.clone(),
+                vec![1; 32],
+                vec![1; 32],
+                "nonce".into(),
+                "verifier".into(),
+                None
+            ),
+            save_attempt(
+                pool.clone(),
+                vec![2; 32],
+                vec![2; 32],
+                "nonce".into(),
+                "verifier".into(),
+                None
+            )
+        );
+        assert_ne!(a.unwrap(), b.unwrap(), "only one concurrent insert fits");
+        let mut state = AppState::new(db);
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        let app = crate::router(state);
+        let response = send(
+            &app,
+            "POST",
+            "/api/v1/oidc/start",
+            None,
+            Some("http://127.0.0.1:8080"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.oidc_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, MAX_LIVE_ATTEMPTS);
+        sqlx::query(
+            "UPDATE bi_meta.oidc_attempts SET expires_at = clock_timestamp() - interval '1 second'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            save_attempt(
+                pool.clone(),
+                vec![3; 32],
+                vec![3; 32],
+                "nonce".into(),
+                "verifier".into(),
+                None
+            )
+            .await
+            .unwrap()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.oidc_attempts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
     async fn begin(app: &Router) -> (String, String) {
         let response = send(
             app,
@@ -571,6 +810,9 @@ mod real {
                 .any(|e| e.result == bi_audit::ResultCode::Denied)
         );
         crate::audit::verify(&pool, None).await.unwrap();
+        // Continue on the restarted server already checked above; admission is
+        // process-local and the first phase deliberately exhausted many tokens.
+        let app = restarted.clone();
         // Reauthentication rotates the session and revokes the previous one.
         let start = send(
             &app,
