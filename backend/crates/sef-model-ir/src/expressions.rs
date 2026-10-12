@@ -1,3 +1,4 @@
+use crate::functions::ScalarFunction;
 use crate::identity::StableId;
 use crate::time::TimeBucket;
 use crate::types::{
@@ -92,6 +93,11 @@ pub enum ScalarExprKind {
         operand: Box<ScalarExpr>,
         conversion: StableId,
     },
+    /// A scalar function with exact semantics ([`ScalarFunction`]).
+    Function {
+        function: ScalarFunction,
+        arguments: Vec<ScalarExpr>,
+    },
 }
 
 impl ScalarExpr {
@@ -156,7 +162,11 @@ impl ScalarExpr {
             | ScalarExprKind::UnitConversion { operand, .. } => vec![operand],
             ScalarExprKind::Arithmetic { left, right, .. }
             | ScalarExprKind::Comparison { left, right, .. } => vec![left, right],
-            ScalarExprKind::BooleanLogic { operands, .. } => operands.iter().collect(),
+            ScalarExprKind::BooleanLogic { operands, .. }
+            | ScalarExprKind::Function {
+                arguments: operands,
+                ..
+            } => operands.iter().collect(),
             ScalarExprKind::Case {
                 branches,
                 otherwise,

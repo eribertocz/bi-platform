@@ -13,17 +13,20 @@
 //! exact division becomes `DECIMAL(20,0)`, which holds every 64-bit integer.
 
 use sef_model_ir::expressions::{BooleanOp, ComparisonOp, ScalarExpr, ScalarExprKind, UnaryOp};
+use sef_model_ir::functions::ScalarFunction;
 use sef_model_ir::time::{CalendarProfile, IanaZoneId, TimeBucket, TimeGrain};
 use sef_model_ir::types::{
     ArithmeticOp, DecimalType, DecimalValue, FiniteFloat, Literal, NumericContract, RoundingMode,
     ValueType, ZeroDivisionPolicy, derived_decimal,
 };
 use sqlparser::ast::{
-    BinaryOperator, CastKind, DataType, ExactNumberInfo, Expr, Function, FunctionArg,
-    FunctionArgExpr, FunctionArguments, Ident, UnaryOperator, Value,
+    BinaryOperator, CastKind, CeilFloorKind, DataType, DateTimeField, ExactNumberInfo, Expr,
+    Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, UnaryOperator, Value,
 };
 
 use crate::diagnostic::Code;
+
+mod functions;
 
 /// Why an expression has no CSMIR translation; the caller adds the path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +304,46 @@ impl<N: Names> Translator<'_, N> {
                 let target = cast_target(data_type)?;
                 self.cast(inner, target)?
             }
+            Expr::Like {
+                negated,
+                expr: value,
+                pattern,
+                any: false,
+                escape_char: None,
+            } => self.like(value, pattern, false, *negated)?,
+            Expr::ILike {
+                negated,
+                expr: value,
+                pattern,
+                any: false,
+                escape_char: None,
+            } => self.like(value, pattern, true, *negated)?,
+            Expr::Ceil {
+                expr: value,
+                field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+            } => self.call(ScalarFunction::Ceil, &[value])?,
+            Expr::Floor {
+                expr: value,
+                field: CeilFloorKind::DateTimeField(DateTimeField::NoDateTime),
+            } => self.call(ScalarFunction::Floor, &[value])?,
+            Expr::Position { expr: needle, r#in } => {
+                self.call(ScalarFunction::Position, &[needle, r#in])?
+            }
+            Expr::Substring {
+                expr: value,
+                substring_from: Some(start),
+                substring_for: Some(length),
+                shorthand: false,
+                ..
+            } => self.call(ScalarFunction::Substring, &[value, start, length])?,
+            Expr::Trim {
+                expr: value,
+                trim_where,
+                trim_what,
+                trim_characters: None,
+            } => self.trim(value, trim_where.as_ref(), trim_what.as_deref())?,
+            Expr::IsDistinctFrom(left, right) => self.distinct(left, right, true)?,
+            Expr::IsNotDistinctFrom(left, right) => self.distinct(left, right, false)?,
             Expr::Function(function) => self.function(function)?,
             other => return Err(not_representable(&format!("`{other}`"))),
         };
@@ -370,6 +413,18 @@ impl<N: Names> Translator<'_, N> {
             };
             let operands = vec![self.boolean(left)?, self.boolean(right)?];
             return Ok(boolean(join, operands));
+        }
+        match op {
+            BinaryOperator::StringConcat => {
+                return self.call(ScalarFunction::Concat, &[left, right]);
+            }
+            BinaryOperator::Modulo => {
+                let function = ScalarFunction::Mod {
+                    zero: self.division.zero,
+                };
+                return self.call(function, &[left, right]);
+            }
+            _ => {}
         }
         let op = match op {
             BinaryOperator::Plus => ArithmeticOp::Add,
@@ -535,7 +590,9 @@ impl<N: Names> Translator<'_, N> {
                 let condition = self.boolean(condition)?;
                 self.case(vec![condition], &[*then, *otherwise], true)
             }
-            _ => Err(not_representable(&format!("La función `{name}`"))),
+            _ => self
+                .scalar_function(&name, &args)
+                .unwrap_or_else(|| Err(not_representable(&format!("La función `{name}`")))),
         }
     }
 
