@@ -11,7 +11,7 @@ license = "Apache-2.0"
 # semantic fingerprint (docs/semantica/adr/0001-sef-canonical-value-v1.md).
 [dependencies]
 ciborium = "=0.2.2"
-semver = "=1.0.27"
+semver = "=1.0.28"
 sha2 = "=0.10.9"
 
 [dev-dependencies]
