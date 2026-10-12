@@ -11,6 +11,8 @@ publish = false
 arrow-array = "58"
 arrow-schema = "58"
 axum = "0.8.9"
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # Engine source or prebuilt library is chosen by the `bundled` feature of
 # bi-runtime; the version must match the libduckdb the image downloads.

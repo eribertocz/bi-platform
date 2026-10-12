@@ -20,6 +20,12 @@
     <ul class="nav-list">
       <li>
         <a
+          href={resolve('/modelos')}
+          aria-current={page.url.pathname === '/modelos' ? 'page' : undefined}>Modelos</a
+        >
+      </li>
+      <li>
+        <a
           href={resolve('/explorar')}
           aria-current={page.url.pathname === '/explorar' ? 'page' : undefined}>Exploración</a
         >

@@ -1,0 +1,29 @@
+version: '0.2.0.dev0'
+name: Ventas
+datasets:
+  - name: sales
+    source: lake.main.sales
+    primary_key: [order_id]
+    fields:
+      - name: order_id
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: order_id
+      - name: region
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: region
+        dimension: {}
+      - name: amount
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: amount
+metrics:
+  - name: importe_total
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(sales.amount)

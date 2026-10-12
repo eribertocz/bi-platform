@@ -50,6 +50,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/models': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real. */
+    get: operations['listModels'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/queries': {
     parameters: {
       query?: never;
@@ -133,6 +150,8 @@ export interface components {
       /** @description Selects a configured synthetic identity; this is not password authentication. */
       user_id: string;
     };
+    /** @enum {string} */
+    DiagnosticSeverity: 'error' | 'warning';
     Filter: {
       /** @description A dimension of the dataset. */
       field: string;
@@ -156,6 +175,52 @@ export interface components {
     };
     /** @enum {string} */
     HealthStatus: 'ok' | 'degraded' | 'unavailable';
+    ModelDiagnostic: {
+      code: string;
+      /** Format: int64 */
+      column?: number | null;
+      /** Format: int64 */
+      line?: number | null;
+      message: string;
+      /** @description JSON pointer; empty string denotes the document root. */
+      path: string;
+      severity: components['schemas']['DiagnosticSeverity'];
+    };
+    /** @description An invalid file never exposes metadata from a previous successful load. */
+    ModelFile:
+      | {
+          diagnostics: components['schemas']['ModelDiagnostic'][];
+          dimensions: components['schemas']['ModelMember'][];
+          file: string;
+          fingerprint: string;
+          metrics: components['schemas']['ModelMember'][];
+          name: string;
+          /** @enum {string} */
+          status: 'valid';
+        }
+      | {
+          diagnostics: components['schemas']['ModelDiagnostic'][];
+          file: string;
+          name: string;
+          /** @enum {string} */
+          status: 'invalid';
+        };
+    ModelMember: {
+      /** @description Exact logical type, e.g. INT64, DECIMAL(18,2), TIMESTAMPTZ (instant). */
+      data_type: string;
+      id: string;
+      name: string;
+      /**
+       * @description Direct dimension binding nullability. Null means not inferred for
+       *     computed dimensions or metrics, whose result has not been executed.
+       */
+      nullable?: boolean | null;
+    };
+    ModelsResponse: {
+      diagnostics: components['schemas']['ModelDiagnostic'][];
+      models: components['schemas']['ModelFile'][];
+      project_status: components['schemas']['ProjectStatus'];
+    };
     Problem: {
       /** @description Stable identifier for clients, e.g. `invalid_query`. */
       code: string;
@@ -172,6 +237,8 @@ export interface components {
        */
       type: string;
     };
+    /** @enum {string} */
+    ProjectStatus: 'not_configured' | 'ready' | 'unavailable';
     /**
      * @description An aggregate query over an allowlisted dataset. No SQL is accepted.
      * @example {
@@ -407,6 +474,62 @@ export interface operations {
       };
       /** @description PostgreSQL no disponible */
       503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  listModels: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Estado del proyecto y resultados por archivo; sin configuración, lista vacía. Directorio inaccesible o límites globales: project_status unavailable y diagnóstico; nunca resultados parciales. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ModelsResponse'];
+        };
+      };
+      /** @description Sin sesión válida */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Demasiadas cargas simultáneas */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Motor no disponible o lectura fallida */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Tiempo de compilación agotado */
+      504: {
         headers: {
           [name: string]: unknown;
         };

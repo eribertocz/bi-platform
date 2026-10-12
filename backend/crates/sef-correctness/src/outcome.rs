@@ -7,7 +7,7 @@ use std::fmt;
 
 use sef_model_ir::grain::{Grain, GrainAtom};
 use sef_model_ir::identity::StableId;
-use sef_model_ir::time::{IanaZoneId, TimeGrain};
+use sef_model_ir::time::{CalendarProfile, IanaZoneId, TimeGrain};
 use sef_query_ir::query::{QualifiedDimensionRef, RequestedAtom, SemanticQuerySet};
 
 /// A proven property of the request (§4.1), not a planner choice.
@@ -99,11 +99,21 @@ pub enum Obligation {
         policy: StableId,
         scope: StableId,
     },
-    /// Instant → business zone → calendar bucket, in that order (§17.1).
+    /// Instant → business zone → calendar bucket, in that order (§17.1),
+    /// with the calendar whose periods the bucket follows.
     ConvertTimezoneBeforeBucketing {
         dimension: StableId,
         dataset: StableId,
         timezone: IanaZoneId,
+        calendar: CalendarProfile,
+        grain: TimeGrain,
+    },
+    /// Calendar values (dates) grouped into the periods of a calendar; the
+    /// calendar is part of the contract, never a backend default.
+    ApplyCalendarBucket {
+        dimension: StableId,
+        dataset: StableId,
+        calendar: CalendarProfile,
         grain: TimeGrain,
     },
     PreserveExactDecimalSemantics {
@@ -282,11 +292,21 @@ impl fmt::Display for Obligation {
                 dimension,
                 dataset,
                 timezone,
+                calendar,
                 grain,
             } => write!(
                 f,
-                "ConvertTimezoneBeforeBucketing {dimension} on {dataset} to {} then {grain:?}",
+                "ConvertTimezoneBeforeBucketing {dimension} on {dataset} to {} then {grain:?} ({calendar:?})",
                 timezone.as_str()
+            ),
+            Self::ApplyCalendarBucket {
+                dimension,
+                dataset,
+                calendar,
+                grain,
+            } => write!(
+                f,
+                "ApplyCalendarBucket {dimension} on {dataset} by {grain:?} ({calendar:?})"
             ),
             Self::PreserveExactDecimalSemantics { metric } => {
                 write!(f, "PreserveExactDecimalSemantics {metric}")
