@@ -29,6 +29,8 @@ Cada capacidad sigue cinco pasos: **el propietario define el objetivo → un age
 
 Definidos por el propietario (2026-10-11). Cada capacidad rescata lo mejor de las herramientas BI de referencia y **va más allá**: la documentación y los referentes son el suelo, no el techo. Todo diseño y todo PR explica cómo cumple cada principio, o por qué no aplica.
 
+**Leyes fundamentales (obligatorias):** `docs/producto/leyes-bi.md`. Son las 10 leyes del propietario más 3 añadidas. Todo PR de producto indica qué leyes toca y cómo las cumple; si dos chocan, priman la 1, 2, 3 y 5. Un PR que viola una ley no se integra, aunque CI esté en verde.
+
 | Principio | Qué significa | Cómo se comprueba |
 |---|---|---|
 | **Facilidad** | La persona dice qué necesita, no cómo hacerlo. Hay valores por defecto sensatos, el usuario puede anularlos y el sistema explica cada decisión que toma por él | El caso común se hace sin configurar nada; la elección automática es visible y anulable |
