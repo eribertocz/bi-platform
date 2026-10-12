@@ -9,6 +9,8 @@ use sef_model_ir::time::TimestampSemantics;
 use sef_model_ir::types::{DecimalType, ValueType};
 use sef_ossie::catalog::{Column, Relation};
 
+pub mod execution;
+
 #[derive(Debug)]
 pub enum CatalogError {
     UnknownSource,

@@ -2950,8 +2950,13 @@ version = "0.1.0"
 dependencies = [
  "duckdb",
  "proptest",
+ "sef-correctness",
+ "sef-exec-ir",
  "sef-model-ir",
  "sef-ossie",
+ "sef-planner",
+ "sef-query-ir",
+ "serde-saphyr",
 ]
 
 [[package]]
