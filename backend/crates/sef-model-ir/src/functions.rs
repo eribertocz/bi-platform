@@ -113,8 +113,11 @@ pub enum ScalarFunction {
     /// The number of `part` boundaries crossed from the first argument to
     /// the second, negative when the second is earlier: months count
     /// `12 * year + month`, weeks count ISO Mondays, days count dates, and
-    /// clock parts count whole units of the wall clock. Instants admit only
-    /// minutes and seconds, which no zone offset can shift.
+    /// clock parts count whole units of the wall clock of a local
+    /// date-time. Instants admit only minutes and seconds, counted on the
+    /// UTC epoch and never on a local clock
+    /// ([`DatePart::instant_boundaries`]). The count is zero when both
+    /// values fall within one unit, even if the second is earlier.
     DateDiff { part: DatePart },
     /// An ISO 8601 calendar date (`YYYY-MM-DD`) read from text; anything
     /// else is an error, never a guess.
@@ -163,6 +166,26 @@ impl DatePart {
     /// added or counted.
     const fn is_position(self) -> bool {
         matches!(self, Self::DayOfWeek | Self::DayOfYear)
+    }
+
+    /// `DATEDIFF(part, start, end)` between two instants in microseconds
+    /// since 1970-01-01T00:00:00Z: the boundaries of the UTC epoch crossed,
+    /// `floor(end / unit) - floor(start / unit)`, rounding toward negative
+    /// infinity before 1970 as well. Neither the session zone nor the
+    /// business zone takes part: a historical offset with seconds
+    /// (`America/La_Paz` was -04:32:36 in 1900) would move local minute
+    /// boundaries. `None` for the parts an instant cannot be counted in:
+    /// hours, because offsets such as +05:30 make UTC hours differ from
+    /// the local ones, and calendar parts, which need a zone.
+    #[must_use]
+    pub const fn instant_boundaries(self, start: i64, end: i64) -> Option<i64> {
+        let unit = match self {
+            Self::Second => 1_000_000,
+            Self::Minute => 60_000_000,
+            _ => return None,
+        };
+        // Both quotients lie within ±i64::MAX / 10^6: no overflow.
+        Some(end.div_euclid(unit) - start.div_euclid(unit))
     }
 }
 
@@ -468,8 +491,7 @@ impl ScalarFunction {
                     if start.value_type == end.value_type
                         && !part.is_position()
                         && temporal(start, part, true)
-                        && (!instant(start)
-                            || matches!(part, DatePart::Minute | DatePart::Second)) =>
+                        && (!instant(start) || part.instant_boundaries(0, 0).is_some()) =>
                 {
                     Ok((int64(), None))
                 }

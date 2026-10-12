@@ -109,9 +109,13 @@ fn portable(text: &str) -> Expression {
 
 // ---- Date functions of OSSIE_SQL_2026 (#77, dates) ------------------------------
 
-/// The dimension of a computed field `probe` on the first dataset of `case`,
-/// with an optional `bi-platform` extension payload.
-fn probe(case: u8, text: &str, extension: Option<&str>) -> Result<ScalarExpr, Vec<Diagnostic>> {
+/// `case` with a computed dimension `probe` on its first dataset, with an
+/// optional `bi-platform` extension payload.
+fn probed(
+    case: u8,
+    text: &str,
+    extension: Option<&str>,
+) -> Result<ModelDefinition, Vec<Diagnostic>> {
     let mut model = document(case);
     model.datasets[0].fields.push(Field {
         name: "probe".to_owned(),
@@ -130,8 +134,12 @@ fn probe(case: u8, text: &str, extension: Option<&str>) -> Result<ScalarExpr, Ve
             })
             .unwrap_or_default(),
     });
-    let converted = convert(case, &model)?;
-    Ok(converted
+    convert(case, &model)
+}
+
+/// The expression of the dimension `probe` (see [`probed`]).
+fn probe(case: u8, text: &str, extension: Option<&str>) -> Result<ScalarExpr, Vec<Diagnostic>> {
+    Ok(probed(case, text, extension)?
         .dimensions
         .iter()
         .find(|dimension| {
@@ -163,7 +171,11 @@ const INT64: ValueType = ValueType::Integer {
 const INSTANT: ValueType = ValueType::Timestamp {
     timezone_semantics: TimestampSemantics::Instant,
 };
-const ZONED: &str = r#"{"version": 1, "time": {"timezone": "America/La_Paz", "tzdb": "2025b"}}"#;
+const ZONED: &str = r#"{"version": 1, "time": {"timezone": "America/La_Paz"}}"#;
+
+fn pinned(tzdb: &str) -> String {
+    format!(r#"{{"version": 1, "time": {{"timezone": "America/La_Paz", "tzdb": "{tzdb}"}}}}"#)
+}
 
 fn rejected(result: Result<ScalarExpr, Vec<Diagnostic>>, code: Code, needle: &str) {
     let errors = result.expect_err("must be rejected");
@@ -239,6 +251,23 @@ fn an_instant_is_read_on_its_local_date_in_the_business_zone() {
 }
 
 #[test]
+fn a_pinned_tzdb_is_kept_or_refused_never_forgotten() {
+    // A DATE_TRUNC dimension keeps the pin: two versions, two models.
+    let bucket = |tzdb: &str| {
+        probed(19, "DATE_TRUNC('MONTH', event_time)", Some(&pinned(tzdb))).expect("converts")
+    };
+    assert_ne!(bucket("2024a"), bucket("2025b"));
+    // The local date read inside an expression has nowhere to keep it.
+    for tzdb in ["2024a", "2025b"] {
+        rejected(
+            probe(19, "YEAR(event_time)", Some(&pinned(tzdb))),
+            Code::InvalidExtension,
+            "tzdb",
+        );
+    }
+}
+
+#[test]
 fn date_arithmetic_keeps_types_and_refuses_what_a_zone_would_change() {
     let added = probe(18, "DATEADD(month, 1, date)", None).expect("converts");
     assert_eq!(
@@ -275,8 +304,16 @@ fn date_arithmetic_keeps_types_and_refuses_what_a_zone_would_change() {
     // Exact durations of an instant do not depend on any zone.
     let later = probe(19, "DATEADD(minute, 5, event_time)", None).expect("converts");
     assert_eq!(later.value_type, INSTANT);
-    let seconds = probe(19, "DATEDIFF(second, event_time, event_time)", None).expect("converts");
-    assert_eq!(seconds.value_type, INT64);
+    for part in [DatePart::Second, DatePart::Minute] {
+        let text = format!("DATEDIFF({}, event_time, event_time)", part.code());
+        let counted = probe(19, &text, None).unwrap_or_else(|e| panic!("{text}: {e:#?}"));
+        assert_eq!(
+            function(&counted),
+            ScalarFunction::DateDiff { part },
+            "{text}"
+        );
+        assert_eq!(counted.value_type, INT64, "{text}");
+    }
     // Different types cannot be counted between.
     rejected(
         probe(19, "DATEDIFF(day, event_time, DATE '2026-01-01')", None),
