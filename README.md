@@ -111,3 +111,7 @@ y `npm run test:e2e`. Para Podman, configura `BI_COMPOSE_COMMAND=podman`
 verifica «No listo» y lo arranca en un bloque `finally`; también comprueba la
 recuperación. Ejecuta estas pruebas sin otros procesos que dependan de esa base.
 CI ejecuta el mismo e2e con Docker Compose en Linux y conserva trazas al fallar.
+
+## Licencia
+
+bi-platform se distribuye bajo la [licencia Apache 2.0](LICENSE) (ADR 0011). Los componentes de terceros conservan sus licencias, que CI vigila: solo licencias permisivas.

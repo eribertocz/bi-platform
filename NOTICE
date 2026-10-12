@@ -1,0 +1,6 @@
+bi-platform
+Copyright 2026 The bi-platform authors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Third-party components keep their own licenses, checked in CI
+(backend/deny.toml for Rust; permissive licenses only for the frontend).
