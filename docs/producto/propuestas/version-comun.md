@@ -1,6 +1,6 @@
 # Versión común: ELT, Estudio, bibliotecas y fundamentos
 
-*Borrador de Claude, 2026-10-12, que une las propuestas independientes de Claude (archivos `*-claude.md`) y de Codex (comentarios del PR #85) tras la discusión en el PR. **Codex aún debe confirmarlo.** Después se presenta al propietario, que aprueba o rechaza cada decisión del final. Nada de esto está aprobado.*
+*Versión común de Claude y Codex (2026-10-12), confirmada por Codex. **Aprobada por el propietario el 2026-10-12:** las diez decisiones del apartado 5. Como los fundamentos, es **retroactiva**: lo ya construido se audita contra ella (#84).*
 
 ## Cómo leer este documento
 - Cada apartado dice **en qué coincidimos**, **qué corregimos al discutir** y **qué queda para después**.
@@ -167,22 +167,22 @@ Los ocho documentos son un marco muy bueno y casi todo encaja con las ADR vigent
 ### Orden de prioridad para resolver conflictos
 **En lo que coincidimos:** las ADR vigentes siguen rigiendo como autoridad técnica hasta que el propietario decida otra cosa y la sustitución quede registrada en una ADR nueva.
 
-**Pendiente de decisión del propietario:** su documento propone un orden (leyes → anti-patrones → seguridad → decisiones del motor y por capa → capacidades → estructura → UX).
-- Claude propone situar las ADR vigentes justo después de la seguridad, y que la accesibilidad y la exactitud cuenten como leyes.
-- Codex no acordó colocar leyes ni anti-patrones por encima de las ADR. Propone tratar los documentos como objetivos de producto, con las ADR como autoridad técnica.
+**Decidido por el propietario (2026-10-12):** leyes → anti-patrones → seguridad → ADR vigentes → principios → resto de documentos.
+- La accesibilidad y la exactitud cuentan como leyes.
+- Si una ley choca con una ADR, decide el propietario y queda en una ADR nueva.
 
 ---
 
-## 5. Decisiones para el propietario
+## 5. Decisiones del propietario (aprobadas el 2026-10-12)
 Cada una se aprueba o se rechaza por separado.
 
-1. **Dirección del ELT.** Una definición; consultar, acelerar y conservar; el sistema propone y el usuario siempre puede elegir a mano; nada se aplica sin plan. *Recomendado: sí.*
-2. **Primera entrega de G3.** Estudio con archivos, lienzo y lista; modos vista y tabla completa elegidos a mano; vista previa autorizada; plan con diferencias; auditorías; publicación versionada en DuckLake. Intención, caché, incremental y ensayo de cifras, después. *Recomendado: sí.*
-3. **Reproducción con plazo declarado.** Cada resultado dice si es reproducible y hasta cuándo. "Conservar este cierre" fija sus versiones. Lo consultado en vivo se explica, pero no se promete reproducirlo. *Recomendado: sí.*
-4. **Límites de la automatización y de la seguridad.** Nada se aplica por una muestra. Las columnas enmascaradas salen vacías con su tipo y un aviso, y no se pueden usar para filtrar, ordenar ni agrupar. *Recomendado: sí.*
-5. **Estudio "el proyecto vivo"**, con dos vistas enlazadas, estado en todo y Git sin saber Git. *Recomendado: sí.*
-6. **Bibliotecas de la tabla común del apartado 3**, adoptadas tras la prueba medida. Las candidatas añadidas por Claude, solo si la prueba las justifica. *Recomendado: sí.*
-7. **Solo licencias permisivas en el frontend** (MIT, Apache-2.0, BSD o ISC), vigiladas por CI como ya se hace en Rust. *Propuesta de Claude; Codex no se ha pronunciado.* Si se adopta, ELK.js quedaría fuera.
-8. **Cómo se escribe la intención:** en palabras simples ("como mucho 15 minutos") que se guardan como valores con unidades. *Recomendado: sí.*
-9. **Fundamentos:** adoptar los ocho documentos como objetivos de producto, con las precisiones del apartado 4. Las ADR vigentes rigen hasta que decidas lo contrario en una ADR nueva. *Recomendado por ambos.*
-10. **Orden de prioridad:** elegir entre tu orden original, el de Claude (ADR vigentes tras la seguridad; accesibilidad y exactitud como leyes) o el de Codex (documentos como objetivos y ADR como autoridad técnica). *Sin recomendación conjunta.*
+1. **Dirección del ELT.** Una definición; consultar, acelerar y conservar; el sistema propone y el usuario siempre puede elegir a mano; nada se aplica sin plan. **Aprobada.**
+2. **Primera entrega de G3.** Estudio con archivos, lienzo y lista; modos vista y tabla completa elegidos a mano; vista previa autorizada; plan con diferencias; auditorías; publicación versionada en DuckLake. Intención, caché, incremental y ensayo de cifras, después. **Aprobada.**
+3. **Reproducción con plazo declarado.** Cada resultado dice si es reproducible y hasta cuándo. "Conservar este cierre" fija sus versiones. Lo consultado en vivo se explica, pero no se promete reproducirlo. **Aprobada.**
+4. **Límites de la automatización y de la seguridad.** Nada se aplica por una muestra. Las columnas enmascaradas salen vacías con su tipo y un aviso, y no se pueden usar para filtrar, ordenar ni agrupar. **Aprobada.**
+5. **Estudio "el proyecto vivo"**, con dos vistas enlazadas, estado en todo y Git sin saber Git. **Aprobada.**
+6. **Bibliotecas de la tabla común del apartado 3**, adoptadas tras la prueba medida. Las candidatas añadidas por Claude, solo si la prueba las justifica. **Aprobada.**
+7. **Solo licencias permisivas en el frontend** (MIT, Apache-2.0, BSD o ISC), vigiladas por CI como ya se hace en Rust. **Aprobada.** ELK.js queda fuera mientras mantenga su licencia.
+8. **Cómo se escribe la intención:** en palabras simples ("como mucho 15 minutos") que se guardan como valores con unidades. **Aprobada.**
+9. **Fundamentos:** adoptar los ocho documentos como objetivos de producto, con las precisiones del apartado 4. Las ADR vigentes rigen hasta que decidas lo contrario en una ADR nueva. **Aprobada.**
+10. **Orden de prioridad:** el propietario eligió la recomendación de Claude: leyes → anti-patrones → seguridad → **ADR vigentes** → principios → resto de documentos. La accesibilidad y la exactitud cuentan como leyes. Si una ley choca con una ADR, decide el propietario y queda en una ADR nueva; ninguna ADR se anula en silencio. **Aprobada.**
