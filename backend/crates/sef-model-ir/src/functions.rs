@@ -15,8 +15,6 @@ use crate::time::TimestampSemantics;
 use crate::types::{DecimalType, Literal, ValueType, ZeroDivisionPolicy};
 use crate::units::Unit;
 
-/// The decimal digits of a 64-bit integer, so integers mix with decimals.
-const INTEGER_DIGITS: u8 = 19;
 /// The widest decimal precision CSMIR represents.
 const MAX_PRECISION: u8 = 76;
 
@@ -90,9 +88,13 @@ pub enum ScalarFunction {
     /// `a - b * TRUNC(a / b)`: the sign of the dividend. A zero divisor
     /// follows the declared policy, as exact division does.
     Mod { zero: ZeroDivisionPolicy },
-    /// The largest argument; NULL when any argument is NULL.
+    /// The largest argument in its type's order: numbers by value, text by
+    /// Unicode scalar value (binary, no collation), `false < true`, dates
+    /// and times chronologically. NULL when any argument is NULL. Types
+    /// without a fixed order (floats, lists, structures, extensions) are
+    /// refused.
     Greatest,
-    /// The smallest argument; NULL when any argument is NULL.
+    /// The smallest argument, in the same order as [`Self::Greatest`].
     Least,
 
     // ---- Dates: proleptic Gregorian calendar, ISO weeks starting Monday -------
@@ -218,32 +220,79 @@ fn single_character(argument: &ScalarExpr) -> bool {
         if text.chars().count() == 1)
 }
 
-/// The digits of `ROUND`/`TRUNCATE`: a non-negative integer literal.
+/// The digits of `ROUND`/`TRUNCATE`: an integer literal in 0..=76.
 fn digits(argument: Option<&ScalarExpr>) -> Result<u8, TypingError> {
+    const RANGE: TypingError = "digits must be between 0 and 76";
     let Some(argument) = argument else {
         return Ok(0);
     };
-    match &argument.kind {
+    let digits = match &argument.kind {
         crate::expressions::ScalarExprKind::Literal(Literal::SignedInteger(value)) => {
-            u8::try_from(*value).map_err(|_| "digits must be between 0 and 76")
+            u8::try_from(*value).map_err(|_| RANGE)?
         }
         crate::expressions::ScalarExprKind::Literal(Literal::UnsignedInteger(value)) => {
-            u8::try_from(*value).map_err(|_| "digits must be between 0 and 76")
+            u8::try_from(*value).map_err(|_| RANGE)?
         }
-        _ => Err("the digits of ROUND and TRUNCATE must be an integer constant"),
+        _ => return Err("the digits of ROUND and TRUNCATE must be an integer constant"),
+    };
+    if digits > MAX_PRECISION {
+        return Err(RANGE);
     }
+    Ok(digits)
 }
 
+/// A decimal type of exactly these digits; never a narrower one.
 fn decimal(precision: u8, scale: u8) -> Result<ValueType, TypingError> {
-    DecimalType::new(precision.clamp(1, MAX_PRECISION), scale)
+    if precision > MAX_PRECISION {
+        return Err("the result does not fit a decimal type");
+    }
+    DecimalType::new(precision.max(1), scale)
         .map(ValueType::Decimal)
         .map_err(|_| "the result does not fit a decimal type")
+}
+
+/// The decimal digits of the largest magnitude an integer type holds: the
+/// most negative value of a signed type, the maximum of an unsigned one.
+/// `None` for unbounded integers.
+fn integer_digits(signed: bool, bits: Option<u16>) -> Option<u8> {
+    let bits = u32::from(bits?);
+    if bits == 0 || bits > 128 {
+        return None;
+    }
+    let largest: u128 = if signed {
+        1_u128 << (bits - 1)
+    } else if bits == 128 {
+        u128::MAX
+    } else {
+        (1_u128 << bits) - 1
+    };
+    let mut digits = 0;
+    let mut rest = largest;
+    while rest > 0 {
+        digits += 1;
+        rest /= 10;
+    }
+    Some(digits)
+}
+
+/// Types whose order the contract of `GREATEST` and `LEAST` fixes.
+fn ordered(value_type: &ValueType) -> bool {
+    matches!(
+        value_type,
+        ValueType::Integer { .. }
+            | ValueType::Decimal(_)
+            | ValueType::Utf8
+            | ValueType::Boolean
+            | ValueType::Date
+            | ValueType::Time
+            | ValueType::Timestamp { .. }
+    )
 }
 
 /// The integer and fractional digits of an exact type.
 fn digits_of(value_type: &ValueType) -> Option<(u8, u8)> {
     match value_type {
-        ValueType::Integer { .. } => Some((INTEGER_DIGITS, 0)),
+        ValueType::Integer { signed, bits } => integer_digits(*signed, *bits).map(|d| (d, 0)),
         ValueType::Decimal(decimal) => {
             Some((decimal.precision() - decimal.scale(), decimal.scale()))
         }
@@ -382,13 +431,17 @@ impl ScalarFunction {
             }
             Self::Greatest | Self::Least => match arguments {
                 [first, _, ..]
-                    if arguments.iter().all(|argument| {
-                        argument.value_type == first.value_type && argument.unit == first.unit
-                    }) =>
+                    if ordered(&first.value_type)
+                        && arguments.iter().all(|argument| {
+                            argument.value_type == first.value_type && argument.unit == first.unit
+                        }) =>
                 {
                     Ok((first.value_type.clone(), first.unit.clone()))
                 }
-                _ => Err("GREATEST and LEAST take two or more values of one type and unit"),
+                _ => Err(
+                    "GREATEST and LEAST take two or more values of one ordered type (numbers, \
+                     text, booleans, dates or times) and one unit",
+                ),
             },
         }
     }
@@ -471,7 +524,9 @@ impl ScalarFunction {
             digits_of(&dividend.value_type),
             digits_of(&divisor.value_type),
         ) else {
-            return Err("MOD takes two integers or decimals");
+            return Err(
+                "MOD takes two integers or decimals; an unbounded integer mixes with a decimal                  only after a CAST",
+            );
         };
         let scale = left_scale.max(right_scale);
         Ok((

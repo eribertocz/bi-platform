@@ -449,3 +449,59 @@ proptest! {
         let _ = summed(&text);
     }
 }
+
+#[test]
+fn csmir_rejects_a_remainder_declared_narrower_than_its_rule() {
+    // Review of #92: UINT64::MAX mod 20000000000000000000 needs 20 digits;
+    // a node declaring 19 is refused by CSMIR itself.
+    let mut model = document(1);
+    model.datasets[0].fields.push(Field {
+        name: "probe".to_owned(),
+        expression: portable("UPPER(region)"),
+        dimension: Some(sef_ossie::document::Dimension { is_time: None }),
+        label: None,
+        description: None,
+        datatype: None,
+        ai_context: None,
+        custom_extensions: Vec::new(),
+    });
+    let mut definition = convert(1, &model).expect("converts");
+    let wide = sef_model_ir::types::Literal::UnsignedInteger(u128::from(u64::MAX));
+    let divisor = sef_model_ir::types::Literal::Decimal(
+        sef_model_ir::types::DecimalValue::new(
+            "20000000000000000000",
+            DecimalType::new(38, 0).expect("type"),
+        )
+        .expect("value"),
+    );
+    let literal = |value: sef_model_ir::types::Literal| ScalarExpr {
+        value_type: value.value_type(),
+        kind: ScalarExprKind::Literal(value),
+        unit: None,
+    };
+    let narrow = decimal(19, 0);
+    let dimension = definition
+        .dimensions
+        .iter_mut()
+        .find(|d| d.metadata.id().as_str().ends_with("sales.probe"))
+        .expect("dimension");
+    dimension.bindings[0].expression = ScalarExpr {
+        kind: ScalarExprKind::Function {
+            function: ScalarFunction::Mod {
+                zero: ZeroDivisionPolicy::Null,
+            },
+            arguments: vec![literal(wide), literal(divisor)],
+        },
+        value_type: narrow.clone(),
+        unit: None,
+    };
+    dimension.value_type = narrow;
+    let errors = definition
+        .compile()
+        .expect_err("19 digits cannot hold the remainder");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.code == sef_model_ir::diagnostic::ErrorCode::IncompatibleTypes)
+    );
+}
