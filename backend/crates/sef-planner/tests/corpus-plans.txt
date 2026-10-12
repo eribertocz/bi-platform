@@ -1,261 +1,275 @@
 === CASE-001
-adf4ed0fb11e ReadSemanticDataset
-7954df8e8b73 AttachDimension <- adf4ed0fb11e
-27ebefe8c4bb AggregateAtGrain <- 7954df8e8b73
-db5ec01cc164 ProjectSemanticOutput <- 27ebefe8c4bb
-block result = db5ec01cc164
+3353416e0f98 ReadSemanticDataset corpus/dataset/sales [corpus/field/sales.amount, corpus/field/sales.region]
+255fb2fabf65 AttachDimension corpus/dimension/region through [] <- 3353416e0f98
+8b086bfb85e3 AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/region] for [corpus/metric/revenue] <- 255fb2fabf65
+611d7e4f9bc7 ProjectSemanticOutput [revenue, region] <- 8b086bfb85e3
+block result = 611d7e4f9bc7
 model sef-sha256-v1:1274e9df92d1fae24db380f4440ad7cdb960ba966b741de2dde52030d54c9b38
 query sef-sha256-v1:310bda8499f99bfc39119f5cffb7fa4617c21a86ec87ab3c0bdd60bd63e48734
-plan  sef-sha256-v1:0724a05da823384c074d51178f42473ae7741b407f39d9f4d9fca8f2d7c2933e
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,2)
+plan  sef-sha256-v1:2c4b9470fda4b72695d5776cf6a967d157a58450a9dd263c00e082de59b93658
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node 8b086bfb85e3 + invariant typed-definition-and-no-type-changing-operator
 === CASE-002
-55772d1c7af1 ReadSemanticDataset
-5bdd206d7260 ContractGuard <- 55772d1c7af1
-51ca45589346 AttachDimension <- 5bdd206d7260
-41a853782818 ContractGuard <- 51ca45589346
-1302cd8be346 AttachDimension <- 41a853782818
-d86a3f9e7356 AggregateAtGrain <- 1302cd8be346
-f5b2b279760e ProjectSemanticOutput <- d86a3f9e7356
-block result = f5b2b279760e
+60b9403120dd ReadSemanticDataset corpus/dataset/sales [corpus/field/sales.customer_id, corpus/field/sales.product_id, corpus/field/sales.quantity, corpus/field/sales.unit_price]
+751180b96ee2 ReadSemanticDataset corpus/dataset/customers [corpus/field/customers.customer_id, corpus/field/customers.region]
+f30cfcd7fd84 ReadSemanticDataset corpus/dataset/products [corpus/field/products.category, corpus/field/products.product_id]
+672bea7cea10 ContractGuard unique target of corpus/relationship/product <- 60b9403120dd
+7b018d028b18 AttachDimension corpus/dimension/category through [corpus/relationship/product] <- 672bea7cea10, f30cfcd7fd84
+371240f1292a ContractGuard unique target of corpus/relationship/customer <- 7b018d028b18
+f279a0280247 AttachDimension corpus/dimension/region through [corpus/relationship/customer] <- 371240f1292a, 751180b96ee2
+037a5285d21e AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/category × corpus/dimension/region] for [corpus/metric/revenue] <- f279a0280247
+fc9932488fda ProjectSemanticOutput [revenue, region, category] <- 037a5285d21e
+block result = fc9932488fda
 model sef-sha256-v1:a3eb909241c4a7f3742a5c5219892ae7424ad9bb32eefb91f22e5e5333fdbda1
 query sef-sha256-v1:02679f17df53d3ae90f9bdb90794e6f046ff3bf23fdf43ac98ac650a6b701b59
-plan  sef-sha256-v1:d77b1bceec9f735ecb19253a7cbeea3aface2b30d6faa6a2ed276b619e5362c8
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(39,2)
+plan  sef-sha256-v1:1ece9e9a7268507e2c076debfbaf6da2358b3f3096ecebf85ee7193269be4a28
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node 037a5285d21e + invariant typed-definition-and-no-type-changing-operator
 === CASE-003
-b26ece29bf14 ReadSemanticDataset
-60555b8066eb ContractGuard <- b26ece29bf14
-b4cb14c28dd2 AttachDimension <- 60555b8066eb
-74de8f89cd2b AggregateAtGrain <- b4cb14c28dd2
-6fcb49ce3d16 ProjectSemanticOutput <- 74de8f89cd2b
-block result = 6fcb49ce3d16
+bb1c95410e43 ReadSemanticDataset corpus/dataset/customer [corpus/field/customer.customer_id, corpus/field/customer.segment]
+fa17bd2b392f ReadSemanticDataset corpus/dataset/invoices [corpus/field/invoices.amount, corpus/field/invoices.customer_id]
+be2ffd15b0ff ContractGuard unique target of corpus/relationship/customer <- fa17bd2b392f
+ae12257c3cdd AttachDimension corpus/dimension/segment through [corpus/relationship/customer] <- be2ffd15b0ff, bb1c95410e43
+081ab8ebc425 AggregateAtGrain [corpus/measure/billed_amount] at [corpus/dimension/segment] for [corpus/metric/billed_amount] <- ae12257c3cdd
+dbba96609277 ProjectSemanticOutput [billed_amount, segment] <- 081ab8ebc425
+block result = dbba96609277
 model sef-sha256-v1:d5c0d9853f0fcfc3ecdba7add5515e6fb3db4026e9e0cb83f97cc89cf09902e2
 query sef-sha256-v1:f059a093c8660f671aed103cea8809f76508922ea98fb09b505d5d2180a52f56
-plan  sef-sha256-v1:1f8e750dc74514a99e304900948e033f1cb299bb3e45bcf6b792b3ed06b1c691
-[result] PreserveExactDecimalSemantics corpus/metric/billed_amount <= annotation corpus/metric/billed_amount DECIMAL(18,2)
+plan  sef-sha256-v1:cb0a5f17848ba9c9cbd608a26b8dd497ecf4f2e82ac4be5475a71e1d3bc35801
+[result] PreserveExactDecimalSemantics corpus/metric/billed_amount <= node 081ab8ebc425 + invariant typed-definition-and-no-type-changing-operator
 === CASE-004
-581ebdb6a6a0 ReadSemanticDataset
-e802e4c75a49 ReadSemanticDataset
-ae2609b228aa ContractGuard <- 581ebdb6a6a0
-c64369cd0dc9 ContractGuard <- e802e4c75a49
-25dcd155bd8c ContractGuard <- c64369cd0dc9
-42b847d26661 AttachDimension <- ae2609b228aa
-b0af19db137f AttachDimension <- 25dcd155bd8c
-cb8b8fffc56d AggregateAtGrain <- 42b847d26661
-d35ccca5dd2b AggregateAtGrain <- b0af19db137f
-7d11407d9fac AlignSemanticBranches <- cb8b8fffc56d, d35ccca5dd2b
-3abd5be9bffc ProjectSemanticOutput <- 7d11407d9fac
-block result = 3abd5be9bffc
+395c3be237e7 ReadSemanticDataset corpus/dataset/orders [corpus/field/orders.customer_id, corpus/field/orders.order_total]
+447905d86f59 ReadSemanticDataset corpus/dataset/orders [corpus/field/orders.customer_id, corpus/field/orders.order_id]
+751180b96ee2 ReadSemanticDataset corpus/dataset/customers [corpus/field/customers.customer_id, corpus/field/customers.region]
+9825451f3111 ReadSemanticDataset corpus/dataset/order_items [corpus/field/order_items.item_id, corpus/field/order_items.order_id]
+09a52a9084d9 ContractGuard unique target of corpus/relationship/customer <- 395c3be237e7
+8bbe6df2001f ContractGuard unique target of corpus/relationship/order <- 9825451f3111
+9fa584a0fcdd AttachDimension corpus/dimension/region through [corpus/relationship/customer] <- 09a52a9084d9, 751180b96ee2
+c66616dd0137 ContractGuard unique target of corpus/relationship/customer <- 8bbe6df2001f
+26edbcde9f91 AggregateAtGrain [corpus/measure/order_revenue] at [corpus/dimension/region] for [corpus/metric/order_revenue] <- 9fa584a0fcdd
+bd0d0e2930ed AttachDimension corpus/dimension/region through [corpus/relationship/order, corpus/relationship/customer] <- c66616dd0137, 447905d86f59, 751180b96ee2
+ebfd6be1e3f7 AggregateAtGrain [corpus/measure/item_count] at [corpus/dimension/region] for [corpus/metric/item_count] <- bd0d0e2930ed
+cb4cabe173e5 AlignSemanticBranches on [corpus/dimension/region] <- 26edbcde9f91, ebfd6be1e3f7
+8d0a10b993b4 ProjectSemanticOutput [order_revenue, item_count, region] <- cb4cabe173e5
+block result = 8d0a10b993b4
 model sef-sha256-v1:98ed0cdcc846eb1cbfee2df6ceb40a44e7c614eca79523212d53d0da8df74707
 query sef-sha256-v1:fb7d93bf116833c47db2a3cc5ae804f8458f6f05630531e42e03e032ffadc45d
-plan  sef-sha256-v1:a29dc7c94be0ebb7060153d7f8828101fc8b6a6d53527957db0bd502418ad66c
-[result] PreserveMetricGrain corpus/measure/item_count at [key corpus/key/item] <= node d35ccca5dd2b
-[result] PreserveMetricGrain corpus/measure/order_revenue at [key corpus/key/order] <= node cb8b8fffc56d
-[result] AggregateBeforeAlignment [corpus/dimension/region] <= node 7d11407d9fac + invariant aligned-inputs-are-aggregated
-[result] PreserveExactDecimalSemantics corpus/metric/order_revenue <= annotation corpus/metric/order_revenue DECIMAL(18,2)
+plan  sef-sha256-v1:6608e045ae861a6ced034b0a8cf19fb257b65dcdf2b3c69e2ee2e8ff97495167
+[result] PreserveMetricGrain corpus/measure/item_count at [key corpus/key/item] <= node ebfd6be1e3f7
+[result] PreserveMetricGrain corpus/measure/order_revenue at [key corpus/key/order] <= node 26edbcde9f91
+[result] AggregateBeforeAlignment [corpus/dimension/region] <= invariant aligned-inputs-are-aggregated + node cb4cabe173e5
+[result] PreserveExactDecimalSemantics corpus/metric/order_revenue <= node 26edbcde9f91 + invariant typed-definition-and-no-type-changing-operator
 === CASE-005
-adf4ed0fb11e ReadSemanticDataset
-830eb7270104 ContractGuard <- adf4ed0fb11e
-5a52991cf5c4 ContractGuard <- 830eb7270104
-a4a927d498db AttachDimension <- 5a52991cf5c4
-3cec40065756 AggregateAtGrain <- a4a927d498db
-5e2515e8c76e ProjectSemanticOutput <- 3cec40065756
-block result = 5e2515e8c76e
+257bfcf9c4eb ReadSemanticDataset corpus/dataset/sales [corpus/field/sales.amount, corpus/field/sales.store_id]
+5567909919d6 ReadSemanticDataset corpus/dataset/store [corpus/field/store.region_id, corpus/field/store.store_id]
+ccae0124c049 ReadSemanticDataset corpus/dataset/region [corpus/field/region.region_id, corpus/field/region.region_name]
+95aa09b44c3c ContractGuard unique target of corpus/relationship/store <- 257bfcf9c4eb
+069a117b04fb ContractGuard unique target of corpus/relationship/region <- 95aa09b44c3c
+7e54ff7769b7 AttachDimension corpus/dimension/region through [corpus/relationship/store, corpus/relationship/region] <- 069a117b04fb, 5567909919d6, ccae0124c049
+1124511263f8 AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/region] for [corpus/metric/revenue] <- 7e54ff7769b7
+a1bd2d7461bd ProjectSemanticOutput [revenue, region] <- 1124511263f8
+block result = a1bd2d7461bd
 model sef-sha256-v1:5086617549edd3654f81da2ff8ecdf5bd281d0a69dd2bf513f83a54db922a39a
 query sef-sha256-v1:310bda8499f99bfc39119f5cffb7fa4617c21a86ec87ab3c0bdd60bd63e48734
-plan  sef-sha256-v1:70ff46e5abb94225d2da3b17c58f66a617e394eb749f5c022ce1496624337c40
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,2)
+plan  sef-sha256-v1:8ee6a5f350d0dbf52d3d928ffb76147ffb243743e41b66660ac22f0b07a0529c
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node 1124511263f8 + invariant typed-definition-and-no-type-changing-operator
 === CASE-006
-6be14701ee6a ReadSemanticDataset
-83042f505417 AggregateAtGrain <- 6be14701ee6a
-95f1bbf6fb7d RecomposeMetric <- 83042f505417
-94342d8fecec ProjectSemanticOutput <- 95f1bbf6fb7d
-block result = 94342d8fecec
+bc5c9692140f ReadSemanticDataset corpus/dataset/orders [corpus/field/orders.amount, corpus/field/orders.order_id]
+32d253cc4924 AggregateAtGrain [corpus/measure/order_count, corpus/measure/revenue] at [] for [corpus/metric/order_count, corpus/metric/revenue] <- bc5c9692140f
+4744f76a5511 RecomposeMetric corpus/metric/average_order_value <- 32d253cc4924
+3b5ad990895c ProjectSemanticOutput [average_order_value] <- 4744f76a5511
+block result = 3b5ad990895c
 model sef-sha256-v1:38a8b9e30da7542ce2a5d576621528910f5dfdf956ab5b2307cdd7a11f07401f
 query sef-sha256-v1:ff60980dccbbe9cb78bdadeb9377c31742b88920644bb2c96323549c5d672f44
-plan  sef-sha256-v1:a96e186f1b4e14fa7b11ce44a5871673415c50ae319557793801637a9b8634f7
-[result] RecomputeAtTargetGrain corpus/metric/average_order_value from [corpus/metric/order_count, corpus/metric/revenue] <= node 95f1bbf6fb7d
-[result] PreserveExactDecimalSemantics corpus/metric/average_order_value <= annotation corpus/metric/average_order_value DECIMAL(18,2)
+plan  sef-sha256-v1:550329a5cd3244d9f300d1b9f1a80a9308d682e64da3bca411eba461e71c271f
+[result] RecomputeAtTargetGrain corpus/metric/average_order_value from [corpus/metric/order_count, corpus/metric/revenue] <= node 4744f76a5511 + invariant components-before-recomposition
+[result] PreserveExactDecimalSemantics corpus/metric/average_order_value <= node 4744f76a5511 + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node 32d253cc4924 + invariant typed-definition-and-no-type-changing-operator
 === CASE-007
-8469a7ca9b11 ReadSemanticDataset
-938d0d71560b ContractGuard <- 8469a7ca9b11
-be8f940afa6d AttachDimension <- 938d0d71560b
-e47395f9c23e AttachDimension <- be8f940afa6d
-36aa3aefc4e9 TimeBucket <- e47395f9c23e
-0ad1311451b6 SelectPeriodEnd <- 36aa3aefc4e9
-8d72485be39f AggregateAtGrain <- 0ad1311451b6
-481eb9198cef ProjectSemanticOutput <- 8d72485be39f
-block result = 481eb9198cef
+486574f11241 ReadSemanticDataset corpus/dataset/accounts [corpus/field/accounts.account_id, corpus/field/accounts.region]
+a520a9b28d34 ReadSemanticDataset corpus/dataset/balances [corpus/field/balances.account_id, corpus/field/balances.balance, corpus/field/balances.snapshot_date]
+edba0666c12c ContractGuard unique target of corpus/relationship/account <- a520a9b28d34
+cfa43ff1c1e5 AttachDimension corpus/dimension/region through [corpus/relationship/account] <- edba0666c12c, 486574f11241
+ca87ac3ad416 AttachDimension corpus/dimension/snapshot_date through [] <- cfa43ff1c1e5
+71e6a0d49ad3 TimeBucket corpus/dimension/snapshot_date by Month (Gregorian) <- ca87ac3ad416
+63748d6d61b0 SelectPeriodEnd corpus/metric/balance: PeriodEnd on corpus/dimension/snapshot_date per Month within 1 atom(s) <- 71e6a0d49ad3
+aac1002f702d AggregateAtGrain [corpus/measure/balance] at [corpus/dimension/region × corpus/dimension/snapshot_date by Month] for [corpus/metric/balance] <- 63748d6d61b0
+d283ffb97dbd ProjectSemanticOutput [balance, region, month] <- aac1002f702d
+block result = d283ffb97dbd
 model sef-sha256-v1:993f5daf1d4ad67e28e909a32700be5906e82cde5a3775d685f7383237b5f63d
 query sef-sha256-v1:6a9bd72a3fe800c764f934a9834ddc98e427c5fa2c239b941172179f19a729ac
-plan  sef-sha256-v1:4f67381c941593e9405278b89fcb3c4fa45b86945b217375b2c053e2810c6eae
-[result] ApplyPeriodEndSelection corpus/metric/balance period-end on corpus/dimension/snapshot_date per Month within [key corpus/key/account] <= node 0ad1311451b6
-[result] PreserveExactDecimalSemantics corpus/metric/balance <= annotation corpus/metric/balance DECIMAL(18,2)
+plan  sef-sha256-v1:ed546844347e40827ed205c3de3b96f01d77b176d062eaafab76f813e7dab885
+[result] ApplyPeriodEndSelection corpus/metric/balance period-end on corpus/dimension/snapshot_date per Month within [key corpus/key/account] <= node 63748d6d61b0 + invariant period-end-private-to-its-metric
+[result] ApplyCalendarBucket corpus/dimension/snapshot_date on corpus/dataset/balances by Month (Gregorian) <= node 71e6a0d49ad3
+[result] PreserveExactDecimalSemantics corpus/metric/balance <= node aac1002f702d + invariant typed-definition-and-no-type-changing-operator
 === CASE-008
-b12cc823e80f ReadSemanticDataset
-5583e1cf8b97 AttachDimension <- b12cc823e80f
-c486f4ff881f DistinctAggregate <- b12cc823e80f
-41f505e9e2c9 DistinctAggregate <- 5583e1cf8b97
-bce59959fbbf ProjectSemanticOutput <- c486f4ff881f
-9438e4dafea7 ProjectSemanticOutput <- 41f505e9e2c9
-block by_region = 9438e4dafea7
-block overall = bce59959fbbf
+13dce70e6d2d ReadSemanticDataset corpus/dataset/activity [corpus/field/activity.customer_id]
+307b963fb043 ReadSemanticDataset corpus/dataset/activity [corpus/field/activity.customer_id, corpus/field/activity.region]
+10e76167acce DistinctAggregate distinct corpus/measure/active_customers at [] for [corpus/metric/active_customers] <- 13dce70e6d2d
+6ece13c3f3af AttachDimension corpus/dimension/region through [] <- 307b963fb043
+09e41bd16545 DistinctAggregate distinct corpus/measure/active_customers at [corpus/dimension/region] for [corpus/metric/active_customers] <- 6ece13c3f3af
+5e79d04f1eb1 ProjectSemanticOutput [active_customers] <- 10e76167acce
+f4f9d1919f30 ProjectSemanticOutput [active_customers, region] <- 09e41bd16545
+block by_region = f4f9d1919f30
+block overall = 5e79d04f1eb1
 model sef-sha256-v1:1900d3782f991a3e05dad9fbe229993c58796e7298827f477d34e8cc3ca203e6
 query sef-sha256-v1:546b21852f18c33e1573b3d88237efdff1d7b70a9ea9c36ca9a6ac28ec43b095
-plan  sef-sha256-v1:e8719ce4b2fb0c138192484e1fc15bf837ddafd8005527bb907915728f9db3fc
-[by_region] DoNotReaggregate corpus/metric/active_customers <= invariant distinct-result-never-reaggregated
-[overall] DoNotReaggregate corpus/metric/active_customers <= invariant distinct-result-never-reaggregated
+plan  sef-sha256-v1:601b3468686e29f6b7a72914a1325e03a93cad2f14c59723d66c9e288cf5d696
+[by_region] DoNotReaggregate corpus/metric/active_customers <= node 09e41bd16545 + invariant single-aggregation-at-requested-grain
+[overall] DoNotReaggregate corpus/metric/active_customers <= node 10e76167acce + invariant single-aggregation-at-requested-grain
 === CASE-009
-bf693981908b ReadSemanticDataset
-d5eb723b0f77 ReadSemanticDataset
-81040335063a AttachDimension <- d5eb723b0f77
-ae483ac48bfe AttachDimension <- bf693981908b
-592698945d12 AttachDimension <- ae483ac48bfe
-650ca5ca1b7b AttachDimension <- 81040335063a
-0632a9bd7f7c AggregateAtGrain <- 650ca5ca1b7b
-3ffe58828403 AggregateAtGrain <- 592698945d12
-af11ebf1e0ea AlignSemanticBranches <- 0632a9bd7f7c, 3ffe58828403
-b9f359217fb5 RecomposeMetric <- af11ebf1e0ea
-8a2ae9e42ffa ProjectSemanticOutput <- b9f359217fb5
-block result = 8a2ae9e42ffa
+0082ee13ae18 ReadSemanticDataset corpus/dataset/sales_monthly [corpus/field/sales_monthly.amount, corpus/field/sales_monthly.month, corpus/field/sales_monthly.region]
+63602ee1c7d2 ReadSemanticDataset corpus/dataset/refunds_monthly [corpus/field/refunds_monthly.amount, corpus/field/refunds_monthly.month, corpus/field/refunds_monthly.region]
+c5f91f7eb399 AttachDimension corpus/dimension/month through [] <- 63602ee1c7d2
+f48d432a7142 AttachDimension corpus/dimension/month through [] <- 0082ee13ae18
+7b08b1498ef5 AttachDimension corpus/dimension/region through [] <- f48d432a7142
+932d3f80e64b AttachDimension corpus/dimension/region through [] <- c5f91f7eb399
+752c8e32ab74 AggregateAtGrain [corpus/measure/gross_revenue] at [corpus/dimension/month × corpus/dimension/region] for [corpus/metric/gross_revenue] <- 7b08b1498ef5
+9c16b3714fba AggregateAtGrain [corpus/measure/refunds] at [corpus/dimension/month × corpus/dimension/region] for [corpus/metric/refunds] <- 932d3f80e64b
+04c6e13f862c AlignSemanticBranches on [corpus/dimension/month × corpus/dimension/region] <- 752c8e32ab74, 9c16b3714fba
+f766da2da32e RecomposeMetric corpus/metric/net_revenue <- 04c6e13f862c
+c64670d0cd00 ProjectSemanticOutput [gross_revenue, refunds, net_revenue, month, region] <- f766da2da32e
+block result = c64670d0cd00
 model sef-sha256-v1:53694b86df39007a8bced05a12f3decfabcee75b9058c6c86fa8f6d970a4f3e9
 query sef-sha256-v1:5aabaece081ae94a36bcc43302d10b04d533834516c08a268a77ab95f3b149a0
-plan  sef-sha256-v1:87698732913851c8dabd050329566ce1bdaa25bcfba6c53446cba82230902899
-[result] PreserveMetricGrain corpus/measure/gross_revenue at [corpus/dimension/month, corpus/dimension/region] <= node 3ffe58828403
-[result] PreserveMetricGrain corpus/measure/refunds at [corpus/dimension/month, corpus/dimension/region] <= node 0632a9bd7f7c
-[result] AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region] <= node af11ebf1e0ea + invariant aligned-inputs-are-aggregated
-[result] RecomputeAtTargetGrain corpus/metric/net_revenue from [corpus/metric/gross_revenue, corpus/metric/refunds] <= node b9f359217fb5
-[result] PreserveExactDecimalSemantics corpus/metric/gross_revenue <= annotation corpus/metric/gross_revenue DECIMAL(18,2)
-[result] PreserveExactDecimalSemantics corpus/metric/net_revenue <= annotation corpus/metric/net_revenue DECIMAL(19,2)
-[result] PreserveExactDecimalSemantics corpus/metric/refunds <= annotation corpus/metric/refunds DECIMAL(18,2)
+plan  sef-sha256-v1:282aeb40d52733886a116d4fdb33364c8b9d26611492c064931a65c41da495c2
+[result] PreserveMetricGrain corpus/measure/gross_revenue at [corpus/dimension/month, corpus/dimension/region] <= node 752c8e32ab74
+[result] PreserveMetricGrain corpus/measure/refunds at [corpus/dimension/month, corpus/dimension/region] <= node 9c16b3714fba
+[result] AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region] <= invariant aligned-inputs-are-aggregated + node 04c6e13f862c
+[result] RecomputeAtTargetGrain corpus/metric/net_revenue from [corpus/metric/gross_revenue, corpus/metric/refunds] <= node f766da2da32e + invariant components-before-recomposition
+[result] PreserveExactDecimalSemantics corpus/metric/gross_revenue <= node 752c8e32ab74 + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveExactDecimalSemantics corpus/metric/net_revenue <= node f766da2da32e + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveExactDecimalSemantics corpus/metric/refunds <= node 9c16b3714fba + invariant typed-definition-and-no-type-changing-operator
 === CASE-010
-b26ece29bf14 ReadSemanticDataset
-d6f5f4c108d8 ReadSemanticDataset
-16bef5ba87fc AttachDimension <- d6f5f4c108d8
-de8bd6f8af20 AttachDimension <- b26ece29bf14
-979ec5f36ae9 AttachDimension <- de8bd6f8af20
-d72c0031e717 AttachDimension <- 16bef5ba87fc
-7367917990c8 AggregateAtGrain <- d72c0031e717
-b509d1f9b6cf NormalizeTime <- 979ec5f36ae9
-490ac23cf1ed TimeBucket <- b509d1f9b6cf
-75143b7f7875 AggregateAtGrain <- 490ac23cf1ed
-46346a907bd0 AlignSemanticBranches <- 7367917990c8, 75143b7f7875
-2a9a11a1e922 RecomposeMetric <- 46346a907bd0
-e9dfe01af96b ProjectSemanticOutput <- 2a9a11a1e922
-block result = e9dfe01af96b
+1b438168e0bc ReadSemanticDataset corpus/dataset/invoices [corpus/field/invoices.amount, corpus/field/invoices.date, corpus/field/invoices.region]
+8524e913f5db ReadSemanticDataset corpus/dataset/targets [corpus/field/targets.month, corpus/field/targets.region, corpus/field/targets.target_amount]
+3d4f6723f380 AttachDimension corpus/dimension/month through [] <- 1b438168e0bc
+b6b1b1fcb0ee AttachDimension corpus/dimension/month through [] <- 8524e913f5db
+d1e4131c7b8f AttachDimension corpus/dimension/region through [] <- 3d4f6723f380
+eb0dc9a7cedf AttachDimension corpus/dimension/region through [] <- b6b1b1fcb0ee
+c5534d241d88 NormalizeTime corpus/dimension/month to UTC (Gregorian) <- d1e4131c7b8f
+f54360354a30 AggregateAtGrain [corpus/measure/target_revenue] at [corpus/dimension/month × corpus/dimension/region] for [corpus/metric/target_revenue] <- eb0dc9a7cedf
+18c7aca52245 TimeBucket corpus/dimension/month by Month (Gregorian) <- c5534d241d88
+49883b0f8270 AggregateAtGrain [corpus/measure/actual_revenue] at [corpus/dimension/month × corpus/dimension/region] for [corpus/metric/actual_revenue] <- 18c7aca52245
+0a217b6560ce AlignSemanticBranches on [corpus/dimension/month × corpus/dimension/region] <- 49883b0f8270, f54360354a30
+ee7087fc80f2 RecomposeMetric corpus/metric/attainment <- 0a217b6560ce
+a59fe53b9d76 ProjectSemanticOutput [actual_revenue, target_revenue, attainment, month, region] <- ee7087fc80f2
+block result = a59fe53b9d76
 model sef-sha256-v1:d7b190a5b14e07340149c28a846f65fd42bed090995ce90d084aca2ad7dd1cb3
 query sef-sha256-v1:3b058ccf9a6e3ef2c25c8c4ec3336afaa98fe65aa5ee6513ef62c8fcb5d6bda8
-plan  sef-sha256-v1:067ebc9d07bec378c45f2df328d04b7a13bc071c75e03ff8a78f1ca1769db481
-[result] PreserveMetricGrain corpus/measure/actual_revenue at [key corpus/key/invoice] <= node 75143b7f7875
-[result] PreserveMetricGrain corpus/measure/target_revenue at [corpus/dimension/month, corpus/dimension/region] <= node 7367917990c8
-[result] AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region] <= node 46346a907bd0 + invariant aligned-inputs-are-aggregated
-[result] RecomputeAtTargetGrain corpus/metric/attainment from [corpus/metric/actual_revenue, corpus/metric/target_revenue] <= node 2a9a11a1e922
-[result] ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/invoices to UTC then Month <= node b509d1f9b6cf + node 490ac23cf1ed + invariant normalize-before-bucket
-[result] PreserveExactDecimalSemantics corpus/metric/actual_revenue <= annotation corpus/metric/actual_revenue DECIMAL(18,2)
-[result] PreserveExactDecimalSemantics corpus/metric/attainment <= annotation corpus/metric/attainment DECIMAL(18,2)
-[result] PreserveExactDecimalSemantics corpus/metric/target_revenue <= annotation corpus/metric/target_revenue DECIMAL(18,2)
+plan  sef-sha256-v1:4cbed13e64c2765a9c41abd7ae33de741385709f4158c2070a55b67f9cb4ea5b
+[result] PreserveMetricGrain corpus/measure/actual_revenue at [key corpus/key/invoice] <= node 49883b0f8270
+[result] PreserveMetricGrain corpus/measure/target_revenue at [corpus/dimension/month, corpus/dimension/region] <= node f54360354a30
+[result] AggregateBeforeAlignment [corpus/dimension/month, corpus/dimension/region] <= invariant aligned-inputs-are-aggregated + node 0a217b6560ce
+[result] RecomputeAtTargetGrain corpus/metric/attainment from [corpus/metric/actual_revenue, corpus/metric/target_revenue] <= node ee7087fc80f2 + invariant components-before-recomposition
+[result] ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/invoices to UTC then Month (Gregorian) <= node 18c7aca52245 + invariant normalize-before-bucket
+[result] PreserveExactDecimalSemantics corpus/metric/actual_revenue <= node 49883b0f8270 + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveExactDecimalSemantics corpus/metric/attainment <= node ee7087fc80f2 + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveExactDecimalSemantics corpus/metric/target_revenue <= node f54360354a30 + invariant typed-definition-and-no-type-changing-operator
 === CASE-011
-581ebdb6a6a0 ReadSemanticDataset
-7a5c4239650a ContractGuard <- 581ebdb6a6a0
-321e8efe2fa8 BridgeAllocate <- 7a5c4239650a
-54726c134a24 ContractGuard <- 321e8efe2fa8
-8712c89a4b96 ContractGuard <- 54726c134a24
-e537c86d387c AttachDimension <- 8712c89a4b96
-f1f93f49aae2 AggregateAtGrain <- e537c86d387c
-e9de563659f5 ProjectSemanticOutput <- f1f93f49aae2
-block result = e9de563659f5
+5c3e5fa88f31 ReadSemanticDataset corpus/dataset/orders [corpus/field/orders.order_id, corpus/field/orders.order_total]
+95332343b128 ReadSemanticDataset corpus/dataset/order_campaign [corpus/field/order_campaign.allocation_weight, corpus/field/order_campaign.campaign_id, corpus/field/order_campaign.order_id]
+9ab6180ff399 ReadSemanticDataset corpus/dataset/campaign [corpus/field/campaign.campaign_id, corpus/field/campaign.name]
+e88b413a9fc3 ContractGuard unique target of corpus/relationship/order <- 5c3e5fa88f31
+5afc66f4f779 BridgeAllocate corpus/bridge/order_campaign by weight <- e88b413a9fc3
+595e25d827c5 ContractGuard allocation of corpus/bridge/order_campaign sums to its total <- 5afc66f4f779
+41783f67d180 ContractGuard unique target of corpus/relationship/campaign <- 595e25d827c5
+54bb4f994dbb AttachDimension corpus/dimension/campaign through [corpus/relationship/order, corpus/relationship/campaign] <- 41783f67d180, 95332343b128, 9ab6180ff399
+616deecd65a1 AggregateAtGrain [corpus/measure/allocated_revenue] at [corpus/dimension/campaign] for [corpus/metric/allocated_revenue] <- 54bb4f994dbb
+eb8c22b52260 ProjectSemanticOutput [allocated_revenue, campaign] <- 616deecd65a1
+block result = eb8c22b52260
 model sef-sha256-v1:1035ab55824d31906a0597f5de681f5af1969b4998c693a759dea573875c1fe1
 query sef-sha256-v1:6aa317a844dfe3acbc12ff9470d0d740a85aaad3fe9f53d74b9f2d72c898e0b3
-plan  sef-sha256-v1:ee29a969662ca3d6b95741e48a10677fb8271978d5edd7421563b2ba10d4f810
-[result] ApplyBridgeAllocation corpus/metric/allocated_revenue through corpus/bridge/order_campaign <= node 321e8efe2fa8
-[result] ValidateAllocationNormalization corpus/bridge/order_campaign <= node 54726c134a24
-[result] PreserveExactDecimalSemantics corpus/metric/allocated_revenue <= annotation corpus/metric/allocated_revenue DECIMAL(18,2)
+plan  sef-sha256-v1:ab84c2db2a7e071e590953e5795dc7d8bdc7c4bd6cc8b841b94fa0b1c68d4950
+[result] ApplyBridgeAllocation corpus/metric/allocated_revenue through corpus/bridge/order_campaign <= node 5afc66f4f779
+[result] ValidateAllocationNormalization corpus/bridge/order_campaign <= node 595e25d827c5
+[result] PreserveExactDecimalSemantics corpus/metric/allocated_revenue <= node 616deecd65a1 + invariant typed-definition-and-no-type-changing-operator
 === CASE-012
-88f563d4b1e1 ReadSemanticDataset
-27ee0e0602cc AttachDimension <- 88f563d4b1e1
-eea17e6e4010 NormalizeTime <- 27ee0e0602cc
-416ec4738592 TimeBucket <- eea17e6e4010
-c2d1241d34b7 AggregateAtGrain <- 416ec4738592
-4a914fa83a14 ProjectSemanticOutput <- c2d1241d34b7
-block result = 4a914fa83a14
+89fec12800af ReadSemanticDataset corpus/dataset/events [corpus/field/events.amount, corpus/field/events.event_time]
+6ed1be9fc81d AttachDimension corpus/dimension/month through [] <- 89fec12800af
+e117a446a017 NormalizeTime corpus/dimension/month to UTC (Gregorian) <- 6ed1be9fc81d
+7a68b9bcb8fe TimeBucket corpus/dimension/month by Month (Gregorian) <- e117a446a017
+ea6916ba5bdb AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/month by Month in UTC] for [corpus/metric/revenue] <- 7a68b9bcb8fe
+5910bece3014 ProjectSemanticOutput [revenue, month] <- ea6916ba5bdb
+block result = 5910bece3014
 model sef-sha256-v1:02e9c87be66665629416e606c5b569bfc64414727b2c85c58fe96d5305a6745f
 query sef-sha256-v1:916c848aa2edfa86353f079a3b2976ca0c3e2b3a2217f0c4a81e3825d09ed424
-plan  sef-sha256-v1:835d5fe08b822822805b2f502ca9c067f16ddbc03b44efb60a92714d000d3f84
-[result] ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/events to UTC then Month <= node eea17e6e4010 + node 416ec4738592 + invariant normalize-before-bucket
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,2)
+plan  sef-sha256-v1:72d8db2998611008ec3b08e00c9f39397e9c8934b44168c63a0e80979f862af9
+[result] ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/events to UTC then Month (Gregorian) <= node 7a68b9bcb8fe + invariant normalize-before-bucket
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node ea6916ba5bdb + invariant typed-definition-and-no-type-changing-operator
 === CASE-013
-adf4ed0fb11e ReadSemanticDataset
-c8edba38492b TemporalAsOf <- adf4ed0fb11e
-c25faf1031ee ContractGuard <- c8edba38492b
-8df5d276651f AttachDimension <- c25faf1031ee
-a4cbe18456a7 AggregateAtGrain <- 8df5d276651f
-23d7bc3fc73a ProjectSemanticOutput <- a4cbe18456a7
-block result = 23d7bc3fc73a
+8c1a5c9e2a51 ReadSemanticDataset corpus/dataset/sales [corpus/field/sales.amount, corpus/field/sales.customer_id, corpus/field/sales.sale_date]
+8f2c766b969f ReadSemanticDataset corpus/dataset/customer_history [corpus/field/customer_history.customer_id, corpus/field/customer_history.region, corpus/field/customer_history.valid_from, corpus/field/customer_history.valid_to]
+b1cddfa9e510 TemporalAsOf corpus/relationship/historical_customer at event time <- 8c1a5c9e2a51
+279a75ddd1ac ContractGuard single as-of match of corpus/relationship/historical_customer <- b1cddfa9e510
+d63763e0d614 AttachDimension corpus/dimension/historical_region through [corpus/relationship/historical_customer] <- 279a75ddd1ac, 8f2c766b969f
+3342ef0de930 AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/historical_region] for [corpus/metric/revenue] <- d63763e0d614
+73d067ee79c1 ProjectSemanticOutput [revenue, historical_region] <- 3342ef0de930
+block result = 73d067ee79c1
 model sef-sha256-v1:7ecdf65fca0af87317361cdfdcf011085b26b4956e8ae198b14996bdd8183d1a
 query sef-sha256-v1:7f50cd4b00554b59a1f11f443152288f89f23452921758f1333407bf68e446d4
-plan  sef-sha256-v1:c5f5fca259c17bec1c8dc93ac269c95c70b2c210ea13090700af01ca7b7601a6
-[result] UseTemporalRelationship corpus/relationship/historical_customer <= node c8edba38492b
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,2)
+plan  sef-sha256-v1:c44f48705dfc510cef49891eb5aad9da2753677197853fd059fac53e36e705dc
+[result] UseTemporalRelationship corpus/relationship/historical_customer <= node b1cddfa9e510 + node 279a75ddd1ac
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node 3342ef0de930 + invariant typed-definition-and-no-type-changing-operator
 === CASE-014
-50da32fd686d ReadSemanticDataset
-2a1439cd87c1 AggregateAtGrain <- 50da32fd686d
-5e906e6d71ac ProjectSemanticOutput <- 2a1439cd87c1
-block result = 5e906e6d71ac
+36bfbf2a18f4 ReadSemanticDataset corpus/dataset/measurements [corpus/field/measurements.amount]
+91156a002a44 AggregateAtGrain [corpus/measure/amount_count, corpus/measure/amount_sum, corpus/measure/row_count] at [] for [corpus/metric/amount_count, corpus/metric/amount_sum, corpus/metric/row_count] <- 36bfbf2a18f4
+625c559479ee ProjectSemanticOutput [amount_sum, amount_count, row_count] <- 91156a002a44
+block result = 625c559479ee
 model sef-sha256-v1:306bf197484a60338d0655d67e5a45a7266a93d034fc47c18abe7591bd5c3d7b
 query sef-sha256-v1:76c9dcf26412314251e6c6048d3d68fc0c2550996a2289d08d3cf4be9d34fbc2
-plan  sef-sha256-v1:fd69000839622bb42ed0da0138a0e6dc5b943327c8d1959509827f3f92ab7833
-[result] PreserveExactDecimalSemantics corpus/metric/amount_sum <= annotation corpus/metric/amount_sum DECIMAL(18,2)
-[result] PreserveDeclaredNullSemantics corpus/measure/amount_count count-non-null <= annotation corpus/measure/amount_count count-non-null
-[result] PreserveDeclaredNullSemantics corpus/measure/amount_sum ignore-nulls-null-if-empty <= annotation corpus/measure/amount_sum ignore-nulls-null-if-empty
-[result] PreserveDeclaredNullSemantics corpus/measure/row_count count-rows <= annotation corpus/measure/row_count count-rows
+plan  sef-sha256-v1:ca1dfe062e3c83287dd380784c307e047274969f2d3c340691827e67fa04211b
+[result] PreserveExactDecimalSemantics corpus/metric/amount_sum <= node 91156a002a44 + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveDeclaredNullSemantics corpus/measure/amount_count count-non-null <= node 91156a002a44
+[result] PreserveDeclaredNullSemantics corpus/measure/amount_sum ignore-nulls-null-if-empty <= node 91156a002a44
+[result] PreserveDeclaredNullSemantics corpus/measure/row_count count-rows <= node 91156a002a44
 === CASE-015
-adf4ed0fb11e ReadSemanticDataset
-1ded4c3a9c6b PolicyGuard <- adf4ed0fb11e
-c787174fd49d AttachDimension <- 1ded4c3a9c6b
-b597fd1e3699 AggregateAtGrain <- c787174fd49d
-c88659fca039 ProjectSemanticOutput <- b597fd1e3699
-block result = c88659fca039
+4140f229a4b7 ReadSemanticDataset corpus/dataset/sales [corpus/field/sales.amount, corpus/field/sales.region, corpus/field/sales.tenant_id]
+ca539e75d1bf PolicyGuard corpus/policy/tenant with :tenant_id <- 4140f229a4b7
+a10c85840452 AttachDimension corpus/dimension/region through [] <- ca539e75d1bf
+bbd20eaab82a AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/region] for [corpus/metric/revenue] <- a10c85840452
+07b0edd62ca9 ProjectSemanticOutput [revenue, region] <- bbd20eaab82a
+block result = 07b0edd62ca9
 model sef-sha256-v1:85567b8f9aa9dd00d2a544558029933861258444183c6028501f1403e4d5d6d0
 query sef-sha256-v1:310bda8499f99bfc39119f5cffb7fa4617c21a86ec87ab3c0bdd60bd63e48734
-plan  sef-sha256-v1:60808160a213775346df9daf56f04ffe78316785af49d2eba6fbe74998994b2c
-[result] ApplyMandatoryPolicy corpus/policy/tenant on corpus/dataset/sales <= node 1ded4c3a9c6b + invariant policy-guard-dominates-source
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,2)
+plan  sef-sha256-v1:be657698de806bcfa5d7d4b0b5ab44094c345703e763a1add87784f03ebd3a6c
+[result] ApplyMandatoryPolicy corpus/policy/tenant on corpus/dataset/sales <= node ca539e75d1bf + invariant policy-guard-dominates-source
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node bbd20eaab82a + invariant typed-definition-and-no-type-changing-operator
 === CASE-018
-adf4ed0fb11e ReadSemanticDataset
-b028f6849789 AttachDimension <- adf4ed0fb11e
-4a55c1c5d0e2 AttachDimension <- b028f6849789
-db7c60e47093 NormalizeTime <- 4a55c1c5d0e2
-e4f38903a6e5 TimeBucket <- db7c60e47093
-2014b4c1f0a9 AggregateAtGrain <- e4f38903a6e5
-1aed08ea4d7d ProjectSemanticOutput <- 2014b4c1f0a9
-block result = 1aed08ea4d7d
+f67fa1c2ad0a ReadSemanticDataset corpus/dataset/sales [corpus/field/sales.amount, corpus/field/sales.category, corpus/field/sales.date]
+7b823e2aecbe AttachDimension corpus/dimension/category through [] <- f67fa1c2ad0a
+524fca277968 AttachDimension corpus/dimension/month through [] <- 7b823e2aecbe
+3daefcfa8ce8 NormalizeTime corpus/dimension/month to UTC (Gregorian) <- 524fca277968
+072dcc302f6f TimeBucket corpus/dimension/month by Month (Gregorian) <- 3daefcfa8ce8
+50f2c249eefa AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/category × corpus/dimension/month] for [corpus/metric/revenue] <- 072dcc302f6f
+0ad9e964876f ProjectSemanticOutput [revenue, month, category] <- 50f2c249eefa
+block result = 0ad9e964876f
 model sef-sha256-v1:091fc55deaab9ba0cbbcac5a7e530087eff9912cae262e3b63b92d9d8ad6ff3b
 query sef-sha256-v1:5e5183c5996fe2d9c17c7d13ae0cfc782712216230f34eb95c21b4bb28c68f96
-plan  sef-sha256-v1:baccc1d9ddd5f59dae7f6739ea4bc460e5fbabb0b8cbaa811384a9b0336fad3e
-[result] ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/sales to UTC then Month <= node db7c60e47093 + node e4f38903a6e5 + invariant normalize-before-bucket
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,2)
+plan  sef-sha256-v1:007bfceba64f06da23969300078a19ab7fd1d31d1d73055f5495600d041e4cb4
+[result] ConvertTimezoneBeforeBucketing corpus/dimension/month on corpus/dataset/sales to UTC then Month (Gregorian) <= node 072dcc302f6f + invariant normalize-before-bucket
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node 50f2c249eefa + invariant typed-definition-and-no-type-changing-operator
 === CASE-019
-88f563d4b1e1 ReadSemanticDataset
-f4ae3d19853f AttachDimension <- 88f563d4b1e1
-b98856db34a9 NormalizeTime <- f4ae3d19853f
-8bc8fea40f79 TimeBucket <- b98856db34a9
-e9a0cc47d013 AggregateAtGrain <- 8bc8fea40f79
-1992e64b8db5 ProjectSemanticOutput <- e9a0cc47d013
-block result = 1992e64b8db5
+2845734c6ab3 ReadSemanticDataset corpus/dataset/events [corpus/field/events.amount, corpus/field/events.event_time]
+1284121a1a16 AttachDimension corpus/dimension/business_day through [] <- 2845734c6ab3
+ff1a64842c28 NormalizeTime corpus/dimension/business_day to America/La_Paz (Gregorian) <- 1284121a1a16
+f1e9178dbe5e TimeBucket corpus/dimension/business_day by Day (Gregorian) <- ff1a64842c28
+a42871a3fedb AggregateAtGrain [corpus/measure/revenue] at [corpus/dimension/business_day by Day in America/La_Paz] for [corpus/metric/revenue] <- f1e9178dbe5e
+21e3d3258f5a ProjectSemanticOutput [revenue, day] <- a42871a3fedb
+block result = 21e3d3258f5a
 model sef-sha256-v1:ac0ab16c592298f4188a4d50adeeb976d4c2625b5a15c3e3b7f00e83ceebf710
 query sef-sha256-v1:9dff83bbbbb8225ddf81261a3302f975aded615a8165723ca97664729de98ded
-plan  sef-sha256-v1:111a11622dd4dc2ed5677586077b55a004aaa16ab3bd5101a7a23a761eda61ea
-[result] ConvertTimezoneBeforeBucketing corpus/dimension/business_day on corpus/dataset/events to America/La_Paz then Day <= node b98856db34a9 + node 8bc8fea40f79 + invariant normalize-before-bucket
-[result] PreserveExactDecimalSemantics corpus/metric/revenue <= annotation corpus/metric/revenue DECIMAL(18,4)
+plan  sef-sha256-v1:e4f75533bb145e6f0d8ffc629318098d47daadea96d9c582baf74218a0c59928
+[result] ConvertTimezoneBeforeBucketing corpus/dimension/business_day on corpus/dataset/events to America/La_Paz then Day (Gregorian) <= node f1e9178dbe5e + invariant normalize-before-bucket
+[result] PreserveExactDecimalSemantics corpus/metric/revenue <= node a42871a3fedb + invariant typed-definition-and-no-type-changing-operator
 === CASE-021
-686f0a13b24c ReadSemanticDataset
-6d510e9be431 AttachDimension <- 686f0a13b24c
-972b2de61c1b AggregateAtGrain <- 6d510e9be431
-ec317bb08f10 ComputeWindowMetric <- 972b2de61c1b
-39d2a54129e2 ProjectSemanticOutput <- ec317bb08f10
-block result = 39d2a54129e2
+9fd71ada94a3 ReadSemanticDataset corpus/dataset/sales_daily [corpus/field/sales_daily.amount, corpus/field/sales_daily.date]
+c6bab62047e2 AttachDimension corpus/dimension/date through [] <- 9fd71ada94a3
+668fb1d6d85e AggregateAtGrain [corpus/measure/daily_revenue] at [corpus/dimension/date] for [corpus/metric/daily_revenue] <- c6bab62047e2
+01003f6d2282 ComputeWindowMetric corpus/metric/cumulative_revenue = cumulative corpus/metric/daily_revenue ordered by [corpus/dimension/date] <- 668fb1d6d85e
+fdc50aa705da ProjectSemanticOutput [daily_revenue, cumulative_revenue, date] <- 01003f6d2282
+block result = fdc50aa705da
 model sef-sha256-v1:a4ffaaee8d050fb9c6a961259079ee580ed2ad3d8d33b9ec81b2a31f61a1ee1a
 query sef-sha256-v1:57685b90d6d65f9d314519ec4602da66ac86b98e9f8b086c63ca9f61ec35d9a5
-plan  sef-sha256-v1:d8e5ac7402357f3da82466fc6cc2628d360c4ec3cdd1acfa39bd5440b08ae9c2
-[result] ApplyOrderedCumulative corpus/metric/cumulative_revenue over corpus/metric/daily_revenue ordered by [corpus/dimension/date] partitioned by [] <= node ec317bb08f10
-[result] PreserveExactDecimalSemantics corpus/metric/cumulative_revenue <= annotation corpus/metric/cumulative_revenue DECIMAL(18,2)
-[result] PreserveExactDecimalSemantics corpus/metric/daily_revenue <= annotation corpus/metric/daily_revenue DECIMAL(18,2)
+plan  sef-sha256-v1:2cfcb93d12ca3398c1c22ec2d98dcca85573f7472611aee3d02ec58c5b28e5ee
+[result] ApplyOrderedCumulative corpus/metric/cumulative_revenue over corpus/metric/daily_revenue ordered by [corpus/dimension/date] partitioned by [] <= node 01003f6d2282
+[result] PreserveExactDecimalSemantics corpus/metric/cumulative_revenue <= node 01003f6d2282 + invariant typed-definition-and-no-type-changing-operator
+[result] PreserveExactDecimalSemantics corpus/metric/daily_revenue <= node 668fb1d6d85e + invariant typed-definition-and-no-type-changing-operator

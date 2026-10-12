@@ -11,4 +11,4 @@ mod graph;
 mod operator;
 
 pub use graph::{GraphError, Node, NodeId, PlanBlock, SeirGraph, SemanticPlan};
-pub use operator::{Contract, Operator};
+pub use operator::{Contract, ObjectRef, Operator};

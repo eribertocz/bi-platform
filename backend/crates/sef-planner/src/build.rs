@@ -1,25 +1,28 @@
 //! The canonical planning pipeline (§14): one deterministic baseline plan
 //! per validated query block, built from the correctness engine's facts and
-//! obligations without re-deciding validity, and checked complete (§33).
+//! obligations without re-deciding validity. The certificate is computed
+//! afterwards by an independent checker ([`crate::verify`]), never from
+//! what this builder believes it did.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use sef_correctness::{BlockValidation, Fact, Obligation, ValidatedQuery};
-use sef_exec_ir::{Contract, NodeId, Operator, PlanBlock, SeirGraph, SemanticPlan};
-use sef_model_ir::diagnostic::{Diagnostic, ErrorCode, Evidence as Ev, Phase, Severity};
-use sef_model_ir::expressions::AggregateFunction;
+use sef_exec_ir::{Contract, NodeId, ObjectRef, Operator, PlanBlock, SeirGraph, SemanticPlan};
+use sef_model_ir::diagnostic::{Diagnostic, ErrorCode};
+use sef_model_ir::expressions::{AggregateFunction, ScalarExpr};
 use sef_model_ir::identity::StableId;
 use sef_model_ir::model::{
-    CompiledSemanticModel, Measure, Metric, ModelDefinition, TemporalSelection,
+    CompiledSemanticModel, Measure, Metric, ModelDefinition, TemporalSelection, TemporalTies,
 };
+use sef_model_ir::policy::PolicyScope;
 use sef_model_ir::relationships::ContractEvidenceState;
-use sef_model_ir::time::CalendarProfile;
 use sef_query_ir::query::{
     FilterExpr, FilterTarget, QualifiedDimensionRef, RequestedAtom, SelectionItem,
     SemanticQueryBlock,
 };
 
-use crate::certificate::{Certificate, Discharge, Evidence};
+use crate::certificate::Certificate;
+use crate::verify::{certify, hop_fields, metric_inputs, owned, planning_error, weight_fields};
 
 /// A certified semantic plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,11 +31,12 @@ pub struct PlannedQuery {
     pub certificate: Certificate,
 }
 
-/// Builds the canonical baseline plan of a validated query.
+/// Builds the canonical baseline plan of a validated query and certifies
+/// it.
 ///
 /// # Errors
-/// Planner capability diagnostics (phase `Planning`): an obligation this
-/// planner cannot discharge, or a broken internal invariant. Never a
+/// Planner capability diagnostics (phase `Planning`): an obligation the
+/// plan does not discharge, or a broken internal invariant. Never a
 /// different semantic interpretation of the query (§25).
 pub fn plan(
     model: &CompiledSemanticModel,
@@ -40,7 +44,6 @@ pub fn plan(
 ) -> Result<PlannedQuery, Vec<Diagnostic>> {
     let mut graph = SeirGraph::new();
     let mut blocks = Vec::new();
-    let mut discharges = Vec::new();
     let mut errors = Vec::new();
     for (b, (block, validation)) in validated
         .query
@@ -49,79 +52,56 @@ pub fn plan(
         .zip(&validated.blocks)
         .enumerate()
     {
-        let mut planner = BlockPlanner {
+        let mut builder = Builder {
+            compiled: model,
             model: model.definition(),
             graph: &mut graph,
             validation,
-            block_id: block.block_id.clone(),
             path: format!("/blocks/{b}"),
-            witnesses: BTreeMap::new(),
             errors: Vec::new(),
         };
-        match planner.block(block) {
-            Some(root) => {
-                discharges.extend(planner.discharges(root));
-                errors.extend(planner.errors);
-                blocks.push(PlanBlock {
-                    block_id: block.block_id.clone(),
-                    root,
-                });
-            }
-            None => errors.extend(planner.errors),
+        match builder.block(block) {
+            Some(root) => blocks.push(PlanBlock {
+                block_id: block.block_id.clone(),
+                root,
+            }),
+            // Every early return names its cause; this one never stays silent.
+            None if builder.errors.is_empty() => builder.fail(
+                ErrorCode::PlannerInternalInvariantViolation,
+                "El plan del bloque quedó incompleto: el modelo no tiene un objeto que la                  validación dio por existente."
+                    .to_owned(),
+            ),
+            None => {}
         }
+        errors.extend(builder.errors);
     }
     if !errors.is_empty() {
         return Err(errors);
     }
     let plan = SemanticPlan { graph, blocks };
-    let encoding = |what: &str| {
-        vec![planning_error(
-            ErrorCode::PlannerInternalInvariantViolation,
-            "/",
-            format!("La codificación canónica de {what} superó su presupuesto."),
-        )]
-    };
-    let certificate = Certificate {
-        model_hash: *model.content_hash(),
-        query_hash: validated
-            .query
-            .fingerprint()
-            .map_err(|_| encoding("la consulta"))?,
-        seir_hash: plan.fingerprint().map_err(|_| encoding("el plan"))?,
-        discharges,
-    };
+    let certificate = certify(model, validated, &plan)?;
     Ok(PlannedQuery { plan, certificate })
 }
 
-fn planning_error(code: ErrorCode, path: &str, message: String) -> Diagnostic {
-    Diagnostic {
-        schema_version: "0.1",
-        code,
-        phase: Phase::Planning,
-        severity: Severity::Error,
-        primary_ref: None,
-        related_refs: Vec::new(),
-        query_refs: vec![path.to_owned()],
-        evidence: vec![Ev::Constraint {
-            name: code.as_str().to_owned(),
-        }],
-        suggestion_codes: Vec::new(),
-        message,
-        source_span: None,
-    }
+/// The metrics one fact branch computes: its measures, the metrics they
+/// serve, and the metric whose private semantics (period-end selection,
+/// intrinsic filter, metric policy) shape the branch, if any.
+#[derive(Default)]
+struct Branch<'m> {
+    measures: BTreeMap<StableId, &'m Measure>,
+    serves: BTreeSet<StableId>,
 }
 
-struct BlockPlanner<'p, 'm> {
+struct Builder<'p, 'm> {
+    compiled: &'m CompiledSemanticModel,
     model: &'m ModelDefinition,
     graph: &'p mut SeirGraph,
     validation: &'p BlockValidation,
-    block_id: String,
     path: String,
-    witnesses: BTreeMap<Obligation, Vec<Evidence>>,
     errors: Vec<Diagnostic>,
 }
 
-impl<'p, 'm> BlockPlanner<'p, 'm> {
+impl<'p, 'm> Builder<'p, 'm> {
     fn fail(&mut self, code: ErrorCode, message: String) {
         let path = self.path.clone();
         self.errors.push(planning_error(code, &path, message));
@@ -140,8 +120,23 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
         }
     }
 
-    fn witness(&mut self, obligation: Obligation, evidence: Evidence) {
-        self.witnesses.entry(obligation).or_default().push(evidence);
+    /// A model object with its content fingerprint.
+    fn object(&mut self, id: &StableId) -> Option<ObjectRef> {
+        let found = self.compiled.object_hash(id).map(|content| ObjectRef {
+            id: id.clone(),
+            content: *content,
+        });
+        if found.is_none() {
+            self.fail(
+                ErrorCode::PlannerInternalInvariantViolation,
+                format!("{id} no tiene huella en el modelo compilado."),
+            );
+        }
+        found
+    }
+
+    fn objects(&mut self, ids: impl IntoIterator<Item = StableId>) -> Option<Vec<ObjectRef>> {
+        ids.into_iter().map(|id| self.object(&id)).collect()
     }
 
     fn obligations(&self) -> impl Iterator<Item = &'p Obligation> + use<'p, 'm> {
@@ -155,34 +150,40 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
             .find(|metric| metric.metadata.id() == id)
     }
 
-    /// Primitive measures of a metric, through metric references.
-    fn lineage(&self, metric: &'m Metric) -> BTreeMap<StableId, &'m Measure> {
-        let mut found = BTreeMap::new();
-        let mut pending = vec![metric];
-        let mut seen = BTreeSet::new();
-        while let Some(current) = pending.pop() {
-            if !seen.insert(current.metadata.id().clone()) {
-                continue;
-            }
-            for id in current.expression.measure_refs() {
-                if let Some(measure) = self.model.measures.iter().find(|m| m.metadata.id() == &id) {
-                    found.insert(id, measure);
-                }
-            }
-            for id in current.expression.metric_refs() {
-                if let Some(next) = self.metric(&id) {
-                    pending.push(next);
-                }
+    /// Every metric of the block's lineage.
+    fn closure(&self, selected: &[&'m Metric]) -> BTreeMap<StableId, &'m Metric> {
+        let mut found: BTreeMap<StableId, &'m Metric> = BTreeMap::new();
+        let mut pending: Vec<&'m Metric> = selected.to_vec();
+        while let Some(metric) = pending.pop() {
+            if found.insert(metric.metadata.id().clone(), metric).is_none() {
+                pending.extend(
+                    metric_inputs(metric)
+                        .iter()
+                        .filter_map(|id| self.metric(id)),
+                );
             }
         }
         found
+    }
+
+    /// A metric gets a private branch when part of its meaning applies to
+    /// its rows only: period-end selection, an intrinsic filter, or a
+    /// policy scoped to it.
+    fn private(&self, metric: &Metric) -> bool {
+        let id = metric.metadata.id();
+        metric.intrinsic_filter.is_some()
+            || self.obligations().any(|obligation| match obligation {
+                Obligation::ApplyPeriodEndSelection { metric: owner, .. } => owner == id,
+                Obligation::ApplyMandatoryPolicy { scope, .. } => scope == id,
+                _ => false,
+            })
     }
 
     // ---- The block ---------------------------------------------------------------
 
     fn block(&mut self, block: &SemanticQueryBlock) -> Option<NodeId> {
         let requested = block.requested_grain();
-        let metrics: Vec<&'m Metric> = block
+        let selected: Vec<&'m Metric> = block
             .selections
             .iter()
             .filter_map(|selection| match &selection.item {
@@ -190,53 +191,44 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
                 _ => None,
             })
             .collect();
-        // Phase 2: metric dependency requirements, by fact dataset.
-        let mut anchors: BTreeMap<StableId, BTreeMap<StableId, &'m Measure>> = BTreeMap::new();
-        for metric in &metrics {
-            for (id, measure) in self.lineage(metric) {
-                anchors
-                    .entry(measure.dataset.clone())
-                    .or_default()
-                    .insert(id, measure);
+        let closure = self.closure(&selected);
+        // Phase 2: metric requirements grouped by fact and private meaning.
+        let mut branches: BTreeMap<(StableId, Option<StableId>), Branch<'m>> = BTreeMap::new();
+        for metric in closure.values() {
+            let profile = self.private(metric).then(|| metric.metadata.id().clone());
+            for id in metric.expression.measure_refs() {
+                let Some(measure) = self.model.measures.iter().find(|m| m.metadata.id() == &id)
+                else {
+                    continue;
+                };
+                let branch = branches
+                    .entry((measure.dataset.clone(), profile.clone()))
+                    .or_default();
+                branch.measures.insert(id, measure);
+                branch.serves.insert(metric.metadata.id().clone());
             }
         }
-        let usages = usages(block, &requested);
-        // Phases 3–9: one protected, aggregated branch per fact.
-        let mut branches = Vec::new();
-        for (anchor, measures) in &anchors {
-            branches.push(self.branch(anchor, measures, &usages, block, &requested)?);
-        }
-        // Phase 10: alignment of independent facts.
-        let mut node = if let [single] = branches.as_slice() {
-            *single
-        } else if branches.is_empty() {
-            // SQIR binding rejects a block without metrics (`NoMetric`): one
-            // here means the input skipped binding. Never an empty plan.
+        if branches.is_empty() {
+            // SQIR binding rejects a block without metrics (`NoMetric`).
             self.fail(
                 ErrorCode::PlannerInternalInvariantViolation,
-                "Un bloque sin métricas no debería llegar al planificador: SQIR lo rechaza al                  vincular."
+                "Un bloque sin métricas no debería llegar al planificador: SQIR lo rechaza al \
+                 vincular."
                     .to_owned(),
             );
             return None;
-        } else {
-            let aligned = self.add(Operator::AlignSemanticBranches {
-                inputs: branches.clone(),
-                grain: requested.clone(),
-            })?;
-            for obligation in self.obligations().cloned().collect::<Vec<_>>() {
-                if matches!(obligation, Obligation::AggregateBeforeAlignment { .. }) {
-                    self.witness(obligation.clone(), Evidence::Node(aligned));
-                    self.witness(
-                        obligation,
-                        Evidence::Invariant("aligned-inputs-are-aggregated"),
-                    );
-                }
-            }
-            aligned
-        };
-        // Phases 11–12: recomposition, then windows.
-        node = self.recompose(node)?;
-        node = self.windows(node)?;
+        }
+        let usages = usages(block, &requested);
+        // Phases 3–9: one protected, aggregated branch per fact and meaning.
+        let mut outputs = Vec::new();
+        for ((anchor, profile), branch) in &branches {
+            let private = profile.as_ref().and_then(|id| self.metric(id));
+            outputs.push(self.branch(anchor, private, branch, &usages, block, &requested)?);
+        }
+        // Phase 10: alignment of independent branches.
+        let mut node = self.align(outputs, &requested)?;
+        // Phases 11–12: derived metrics in dependency order.
+        node = self.derived(node, &closure)?;
         // Phase 13: post-aggregate filter and result shape.
         if let Some(predicate) = &block.post_aggregate_filter {
             node = self.add(Operator::ApplyPostAggregateFilter {
@@ -244,9 +236,16 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
                 predicate: predicate.clone(),
             })?;
         }
+        let mut definitions: Vec<StableId> = selected
+            .iter()
+            .map(|metric| metric.metadata.id().clone())
+            .collect();
+        definitions.extend(usages.iter().map(|usage| usage.dimension.clone()));
+        let definitions = self.objects(definitions)?;
         node = self.add(Operator::ProjectSemanticOutput {
             input: node,
             selections: block.selections.clone(),
+            definitions,
         })?;
         if !block.order_by.is_empty() {
             node = self.add(Operator::OrderSemanticOutput {
@@ -261,63 +260,218 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
                 offset: block.offset,
             })?;
         }
-        self.annotations();
         Some(node)
     }
 
-    /// One fact branch: read, guard, relate, bucket, filter, select and
-    /// aggregate, in that semantic order.
+    fn align(&mut self, outputs: Vec<NodeId>, requested: &[RequestedAtom]) -> Option<NodeId> {
+        if let [single] = outputs.as_slice() {
+            return Some(*single);
+        }
+        self.add(Operator::AlignSemanticBranches {
+            inputs: outputs,
+            grain: requested.to_vec(),
+        })
+    }
+
+    /// One fact branch, in semantic order: read, guard, relate, bucket,
+    /// filter, select, aggregate.
     fn branch(
         &mut self,
         anchor: &StableId,
-        measures: &BTreeMap<StableId, &'m Measure>,
-        usages: &[QualifiedDimensionRef],
+        private: Option<&'m Metric>,
+        branch: &Branch<'m>,
+        shared: &[QualifiedDimensionRef],
         block: &SemanticQueryBlock,
         requested: &[RequestedAtom],
     ) -> Option<NodeId> {
-        let fields: Vec<StableId> = measures
+        let mut usages = shared.to_vec();
+        let mut filters: Vec<&ScalarExpr> = branch
+            .measures
             .values()
-            .filter_map(|measure| measure.scalar_expression.as_ref())
-            .flat_map(sef_model_ir::expressions::ScalarExpr::field_refs)
+            .filter_map(|measure| measure.intrinsic_filter.as_ref())
             .collect();
-        let mut node = self.add(Operator::ReadSemanticDataset {
-            dataset: anchor.clone(),
-            fields,
-        })?;
-        node = self.guard(node, anchor)?;
-        for dimension in usages {
-            node = self.relate(node, anchor, dimension)?;
+        filters.extend(private.and_then(|metric| metric.intrinsic_filter.as_ref()));
+        for filter in &filters {
+            for dimension in filter.dimension_refs() {
+                let usage = QualifiedDimensionRef {
+                    dimension,
+                    roles: Vec::new(),
+                };
+                if !usages.contains(&usage) {
+                    usages.push(usage);
+                }
+            }
         }
-        node = self.time(node, anchor, requested)?;
+        let fields = self.read_fields(anchor, private, branch, &usages, &filters);
+        let dataset = self.object(anchor)?;
+        let mut node = self.add(Operator::ReadSemanticDataset { dataset, fields })?;
+        node = self.guard(node, anchor)?;
+        if let Some(metric) = private {
+            node = self.guard(node, metric.metadata.id())?;
+        }
+        for usage in &usages {
+            node = self.relate(node, anchor, usage, branch)?;
+        }
+        node = self.time(node, anchor, &usages)?;
         if let Some(predicate) = &block.filter {
             node = self.add(Operator::ApplyRowFilter {
                 input: node,
                 predicate: predicate.clone(),
             })?;
         }
-        node = self.period_end(node, measures)?;
-        self.aggregate(node, measures, requested)
+        if let Some(metric) = private {
+            if metric.intrinsic_filter.is_some() {
+                let owner = self.object(metric.metadata.id())?;
+                node = self.add(Operator::ApplyIntrinsicFilter { input: node, owner })?;
+            }
+            node = self.period_end(node, metric)?;
+        }
+        self.aggregate(node, branch, requested)
     }
 
-    /// A mandatory policy on `dataset` guards its rows right after they are
-    /// read, so it dominates everything derived from them.
-    fn guard(&mut self, mut node: NodeId, dataset: &StableId) -> Option<NodeId> {
-        let policies: Vec<Obligation> = self
-            .obligations()
-            .filter(|obligation| {
-                matches!(obligation, Obligation::ApplyMandatoryPolicy { scope, .. } if scope == dataset)
-            })
-            .cloned()
+    /// Every field the branch's source must provide: measures and their
+    /// filters, policy predicates, the keys and bindings of its paths and
+    /// dimensions, and the time, scope and tie fields of a period-end
+    /// selection (§7.1, §33.5).
+    fn read_fields(
+        &self,
+        anchor: &StableId,
+        private: Option<&'m Metric>,
+        branch: &Branch<'m>,
+        usages: &[QualifiedDimensionRef],
+        filters: &[&ScalarExpr],
+    ) -> Vec<StableId> {
+        let Some(dataset) = self
+            .model
+            .datasets
+            .iter()
+            .find(|d| d.metadata.id() == anchor)
+        else {
+            return Vec::new();
+        };
+        let own: BTreeSet<&StableId> = dataset.fields.iter().map(|f| f.metadata.id()).collect();
+        let mut wanted: Vec<StableId> = Vec::new();
+        for measure in branch.measures.values() {
+            wanted.extend(
+                measure
+                    .scalar_expression
+                    .iter()
+                    .flat_map(ScalarExpr::field_refs),
+            );
+        }
+        for filter in filters {
+            wanted.extend(filter.field_refs());
+        }
+        let scopes: Vec<&StableId> = std::iter::once(anchor)
+            .chain(private.map(|metric| metric.metadata.id()))
             .collect();
-        for obligation in policies {
-            let Obligation::ApplyMandatoryPolicy { policy, .. } = &obligation else {
-                continue;
+        for policy in &self.model.policies {
+            let applies = match &policy.scope {
+                PolicyScope::Dataset(scope) | PolicyScope::Metric(scope) => scopes.contains(&scope),
             };
+            if applies {
+                wanted.extend(policy.predicate.field_refs());
+            }
+        }
+        for usage in usages {
+            match self.path(anchor, usage).as_deref() {
+                Some([]) => wanted.extend(self.binding_fields(&usage.dimension, anchor)),
+                Some([first, ..]) => wanted.extend(self.key_fields(first, anchor)),
+                None => {}
+            }
+        }
+        if let Some(behavior) = private.and_then(|metric| metric.time_behavior.as_ref()) {
+            let mut terms: Vec<&StableId> = behavior.order_by.iter().map(|o| &o.value).collect();
+            match &behavior.ties {
+                TemporalTies::SecondaryKey { fields } => {
+                    terms.extend(fields.iter().map(|o| &o.value));
+                }
+                TemporalTies::UniqueByContract { key } => terms.push(key),
+                TemporalTies::Unspecified => {}
+            }
+            if let sef_model_ir::grain::GrainAtom::DimensionRef { dimension, .. } = &behavior.axis {
+                terms.push(dimension);
+            }
+            for atom in behavior.selection_scope.atoms() {
+                if let sef_model_ir::grain::GrainAtom::EntityKeyRef(key) = atom {
+                    terms.push(key);
+                }
+            }
+            for term in terms {
+                wanted.push(term.clone());
+                wanted.extend(self.binding_fields(term, anchor));
+                for key in &dataset.key_bindings {
+                    if &key.entity_key == term {
+                        wanted.extend(key.fields.iter().cloned());
+                    }
+                }
+            }
+        }
+        wanted.retain(|field| own.contains(field));
+        wanted
+    }
+
+    fn binding_fields(&self, dimension: &StableId, dataset: &StableId) -> Vec<StableId> {
+        self.model
+            .dimensions
+            .iter()
+            .find(|candidate| candidate.metadata.id() == dimension)
+            .into_iter()
+            .flat_map(|found| &found.bindings)
+            .filter(|binding| &binding.dataset == dataset)
+            .flat_map(|binding| binding.expression.field_refs())
+            .collect()
+    }
+
+    /// The fields a hop through `relationship` reads on `dataset`.
+    fn key_fields(&self, relationship: &StableId, dataset: &StableId) -> Vec<StableId> {
+        owned(self.model, dataset, hop_fields(self.model, relationship))
+    }
+
+    /// The path the correctness engine proved from `anchor` to a dimension.
+    fn path(&self, anchor: &StableId, dimension: &QualifiedDimensionRef) -> Option<Vec<StableId>> {
+        self.validation.facts.iter().find_map(|fact| match fact {
+            Fact::RelationshipPathUnique {
+                anchor: found,
+                dimension: proved,
+                relationships,
+            } if found == anchor && proved == dimension => Some(relationships.clone()),
+            _ => None,
+        })
+    }
+
+    /// Bridges a metric of this branch allocates through.
+    fn allocations(&self, branch: &Branch<'m>) -> Vec<StableId> {
+        self.obligations()
+            .filter_map(|obligation| match obligation {
+                Obligation::ApplyBridgeAllocation { metric, bridge }
+                    if branch.serves.contains(metric) =>
+                {
+                    Some(bridge.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Mandatory policies scoped to `scope`, as guards right after `node`.
+    fn guard(&mut self, mut node: NodeId, scope: &StableId) -> Option<NodeId> {
+        let policies: Vec<StableId> = self
+            .obligations()
+            .filter_map(|obligation| match obligation {
+                Obligation::ApplyMandatoryPolicy {
+                    policy,
+                    scope: owner,
+                } if owner == scope => Some(policy.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in policies {
             let slots = self
                 .model
                 .policies
                 .iter()
-                .find(|candidate| candidate.metadata.id() == policy)
+                .find(|candidate| candidate.metadata.id() == &id)
                 .map(|found| {
                     found
                         .context_slots
@@ -326,36 +480,27 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let policy = self.object(&id)?;
             node = self.add(Operator::PolicyGuard {
                 input: node,
-                policy: policy.clone(),
+                policy,
                 slots,
             })?;
-            self.witness(obligation.clone(), Evidence::Node(node));
-            self.witness(
-                obligation,
-                Evidence::Invariant("policy-guard-dominates-source"),
-            );
         }
         Some(node)
     }
 
-    /// Attaches a dimension through the path the correctness engine proved,
-    /// with its temporal, allocation and uniqueness semantics on the way.
+    /// Attaches a dimension through the proved path, with temporal,
+    /// allocation and uniqueness semantics on the way; each dataset the path
+    /// enters is read and guarded by its own lookup.
     fn relate(
         &mut self,
         mut node: NodeId,
         anchor: &StableId,
         dimension: &QualifiedDimensionRef,
+        branch: &Branch<'m>,
     ) -> Option<NodeId> {
-        let Some(path) = self.validation.facts.iter().find_map(|fact| match fact {
-            Fact::RelationshipPathUnique {
-                anchor: found,
-                dimension: proved,
-                relationships,
-            } if found == anchor && proved == dimension => Some(relationships.clone()),
-            _ => None,
-        }) else {
+        let Some(path) = self.path(anchor, dimension) else {
             self.fail(
                 ErrorCode::PlannerInternalInvariantViolation,
                 format!(
@@ -365,214 +510,222 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
             );
             return None;
         };
-        for id in &path {
-            node = self.traverse(node, id)?;
-        }
-        node = self.add(Operator::AttachDimension {
-            input: node,
-            dimension: dimension.clone(),
-            path: path.clone(),
-        })?;
-        for obligation in self.obligations().cloned().collect::<Vec<_>>() {
-            if let Obligation::UseDeclaredRelationshipRole { relationship, .. } = &obligation
-                && path.contains(relationship)
-            {
-                self.witness(obligation, Evidence::Node(node));
+        let mut lookups = Vec::new();
+        let mut at = anchor.clone();
+        for (i, id) in path.iter().enumerate() {
+            node = self.traverse(node, id, branch)?;
+            let relationship = self
+                .model
+                .relationships
+                .iter()
+                .find(|candidate| candidate.metadata.id() == id)?;
+            at = if relationship.from_dataset == at {
+                relationship.to_dataset.clone()
+            } else {
+                relationship.from_dataset.clone()
+            };
+            let mut fields = self.key_fields(id, &at);
+            match path.get(i + 1) {
+                Some(next) => fields.extend(self.key_fields(next, &at)),
+                None => fields.extend(self.binding_fields(&dimension.dimension, &at)),
             }
+            for bridge in self.allocations(branch) {
+                let enters = self
+                    .model
+                    .bridges
+                    .iter()
+                    .any(|b| b.metadata.id() == &bridge && b.bridge_dataset == at);
+                if enters {
+                    fields.extend(owned(self.model, &at, weight_fields(self.model, &bridge)));
+                }
+            }
+            let dataset = self.object(&at)?;
+            let read = self.add(Operator::ReadSemanticDataset { dataset, fields })?;
+            lookups.push(self.guard(read, &at.clone())?);
         }
-        Some(node)
+        let definition = self.object(&dimension.dimension)?;
+        let path = self.objects(path)?;
+        self.add(Operator::AttachDimension {
+            input: node,
+            lookups,
+            dimension: dimension.clone(),
+            definition,
+            path,
+        })
     }
 
-    fn traverse(&mut self, mut node: NodeId, id: &StableId) -> Option<NodeId> {
+    fn traverse(&mut self, mut node: NodeId, id: &StableId, branch: &Branch<'m>) -> Option<NodeId> {
         let relationship = self
             .model
             .relationships
             .iter()
             .find(|relationship| relationship.metadata.id() == id)?;
+        let reference = self.object(id)?;
         if relationship.temporal_constraint.is_some() {
             node = self.add(Operator::TemporalAsOf {
                 input: node,
-                relationship: id.clone(),
+                relationship: reference.clone(),
             })?;
-            let asof = node;
             node = self.add(Operator::ContractGuard {
                 input: node,
                 contract: Contract::TemporalSingleMatch {
-                    relationship: id.clone(),
+                    relationship: reference,
                 },
             })?;
-            let obligation = Obligation::UseTemporalRelationship {
-                relationship: id.clone(),
-            };
-            if self.validation.obligations.contains(&obligation) {
-                self.witness(obligation, Evidence::Node(asof));
-            }
         } else if relationship.evidence == ContractEvidenceState::DeclaredUnverified {
             // A declared, not yet certified, unique target (§27: CASE-003).
             node = self.add(Operator::ContractGuard {
                 input: node,
                 contract: Contract::UniqueTarget {
-                    relationship: id.clone(),
+                    relationship: reference,
                 },
             })?;
         }
-        let allocations: Vec<Obligation> = self
-            .obligations()
-            .filter(|obligation| matches!(obligation, Obligation::ApplyBridgeAllocation { .. }))
-            .cloned()
-            .collect();
-        for obligation in allocations {
-            let Obligation::ApplyBridgeAllocation { bridge, .. } = &obligation else {
-                continue;
-            };
-            let Some(declared) = self
-                .model
-                .bridges
-                .iter()
-                .find(|b| b.metadata.id() == bridge)
-            else {
-                continue;
-            };
-            // Allocation happens once, where the path enters the bridge.
-            if &declared.left_relationship == id {
+        // Allocation happens where the path enters a bridge that a metric
+        // of this branch allocates through.
+        for bridge_id in self.allocations(branch) {
+            let enters = self.model.bridges.iter().any(|bridge| {
+                bridge.metadata.id() == &bridge_id && &bridge.left_relationship == id
+            });
+            if enters {
+                let bridge = self.object(&bridge_id)?;
                 node = self.add(Operator::BridgeAllocate {
                     input: node,
                     bridge: bridge.clone(),
                 })?;
-                self.witness(obligation.clone(), Evidence::Node(node));
                 node = self.add(Operator::ContractGuard {
                     input: node,
-                    contract: Contract::AllocationNormalization {
-                        bridge: bridge.clone(),
-                    },
+                    contract: Contract::AllocationNormalization { bridge },
                 })?;
-                self.witness(
-                    Obligation::ValidateAllocationNormalization {
-                        bridge: bridge.clone(),
-                    },
-                    Evidence::Node(node),
-                );
             }
         }
         Some(node)
     }
 
-    /// Instant → business zone → calendar bucket (§9, §22), and plain
-    /// buckets of calendar dates.
+    /// Instant → business zone → calendar bucket, and calendar buckets of
+    /// dates, where the dimension's values arrive on this branch.
     fn time(
         &mut self,
         mut node: NodeId,
         anchor: &StableId,
-        requested: &[RequestedAtom],
+        usages: &[QualifiedDimensionRef],
     ) -> Option<NodeId> {
-        let conversions: Vec<Obligation> = self
-            .obligations()
-            .filter(|obligation| {
-                matches!(obligation, Obligation::ConvertTimezoneBeforeBucketing { dataset, .. } if dataset == anchor)
-            })
-            .cloned()
-            .collect();
-        let mut converted = BTreeSet::new();
-        for obligation in conversions {
-            let Obligation::ConvertTimezoneBeforeBucketing {
-                dimension,
-                timezone,
-                grain,
-                ..
-            } = &obligation
-            else {
+        for usage in usages {
+            let Some(path) = self.path(anchor, usage) else {
                 continue;
             };
-            let calendar = self.calendar(dimension);
-            let normalized = self.add(Operator::NormalizeTime {
-                input: node,
-                dimension: dimension.clone(),
-                timezone: timezone.clone(),
-                calendar: calendar.clone(),
-            })?;
-            node = self.add(Operator::TimeBucket {
-                input: normalized,
-                dimension: dimension.clone(),
-                grain: *grain,
-                calendar,
-            })?;
-            converted.insert(dimension.clone());
-            self.witness(obligation.clone(), Evidence::Node(normalized));
-            self.witness(obligation.clone(), Evidence::Node(node));
-            self.witness(obligation, Evidence::Invariant("normalize-before-bucket"));
-        }
-        for atom in requested {
-            if let RequestedAtom::TimeBucket(time) = atom
-                && !converted.contains(&time.dimension.dimension)
-            {
-                let calendar = self.calendar(&time.dimension.dimension);
-                node = self.add(Operator::TimeBucket {
-                    input: node,
-                    dimension: time.dimension.dimension.clone(),
-                    grain: time.grain,
-                    calendar,
-                })?;
+            let arrival = self.arrival(anchor, &path);
+            let wanted: Vec<Obligation> = self
+                .obligations()
+                .filter(|obligation| match obligation {
+                    Obligation::ConvertTimezoneBeforeBucketing {
+                        dimension, dataset, ..
+                    }
+                    | Obligation::ApplyCalendarBucket {
+                        dimension, dataset, ..
+                    } => dimension == &usage.dimension && dataset == &arrival,
+                    _ => false,
+                })
+                .cloned()
+                .collect();
+            for obligation in wanted {
+                match obligation {
+                    Obligation::ConvertTimezoneBeforeBucketing {
+                        dimension,
+                        timezone,
+                        calendar,
+                        grain,
+                        ..
+                    } => {
+                        let reference = self.object(&dimension)?;
+                        let normalized = self.add(Operator::NormalizeTime {
+                            input: node,
+                            dimension: reference.clone(),
+                            timezone,
+                            calendar: calendar.clone(),
+                        })?;
+                        node = self.add(Operator::TimeBucket {
+                            input: normalized,
+                            dimension: reference,
+                            grain,
+                            calendar,
+                        })?;
+                    }
+                    Obligation::ApplyCalendarBucket {
+                        dimension,
+                        calendar,
+                        grain,
+                        ..
+                    } => {
+                        let reference = self.object(&dimension)?;
+                        node = self.add(Operator::TimeBucket {
+                            input: node,
+                            dimension: reference,
+                            grain,
+                            calendar,
+                        })?;
+                    }
+                    _ => {}
+                }
             }
         }
         Some(node)
     }
 
-    fn calendar(&self, dimension: &StableId) -> CalendarProfile {
-        self.model
-            .dimensions
-            .iter()
-            .find(|candidate| candidate.metadata.id() == dimension)
-            .and_then(|found| found.time_semantics.as_ref())
-            .map_or(CalendarProfile::Gregorian, |semantics| {
-                semantics.calendar.clone()
-            })
+    fn arrival(&self, anchor: &StableId, path: &[StableId]) -> StableId {
+        let mut at = anchor.clone();
+        for id in path {
+            if let Some(relationship) = self
+                .model
+                .relationships
+                .iter()
+                .find(|r| r.metadata.id() == id)
+            {
+                at = if relationship.from_dataset == at {
+                    relationship.to_dataset.clone()
+                } else {
+                    relationship.from_dataset.clone()
+                };
+            }
+        }
+        at
     }
 
-    /// Semi-additive selection before any aggregation across accounts (§18).
-    fn period_end(
-        &mut self,
-        mut node: NodeId,
-        measures: &BTreeMap<StableId, &'m Measure>,
-    ) -> Option<NodeId> {
+    /// Semi-additive selection on the metric's own branch, before any
+    /// aggregation across the other axes (§18).
+    fn period_end(&mut self, mut node: NodeId, metric: &'m Metric) -> Option<NodeId> {
         let selections: Vec<Obligation> = self
             .obligations()
-            .filter(|obligation| matches!(obligation, Obligation::ApplyPeriodEndSelection { .. }))
+            .filter(|obligation| {
+                matches!(obligation, Obligation::ApplyPeriodEndSelection { metric: owner, .. }
+                    if owner == metric.metadata.id())
+            })
             .cloned()
             .collect();
         for obligation in selections {
             let Obligation::ApplyPeriodEndSelection {
-                metric,
                 axis,
+                rule,
                 period,
                 scope,
                 ..
-            } = &obligation
+            } = obligation
             else {
                 continue;
             };
-            let Some(found) = self.metric(metric) else {
-                continue;
+            let rule = match rule {
+                "period-start" => TemporalSelection::PeriodStart,
+                _ => TemporalSelection::PeriodEnd,
             };
-            if !self
-                .lineage(found)
-                .keys()
-                .any(|id| measures.contains_key(id))
-            {
-                continue;
-            }
-            let rule = found
-                .time_behavior
-                .as_ref()
-                .map_or(TemporalSelection::PeriodEnd, |behavior| behavior.rule);
+            let reference = self.object(metric.metadata.id())?;
             node = self.add(Operator::SelectPeriodEnd {
                 input: node,
-                metric: metric.clone(),
-                axis: axis.clone(),
+                metric: reference,
+                axis,
                 rule,
-                period: *period,
-                scope: scope.clone(),
+                period,
+                scope,
             })?;
-            self.witness(obligation, Evidence::Node(node));
         }
         Some(node)
     }
@@ -582,254 +735,118 @@ impl<'p, 'm> BlockPlanner<'p, 'm> {
     fn aggregate(
         &mut self,
         node: NodeId,
-        measures: &BTreeMap<StableId, &'m Measure>,
+        branch: &Branch<'m>,
         requested: &[RequestedAtom],
     ) -> Option<NodeId> {
-        let (distinct, additive): (Vec<&'m Measure>, Vec<&'m Measure>) = measures
+        let (distinct, additive): (Vec<&'m Measure>, Vec<&'m Measure>) = branch
+            .measures
             .values()
             .copied()
             .partition(|measure| measure.aggregation == AggregateFunction::CountDistinct);
         let mut outputs = Vec::new();
         if !additive.is_empty() {
-            let aggregated = self.add(Operator::AggregateAtGrain {
+            let measures = self.objects(additive.iter().map(|m| m.metadata.id().clone()))?;
+            let serves = self.served(branch, &additive)?;
+            outputs.push(self.add(Operator::AggregateAtGrain {
                 input: node,
                 grain: requested.to_vec(),
-                measures: additive.iter().map(|m| m.metadata.id().clone()).collect(),
-            })?;
-            for measure in &additive {
-                self.preserve(measure.metadata.id(), aggregated);
-            }
-            outputs.push(aggregated);
+                measures,
+                serves,
+            })?);
         }
-        for measure in &distinct {
-            let counted = self.add(Operator::DistinctAggregate {
+        for measure in distinct {
+            let reference = self.object(measure.metadata.id())?;
+            let serves = self.served(branch, &[measure])?;
+            outputs.push(self.add(Operator::DistinctAggregate {
                 input: node,
                 grain: requested.to_vec(),
-                measure: measure.metadata.id().clone(),
-            })?;
-            self.preserve(measure.metadata.id(), counted);
-            outputs.push(counted);
+                measure: reference,
+                serves,
+            })?);
         }
-        match outputs.as_slice() {
-            [single] => Some(*single),
-            _ => self.add(Operator::AlignSemanticBranches {
-                inputs: outputs,
-                grain: requested.to_vec(),
-            }),
-        }
+        self.align(outputs, requested)
     }
 
-    fn preserve(&mut self, measure: &StableId, node: NodeId) {
-        let matching: Vec<Obligation> = self
-            .obligations()
-            .filter(|obligation| {
-                matches!(obligation, Obligation::PreserveMetricGrain { measure: found, .. } if found == measure)
+    /// The metrics of the branch that read any of `measures` directly.
+    fn served(&mut self, branch: &Branch<'m>, measures: &[&'m Measure]) -> Option<Vec<ObjectRef>> {
+        let ids: BTreeSet<&StableId> = measures.iter().map(|m| m.metadata.id()).collect();
+        let metrics: Vec<StableId> = branch
+            .serves
+            .iter()
+            .filter(|id| {
+                self.metric(id).is_some_and(|metric| {
+                    metric
+                        .expression
+                        .measure_refs()
+                        .iter()
+                        .any(|m| ids.contains(m))
+                })
             })
             .cloned()
             .collect();
-        for obligation in matching {
-            self.witness(obligation, Evidence::Node(node));
-        }
+        self.objects(metrics)
     }
 
-    /// Recomposed metrics after their components reach the target grain
-    /// (§17), dependencies first.
-    fn recompose(&mut self, mut node: NodeId) -> Option<NodeId> {
-        let mut pending: Vec<(StableId, Obligation)> = self
-            .obligations()
-            .filter_map(|obligation| match obligation {
-                Obligation::RecomputeAtTargetGrain { metric, .. } => {
-                    Some((metric.clone(), obligation.clone()))
-                }
-                _ => None,
-            })
-            .collect();
+    /// Metrics computed from other metrics — recompositions, windows and
+    /// plain references — once everything they read exists, whatever their
+    /// kind (§10.4, §12.1).
+    fn derived(
+        &mut self,
+        mut node: NodeId,
+        closure: &BTreeMap<StableId, &'m Metric>,
+    ) -> Option<NodeId> {
+        let mut pending: Vec<(StableId, Option<Obligation>)> = Vec::new();
+        for (id, metric) in closure {
+            let window = self.obligations().find(|obligation| {
+                matches!(obligation, Obligation::ApplyOrderedCumulative { metric: m, .. } if m == id)
+            });
+            let recomposed = self.obligations().any(|obligation| {
+                matches!(obligation, Obligation::RecomputeAtTargetGrain { metric: m, .. } if m == id)
+            });
+            if window.is_some() || recomposed || metric.expression.measure_refs().is_empty() {
+                pending.push((id.clone(), window.cloned()));
+            }
+        }
         let mut done: BTreeSet<StableId> = BTreeSet::new();
         while !pending.is_empty() {
-            let waiting: BTreeSet<StableId> =
-                pending.iter().map(|(metric, _)| metric.clone()).collect();
-            let ready = pending.iter().position(|(metric, _)| {
-                self.metric(metric).is_some_and(|found| {
-                    found.expression.metric_refs().iter().all(|dependency| {
-                        !waiting.contains(dependency) || done.contains(dependency)
-                    })
+            let waiting: BTreeSet<&StableId> = pending.iter().map(|(id, _)| id).collect();
+            let ready = pending.iter().position(|(id, _)| {
+                closure.get(id).is_some_and(|metric| {
+                    metric_inputs(metric)
+                        .iter()
+                        .all(|input| !waiting.contains(input) || done.contains(input))
                 })
             });
             let Some(index) = ready else {
                 self.fail(
-                    ErrorCode::PlannerInternalInvariantViolation,
-                    "Las métricas a recomponer dependen unas de otras en ciclo.".to_owned(),
+                    ErrorCode::PlannerIncomplete,
+                    "Las métricas derivadas dependen unas de otras en ciclo.".to_owned(),
                 );
                 return None;
             };
-            let (metric, obligation) = pending.remove(index);
-            node = self.add(Operator::RecomposeMetric {
-                input: node,
-                metric: metric.clone(),
-            })?;
-            self.witness(obligation, Evidence::Node(node));
-            done.insert(metric);
+            let (id, window) = pending.remove(index);
+            let metric = self.object(&id)?;
+            node = match window {
+                Some(Obligation::ApplyOrderedCumulative {
+                    base,
+                    order_by,
+                    partition_by,
+                    ..
+                }) => self.add(Operator::ComputeWindowMetric {
+                    input: node,
+                    metric,
+                    base,
+                    order_by,
+                    partition_by,
+                })?,
+                _ => self.add(Operator::RecomposeMetric {
+                    input: node,
+                    metric,
+                })?,
+            };
+            done.insert(id);
         }
         Some(node)
-    }
-
-    fn windows(&mut self, mut node: NodeId) -> Option<NodeId> {
-        let windows: Vec<Obligation> = self
-            .obligations()
-            .filter(|obligation| matches!(obligation, Obligation::ApplyOrderedCumulative { .. }))
-            .cloned()
-            .collect();
-        for obligation in windows {
-            let Obligation::ApplyOrderedCumulative {
-                metric,
-                base,
-                order_by,
-                partition_by,
-            } = &obligation
-            else {
-                continue;
-            };
-            node = self.add(Operator::ComputeWindowMetric {
-                input: node,
-                metric: metric.clone(),
-                base: base.clone(),
-                order_by: order_by.clone(),
-                partition_by: partition_by.clone(),
-            })?;
-            self.witness(obligation, Evidence::Node(node));
-        }
-        Some(node)
-    }
-
-    /// Exactness and null semantics travel as typed annotations (§22).
-    fn annotations(&mut self) {
-        for obligation in self.obligations().cloned().collect::<Vec<_>>() {
-            let annotation = match &obligation {
-                Obligation::PreserveExactDecimalSemantics { metric } => self
-                    .metric(metric)
-                    .map(|found| format!("{metric} {}", type_text(&found.value_type))),
-                Obligation::PreserveDeclaredNullSemantics { measure, semantics } => {
-                    Some(format!("{measure} {semantics}"))
-                }
-                Obligation::DoNotReaggregate { .. } => {
-                    self.witness(
-                        obligation.clone(),
-                        Evidence::Invariant("distinct-result-never-reaggregated"),
-                    );
-                    None
-                }
-                _ => None,
-            };
-            if let Some(text) = annotation {
-                self.witness(obligation, Evidence::Annotation(text));
-            }
-        }
-    }
-
-    // ---- Completeness (§33) -----------------------------------------------------
-
-    /// Every obligation discharged by evidence reachable from the block's
-    /// root, and the graph invariants the evidence names actually hold.
-    fn discharges(&mut self, root: NodeId) -> Vec<Discharge> {
-        let reachable = self.graph.reachable(&[root]);
-        let mut discharges = Vec::new();
-        for obligation in self.validation.obligations.clone() {
-            let evidence = self.witnesses.get(&obligation).cloned().unwrap_or_default();
-            let holds = !evidence.is_empty()
-                && evidence.iter().all(|item| match item {
-                    Evidence::Node(id) => reachable.contains(id),
-                    Evidence::Invariant(name) => self.invariant(name, &reachable),
-                    Evidence::Annotation(_) => true,
-                });
-            if holds {
-                discharges.push(Discharge {
-                    block_id: self.block_id(),
-                    obligation,
-                    evidence,
-                });
-            } else {
-                self.fail(
-                    ErrorCode::PlannerObligationUnsatisfied,
-                    format!("El plan no demuestra la obligación «{obligation}»."),
-                );
-            }
-        }
-        discharges
-    }
-
-    fn block_id(&self) -> String {
-        self.block_id.clone()
-    }
-
-    fn invariant(&self, name: &str, reachable: &BTreeSet<NodeId>) -> bool {
-        let operators: Vec<&Operator> = reachable
-            .iter()
-            .filter_map(|id| self.graph.operator(id))
-            .collect();
-        let is =
-            |id: &NodeId, test: fn(&Operator) -> bool| self.graph.operator(id).is_some_and(test);
-        match name {
-            // Nothing reads a distinct result to aggregate it again.
-            "distinct-result-never-reaggregated" => operators.iter().all(|operator| {
-                !matches!(operator, Operator::AggregateAtGrain { .. })
-                    || operator.inputs().iter().all(|input| {
-                        !is(input, |op| matches!(op, Operator::DistinctAggregate { .. }))
-                    })
-            }),
-            // Every alignment input is already aggregated.
-            "aligned-inputs-are-aggregated" => operators.iter().all(|operator| match operator {
-                Operator::AlignSemanticBranches { inputs, .. } => inputs.iter().all(|input| {
-                    is(input, |op| {
-                        matches!(
-                            op,
-                            Operator::AggregateAtGrain { .. }
-                                | Operator::DistinctAggregate { .. }
-                                | Operator::AlignSemanticBranches { .. }
-                        )
-                    })
-                }),
-                _ => true,
-            }),
-            // Each bucket of a converted dimension reads its normalization.
-            "normalize-before-bucket" => operators.iter().all(|operator| match operator {
-                Operator::NormalizeTime { dimension, .. } => operators.iter().any(|reader| {
-                    matches!(reader, Operator::TimeBucket { dimension: bucketed, input, .. }
-                        if bucketed == dimension
-                            && is(input, |op| matches!(op, Operator::NormalizeTime { .. })))
-                }),
-                _ => true,
-            }),
-            // A protected source is read only by its guard.
-            "policy-guard-dominates-source" => operators.iter().all(|operator| {
-                operator.inputs().iter().all(|input| {
-                    !is(input, |op| {
-                        matches!(op, Operator::ReadSemanticDataset { .. })
-                    }) || matches!(operator, Operator::PolicyGuard { .. })
-                        || !self.protected(input)
-                })
-            }),
-            _ => false,
-        }
-    }
-
-    /// Whether a read node reads a dataset with a mandatory policy here.
-    fn protected(&self, read: &NodeId) -> bool {
-        let Some(Operator::ReadSemanticDataset { dataset, .. }) = self.graph.operator(read) else {
-            return false;
-        };
-        self.validation.obligations.iter().any(|obligation| {
-            matches!(obligation, Obligation::ApplyMandatoryPolicy { scope, .. } if scope == dataset)
-        })
-    }
-}
-
-/// The exact type a result must keep, as a reader expects it.
-fn type_text(value_type: &sef_model_ir::types::ValueType) -> String {
-    match value_type {
-        sef_model_ir::types::ValueType::Decimal(decimal) => {
-            format!("DECIMAL({},{})", decimal.precision(), decimal.scale())
-        }
-        other => format!("{other:?}"),
     }
 }
 

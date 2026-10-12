@@ -1,6 +1,7 @@
 //! The plan certificate (§4.1–4.2): every obligation of the correctness
-//! engine paired with the SEIR evidence that discharges it. An auditable
-//! compiler artifact, not a proof-system claim.
+//! engine paired with the SEIR evidence that discharges it, as found by the
+//! independent checker. An auditable compiler artifact, not a proof-system
+//! claim.
 
 use std::fmt;
 
@@ -13,11 +14,9 @@ use sef_model_ir::canonical::Fingerprint;
 pub enum Evidence {
     /// A node whose operator performs what the obligation requires.
     Node(NodeId),
-    /// A property checked over the whole graph (for example, that a
-    /// distinct result is never aggregated again).
+    /// A property the checker verified over the whole graph (for example,
+    /// that nothing aggregates an aggregated value).
     Invariant(&'static str),
-    /// A typed annotation the plan carries through to execution.
-    Annotation(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,7 +40,6 @@ impl fmt::Display for Evidence {
         match self {
             Self::Node(id) => write!(f, "node {id}"),
             Self::Invariant(name) => write!(f, "invariant {name}"),
-            Self::Annotation(text) => write!(f, "annotation {text}"),
         }
     }
 }

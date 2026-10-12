@@ -3,12 +3,21 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use proptest::prelude::*;
-use sef_exec_ir::{GraphError, NodeId, Operator, PlanBlock, SeirGraph, SemanticPlan};
+use sef_exec_ir::{GraphError, NodeId, ObjectRef, Operator, PlanBlock, SeirGraph, SemanticPlan};
+use sef_model_ir::canonical::{CanonicalValue, Domain, fingerprint};
 use sef_model_ir::identity::StableId;
 use sef_query_ir::query::{QualifiedDimensionRef, RequestedAtom};
 
 fn id(text: &str) -> StableId {
     StableId::new(text).expect("stable id")
+}
+
+/// A model object with a content fingerprint derived from `content`.
+fn object(text: &str, content: &str) -> ObjectRef {
+    ObjectRef {
+        id: id(text),
+        content: fingerprint(Domain::Csmir, &CanonicalValue::text(content)).expect("fingerprint"),
+    }
 }
 
 fn region() -> Vec<RequestedAtom> {
@@ -22,7 +31,7 @@ fn region() -> Vec<RequestedAtom> {
 fn branch(graph: &mut SeirGraph, dataset: &str, measure: &str) -> NodeId {
     let read = graph
         .add(Operator::ReadSemanticDataset {
-            dataset: id(dataset),
+            dataset: object(dataset, dataset),
             fields: vec![id(&format!("{dataset}.amount"))],
         })
         .expect("read");
@@ -30,7 +39,8 @@ fn branch(graph: &mut SeirGraph, dataset: &str, measure: &str) -> NodeId {
         .add(Operator::AggregateAtGrain {
             input: read,
             grain: region(),
-            measures: vec![id(measure)],
+            measures: vec![object(measure, "SUM(amount)")],
+            serves: Vec::new(),
         })
         .expect("aggregate")
 }
@@ -124,7 +134,7 @@ fn a_node_can_only_read_existing_nodes() {
     let error = graph
         .add(Operator::RecomposeMetric {
             input: foreign,
-            metric: id("corpus/metric/average_order_value"),
+            metric: object("corpus/metric/average_order_value", "ratio"),
         })
         .expect_err("unknown input");
     assert_eq!(error, GraphError::UnknownInput(foreign));
@@ -151,25 +161,26 @@ fn a_different_meaning_is_a_different_plan() {
     let mut graph = SeirGraph::new();
     let read = graph
         .add(Operator::ReadSemanticDataset {
-            dataset: id("corpus/dataset/orders"),
+            dataset: object("corpus/dataset/orders", "orders"),
             fields: vec![id("corpus/dataset/orders.amount")],
         })
         .expect("read");
-    let by_region = graph
-        .add(Operator::AggregateAtGrain {
-            input: read,
-            grain: region(),
-            measures: vec![id("corpus/measure/order_revenue")],
-        })
-        .expect("by region");
-    let overall = graph
-        .add(Operator::AggregateAtGrain {
-            input: read,
-            grain: Vec::new(),
-            measures: vec![id("corpus/measure/order_revenue")],
-        })
-        .expect("overall");
+    let aggregate = |graph: &mut SeirGraph, grain: Vec<RequestedAtom>, content: &str| {
+        graph
+            .add(Operator::AggregateAtGrain {
+                input: read,
+                grain,
+                measures: vec![object("corpus/measure/order_revenue", content)],
+                serves: Vec::new(),
+            })
+            .expect("aggregate")
+    };
+    let by_region = aggregate(&mut graph, region(), "SUM(amount)");
+    let overall = aggregate(&mut graph, Vec::new(), "SUM(amount)");
     assert_ne!(by_region, overall);
+    // Same identifiers, different definition (SUM(-amount)): another plan.
+    let negated = aggregate(&mut graph, region(), "SUM(-amount)");
+    assert_ne!(by_region, negated);
 }
 
 #[test]

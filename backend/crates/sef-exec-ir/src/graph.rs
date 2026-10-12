@@ -205,7 +205,13 @@ impl SemanticPlan {
                 .map(ToString::to_string)
                 .collect();
             // Writing into a String cannot fail.
-            let _ = write!(text, "{} {}", node.id, node.operator.name());
+            let _ = write!(
+                text,
+                "{} {} {}",
+                node.id,
+                node.operator.name(),
+                node.operator.describe()
+            );
             if !inputs.is_empty() {
                 let _ = write!(text, " <- {}", inputs.join(", "));
             }
