@@ -10,6 +10,7 @@ yanked = "deny"
 # Each exception: no fixed version exists, why it cannot reach the product,
 # and what removes it. Re-checked whenever the dependency is upgraded.
 ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "openidconnect 4.0.1 uses rsa 0.9.10 only for public JWKS signature verification; the server has no RSA private key, signing or decryption path. The private-key timing attack is unreachable. Remove when upstream switches or a fixed rsa release exists (#70)." },
     { id = "RUSTSEC-2024-0436", reason = "paste (unmaintained) is a compile-time macro of parquet 58; no runtime code. Remove when arrow-rs drops it." },
 ]
 

@@ -106,3 +106,22 @@ export async function login(userId: string, request: typeof fetch = fetch): Prom
 export async function logout(request: typeof fetch = fetch): Promise<void> {
   await apiRequest('/api/v1/logout', { method: 'POST' }, request);
 }
+
+export async function getOidcConfig(signal?: AbortSignal): Promise<boolean> {
+  const value: unknown = await (await apiRequest('/api/v1/oidc/config', { signal })).json();
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('enabled' in value) ||
+    typeof value.enabled !== 'boolean'
+  )
+    throw new Error('La API devolvió una configuración inválida.');
+  return value.enabled;
+}
+
+export async function startCorporateLogin(): Promise<void> {
+  const value: components['schemas']['LoginStart'] = await (
+    await apiRequest('/api/v1/oidc/start', { method: 'POST' })
+  ).json();
+  window.location.assign(value.authorization_url);
+}

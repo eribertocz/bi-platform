@@ -3,7 +3,7 @@
 
 use utoipa::OpenApi;
 
-use crate::{auth, health, models, query};
+use crate::{auth, health, models, oidc, query};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -16,6 +16,9 @@ use crate::{auth, health, models, query};
         health::live,
         health::ready,
         auth::current,
+        oidc::available,
+        oidc::start,
+        oidc::callback,
         auth::logout,
         auth::dev_login,
         auth::dev_users,

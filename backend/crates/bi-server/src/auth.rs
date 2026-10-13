@@ -1,7 +1,6 @@
-//! G1 server sessions. Development identities are restricted to synthetic data.
-//! A production build has no identity selector; federation belongs to G2.
+//! Server sessions for development and verified federated identities.
+//! Data access remains restricted to synthetic data until semantic policies exist.
 
-#[cfg(feature = "dev-auth")]
 use std::fmt::Write as _;
 
 use axum::Json;
@@ -23,10 +22,11 @@ const DEFAULT_TTL: u32 = 3600;
 
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
-    origin: String,
-    secure: bool,
-    ttl_seconds: u32,
+    pub(crate) origin: String,
+    pub(crate) secure: bool,
+    pub(crate) ttl_seconds: u32,
     users: Vec<User>,
+    pub(crate) oidc: Option<crate::oidc::OidcConfig>,
 }
 
 impl Default for AuthConfig {
@@ -36,6 +36,7 @@ impl Default for AuthConfig {
             secure: false,
             ttl_seconds: DEFAULT_TTL,
             users: Vec::new(),
+            oidc: None,
         }
     }
 }
@@ -90,6 +91,7 @@ impl AuthConfig {
                 }
             }
         }
+        config.oidc = crate::oidc::OidcConfig::from_lookup(lookup, &config.origin)?;
         Ok(config)
     }
 
@@ -97,8 +99,8 @@ impl AuthConfig {
         cfg!(feature = "dev-auth") && !self.users.is_empty()
     }
 
-    fn cookie(&self, token: &str, max_age: u32) -> String {
-        // Strict fits a same-origin G1 SPA without federation or external embeds.
+    pub(crate) fn cookie(&self, token: &str, max_age: u32) -> String {
+        // The separate short-lived OIDC binding cookie handles the cross-site callback.
         // Origin validation remains mandatory: SameSite alone is not CSRF protection.
         format!(
             "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
@@ -133,10 +135,11 @@ pub struct Session {
 #[derive(Clone)]
 pub struct Principal {
     pub session: Session,
+    pub federated_identity: Option<crate::oidc::FederatedIdentity>,
     token_hash: Vec<u8>,
 }
 
-fn problem(status: StatusCode, code: &str, request_id: &RequestId) -> Response {
+pub(crate) fn problem(status: StatusCode, code: &str, request_id: &RequestId) -> Response {
     Problem::new(
         status,
         code,
@@ -151,7 +154,7 @@ fn problem(status: StatusCode, code: &str, request_id: &RequestId) -> Response {
     .into_response()
 }
 
-fn token_hash(headers: &HeaderMap) -> Option<Vec<u8>> {
+pub(crate) fn token_hash(headers: &HeaderMap) -> Option<Vec<u8>> {
     let mut token = None;
     for cookie in headers.get_all(header::COOKIE) {
         for item in cookie.to_str().ok()?.split(';') {
@@ -190,16 +193,25 @@ pub(crate) async fn enforce_session(
     if development_route && !state.auth.development_enabled() {
         return problem(StatusCode::NOT_FOUND, "not_found", request_id);
     }
-    if !development_route {
+    let oidc_route = matches!(
+        path,
+        "/api/v1/oidc/config" | "/api/v1/oidc/start" | "/api/v1/oidc/callback"
+    );
+    if !development_route && !oidc_route {
         let Some(hash) = token_hash(request.headers()) else {
             return problem(StatusCode::UNAUTHORIZED, "session_required", request_id);
         };
         let row = sqlx::query(
-            "SELECT user_id, display_name, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at \
+            "SELECT user_id, display_name, federated_identity::text AS federated_identity, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at \
              FROM bi_meta.sessions WHERE token_hash = $1 AND expires_at > clock_timestamp() AND revoked_at IS NULL AND data_scope = 'synthetic'",
         ).bind(&hash).fetch_optional(state.db.pool()).await;
         match row {
             Ok(Some(row)) => {
+                let identity: Option<String> = row.get("federated_identity");
+                let Ok(identity) = identity.map(|json| serde_json::from_str(&json)).transpose()
+                else {
+                    return problem(StatusCode::UNAUTHORIZED, "session_required", request_id);
+                };
                 request.extensions_mut().insert(Principal {
                     session: Session {
                         user: User {
@@ -209,6 +221,7 @@ pub(crate) async fn enforce_session(
                         data_scope: DataScope::Synthetic,
                         expires_at: row.get("expires_at"),
                     },
+                    federated_identity: identity,
                     token_hash: hash,
                 });
             }
@@ -338,17 +351,7 @@ pub(crate) async fn dev_login(
         else {
             return problem(StatusCode::UNAUTHORIZED, "unknown_dev_user", &id);
         };
-        let Ok(Ok(token)) = tokio::task::spawn_blocking(|| {
-            let mut bytes = [0_u8; 32];
-            getrandom::fill(&mut bytes)?;
-            let mut token = String::with_capacity(64);
-            for byte in bytes {
-                write!(token, "{byte:02x}").expect("writing to String cannot fail");
-            }
-            Ok::<_, getrandom::Error>(token)
-        })
-        .await
-        else {
+        let Ok(token) = random_token().await else {
             return problem(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "session_creation_failed",
@@ -424,4 +427,19 @@ pub(crate) fn routes() -> axum::Router<AppState> {
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/dev/users", get(dev_users))
         .route("/api/v1/dev/login", post(dev_login))
+}
+
+/// OS entropy is acquired outside Tokio's executor; no token is logged.
+pub(crate) async fn random_token() -> Result<String, ()> {
+    tokio::task::spawn_blocking(|| {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|_| ())?;
+        let mut token = String::with_capacity(64);
+        for byte in bytes {
+            write!(token, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Ok(token)
+    })
+    .await
+    .map_err(|_| ())?
 }
