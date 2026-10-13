@@ -1,0 +1,28 @@
+# Test credentials only. Keep this fixture separate from deployment configuration.
+name: bi-oidc
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.7
+    command: ["start-dev", "--import-realm", "--hostname", "http://127.0.0.1:18071"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: test-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: oidc-admin-test-only
+    volumes:
+      - ./docker/oidc:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:18071:8080"
+  postgres:
+    image: docker.io/library/postgres:18-alpine
+    environment:
+      POSTGRES_USER: bi
+      POSTGRES_PASSWORD: bi
+      POSTGRES_DB: bi
+    volumes:
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:18072:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bi -d bi"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
