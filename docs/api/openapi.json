@@ -1132,6 +1132,14 @@
             ],
             "description": "Human-readable explanation, safe to show; never internal errors."
           },
+          "public_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uri",
+            "description": "Configured application origin, present only for an origin rejection."
+          },
           "request_id": {
             "type": "string",
             "description": "Correlates with server logs (`x-request-id`).",

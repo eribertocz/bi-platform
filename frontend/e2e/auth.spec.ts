@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
 test('real login, protected navigation, logout and revoked cookie', async ({
   page,
@@ -51,4 +52,47 @@ test('real login, protected navigation, logout and revoked cookie', async ({
   ).toBe(204);
   await page.reload();
   await expect(page).toHaveURL('/login');
+});
+
+test('forbidden localhost login explains the configured origin and keeps CSRF protection', async ({
+  page,
+  request,
+  baseURL,
+}) => {
+  const configured = baseURL!;
+  const alternate = new URL(configured);
+  alternate.hostname = 'localhost';
+  await page.goto(`${alternate.origin}/login`);
+  await page.getByLabel('Usuario de desarrollo').selectOption('synthetic-analyst');
+  await page.getByRole('button', { name: 'Entrar', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Esta dirección no está autorizada');
+  const link = page.getByRole('link', { name: configured, exact: true });
+  await expect(link).toHaveAttribute('href', configured);
+  await expect(page.getByText(/Intenta de nuevo/)).toHaveCount(0);
+  expect((await page.context().cookies()).some((c) => c.name === 'bi_session')).toBe(false);
+  const rejection = await request.post('/api/v1/dev/login', {
+    headers: {
+      Origin: 'https://attacker.test',
+      Host: 'attacker.test',
+      'X-Forwarded-Host': 'attacker.test',
+      Referer: 'https://attacker.test/',
+    },
+    data: { user_id: 'synthetic-analyst' },
+  });
+  expect(rejection.status()).toBe(403);
+  expect(await rejection.json()).toMatchObject({
+    code: 'origin_forbidden',
+    public_origin: configured,
+    detail: `Abre la aplicación desde ${configured}.`,
+  });
+  expect(rejection.headers()['set-cookie']).toBeUndefined();
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await link.focus();
+  await expect(link).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${configured}/login`);
+  // Anonymous home returns to the configured login route.
+  await expect(page.getByRole('heading', { name: 'Iniciar sesión' })).toBeVisible();
+  await page.getByRole('button', { name: 'Entrar', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Inicio', exact: true })).toBeVisible();
 });

@@ -23,6 +23,10 @@ pub struct Problem {
     /// Stable identifier for clients, e.g. `invalid_query`.
     #[schema(pattern = "^[a-z][a-z0-9_]+$")]
     pub code: String,
+    /// Configured application origin, present only for an origin rejection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(format = "uri")]
+    pub public_origin: Option<String>,
     /// Correlates with server logs (`x-request-id`).
     #[schema(min_length = 1)]
     pub request_id: String,
@@ -42,6 +46,7 @@ impl Problem {
             status: status.as_u16(),
             detail,
             code: code.to_owned(),
+            public_origin: None,
             request_id: request_id.into(),
         }
     }
