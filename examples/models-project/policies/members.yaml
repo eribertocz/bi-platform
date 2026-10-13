@@ -1,0 +1,7 @@
+# Roles del proyecto: identidades verificadas (usuarios y grupos del proveedor)
+# a roles base (viewer, analyst, modeler, admin). Los grupos no conceden nada
+# por sí mismos; solo lo que declara este archivo.
+version: 1
+users:
+  synthetic-analyst: [analyst]
+  synthetic-viewer: [viewer]

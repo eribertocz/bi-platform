@@ -31,8 +31,10 @@ const MAX_DIRECTORY_ENTRIES: usize = 4096;
 
 #[derive(Clone)]
 pub struct Models {
-    directory: Option<PathBuf>,
-    admission: Arc<Semaphore>,
+    pub(crate) directory: Option<PathBuf>,
+    /// Shared by everything that compiles the project: listing and the
+    /// semantic path.
+    pub(crate) admission: Arc<Semaphore>,
     duration: Option<Histogram<f64>>,
     requests: Option<Counter<u64>>,
 }
@@ -423,14 +425,16 @@ async fn listing(state: &AppState) -> Result<ModelsResponse, Failure> {
     })
 }
 
-struct ProjectFile {
-    name: String,
-    text: Result<String, ModelDiagnostic>,
+pub(crate) struct ProjectFile {
+    pub(crate) name: String,
+    pub(crate) text: Result<String, ModelDiagnostic>,
 }
 
 // Walk one component at a time with nofollow, pinning each directory handle.
 // No check-then-open race, including on metrics/ and the configured root.
-fn project_metrics(path: &Path) -> std::io::Result<Dir> {
+/// A directory of the project (`metrics`, `policies`), opened without
+/// following links at any step.
+pub(crate) fn project_subdir(path: &Path, sub: &str) -> std::io::Result<Dir> {
     let absolute = std::path::absolute(path)?;
     let mut root = PathBuf::new();
     let mut components = absolute.components().peekable();
@@ -448,11 +452,11 @@ fn project_metrics(path: &Path) -> std::io::Result<Dir> {
             _ => return Err(std::io::Error::other("invalid project path")),
         }
     }
-    dir.open_dir_nofollow("metrics")
+    dir.open_dir_nofollow(sub)
 }
 
-fn read_project(path: &Path) -> Result<Vec<ProjectFile>, ModelDiagnostic> {
-    let dir = project_metrics(path).map_err(|_| ModelDiagnostic::error("project_unavailable", "No se puede abrir la carpeta del proyecto o su carpeta metrics. Comprueba que existen, tienen permisos de lectura y no son enlaces simbólicos."))?;
+pub(crate) fn read_project(path: &Path) -> Result<Vec<ProjectFile>, ModelDiagnostic> {
+    let dir = project_subdir(path, "metrics").map_err(|_| ModelDiagnostic::error("project_unavailable", "No se puede abrir la carpeta del proyecto o su carpeta metrics. Comprueba que existen, tienen permisos de lectura y no son enlaces simbólicos."))?;
     let mut names = vec![];
     for (i, entry) in dir
         .entries()
@@ -519,7 +523,7 @@ fn read_project(path: &Path) -> Result<Vec<ProjectFile>, ModelDiagnostic> {
         .collect()
 }
 
-fn read_file(dir: &Dir, name: &std::ffi::OsStr) -> Result<String, ModelDiagnostic> {
+pub(crate) fn read_file(dir: &Dir, name: &std::ffi::OsStr) -> Result<String, ModelDiagnostic> {
     // Entry metadata is only a fast rejection; the actual open also forbids links.
     if !dir
         .symlink_metadata(name)
@@ -573,25 +577,42 @@ fn read_file(dir: &Dir, name: &std::ffi::OsStr) -> Result<String, ModelDiagnosti
         .map_err(|_| ModelDiagnostic::error("syntax", "El archivo debe usar texto UTF-8."))
 }
 
-fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> ModelFile {
-    let path = format!("metrics/{}", file.name);
-    let invalid = |name: String, diagnostics| ModelFile::Invalid {
-        file: path.clone(),
-        name,
-        diagnostics,
-    };
-    let text = match file.text {
-        Ok(text) => text,
-        Err(d) => return invalid(file.name, vec![d]),
-    };
-    let loaded = match sef_ossie::load::load(&text) {
-        Ok(loaded) => loaded,
-        Err(ds) => return invalid(file.name, ds.into_iter().map(Into::into).collect()),
-    };
-    let name = loaded.model.name.clone();
+/// A project file compiled to CSMIR, with the document and text it came from.
+pub(crate) struct Compiled {
+    pub(crate) loaded: sef_ossie::Loaded,
+    pub(crate) document: sef_ossie::csmir::CompiledDocument,
+    pub(crate) text: String,
+}
+
+/// Why a project file did not compile: the model's name when the document
+/// could be read, and diagnostics located in the file.
+pub(crate) struct Rejected {
+    pub(crate) name: Option<String>,
+    pub(crate) diagnostics: Vec<ModelDiagnostic>,
+}
+
+/// Compiles one file of `metrics/` against the engine's catalog.
+pub(crate) fn compile(
+    file: ProjectFile,
+    conn: &bi_runtime::duckdb::Connection,
+) -> Result<Compiled, Rejected> {
+    let text = file.text.map_err(|d| Rejected {
+        name: None,
+        diagnostics: vec![d],
+    })?;
+    let loaded = sef_ossie::load::load(&text).map_err(|ds| Rejected {
+        name: None,
+        diagnostics: ds.into_iter().map(Into::into).collect(),
+    })?;
+    let name = Some(loaded.model.name.clone());
     let catalog = match catalog(&loaded.model, conn) {
         Ok(catalog) => catalog,
-        Err(diagnostics) => return invalid(name, located(&text, diagnostics)),
+        Err(diagnostics) => {
+            return Err(Rejected {
+                name,
+                diagnostics: located(&text, diagnostics),
+            });
+        }
     };
     // Exact UTF-8 filename, including extension/case, encoded as a logical ID.
     let model_id = file
@@ -611,11 +632,33 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
             model: model_id,
         },
     ) {
-        Err(ds) => invalid(
+        Ok(document) => Ok(Compiled {
+            loaded,
+            document,
+            text,
+        }),
+        Err(ds) => Err(Rejected {
             name,
-            located(&text, ds.into_iter().map(Into::into).collect()),
-        ),
-        Ok(compiled) => {
+            diagnostics: located(&text, ds.into_iter().map(Into::into).collect()),
+        }),
+    }
+}
+
+fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> ModelFile {
+    let path = format!("metrics/{}", file.name);
+    let fallback = file.name.clone();
+    match compile(file, conn) {
+        Err(rejected) => ModelFile::Invalid {
+            file: path,
+            name: rejected.name.unwrap_or(fallback),
+            diagnostics: rejected.diagnostics,
+        },
+        Ok(Compiled {
+            loaded,
+            document: compiled,
+            text,
+        }) => {
+            let name = loaded.model.name.clone();
             let definition = compiled.semantic.definition();
             ModelFile::Valid {
                 file: path,
