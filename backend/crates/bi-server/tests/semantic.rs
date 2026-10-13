@@ -624,3 +624,34 @@ async fn a_joined_dataset_is_never_named_when_denied(pool: sqlx::PgPool) {
         "unrequested dataset disclosed: {body:#}"
     );
 }
+
+#[sqlx::test(migrations = false)]
+async fn a_correctness_message_never_quotes_an_unrequested_object(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    // Summing `importe` across regions is forbidden: the message would
+    // quote the `region` axis, which this request does not name.
+    let model = MODEL
+        .replace(
+            "  - name: importe\n",
+            "  - name: importe\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\":1,\"aggregation\":{\"class\":\"semi_additive\",\"axes\":[{\"dimension\":\"region\",\"behavior\":\"forbidden\"}]}}'\n",
+        )
+        .replace(
+            "        dimension: {}",
+            "        dimension: {}\n        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\":1,\"dimension\":\"region\"}'",
+        );
+    h.write("metrics/ventas.yaml", &model);
+    let lector = h.login("lector").await;
+    let (status, body) = h
+        .explain(Some(&lector), &query(&json!([metric("m", "importe")])))
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+    assert_eq!(body["code"], "query_incorrect", "{body:#}");
+    assert_eq!(
+        body["diagnostics"][0]["code"], "ILLEGAL_REAGGREGATION",
+        "{body:#}"
+    );
+    assert!(
+        !body.to_string().contains("region"),
+        "unrequested axis leaked: {body:#}"
+    );
+}

@@ -500,7 +500,7 @@ fn decide(
                 message: "La consulta no tiene un resultado correcto con este modelo.".to_owned(),
                 diagnostics: diagnostics
                     .into_iter()
-                    .map(|d| semantic_diagnostic(d, &uses))
+                    .map(|d| semantic_diagnostic(d, definition, &uses))
                     .collect(),
                 audit: Some(audit(&asked, false)),
             };
@@ -515,7 +515,7 @@ fn decide(
                     .to_owned(),
                 diagnostics: diagnostics
                     .into_iter()
-                    .map(|d| semantic_diagnostic(d, &uses))
+                    .map(|d| semantic_diagnostic(d, definition, &uses))
                     .collect(),
                 audit: Some(audit(&asked, false)),
             };
@@ -742,10 +742,13 @@ fn binding_diagnostic(error: sef_query_ir::QueryError) -> SemanticDiagnostic {
     }
 }
 
-/// A correctness or planning message is shown only when every object it is
-/// about was named by the request; otherwise only its stable code.
+/// A correctness or planning message is shown only when everything it is
+/// about was named by the request and its text mentions no other object of
+/// the model, by identifier or by name: references need not cover every
+/// name a message quotes. Otherwise only its stable code leaves.
 fn semantic_diagnostic(
     diagnostic: sef_model_ir::diagnostic::Diagnostic,
+    model: &ModelDefinition,
     uses: &access::Uses,
 ) -> SemanticDiagnostic {
     use sef_model_ir::diagnostic::Phase;
@@ -754,7 +757,9 @@ fn semantic_diagnostic(
         .iter()
         .chain(&diagnostic.related_refs)
         .collect();
-    let disclosed = !refs.is_empty() && refs.iter().all(|id| uses.is_named(id.as_str()));
+    let disclosed = !refs.is_empty()
+        && refs.iter().all(|id| uses.is_named(id.as_str()))
+        && !mentions_unnamed(&diagnostic.message, model, uses);
     let (phase, generic) = match diagnostic.phase {
         Phase::Model => ("model", "El modelo tiene un error en su definición."),
         Phase::Correctness => (
@@ -776,6 +781,36 @@ fn semantic_diagnostic(
         },
         path: None,
     }
+}
+
+/// Whether `message` quotes an object of the model the request did not
+/// name, by its identifier or by the last segment of it. Erring towards
+/// silence is safe: a redacted message keeps its stable code.
+fn mentions_unnamed(message: &str, model: &ModelDefinition, uses: &access::Uses) -> bool {
+    let ids = std::iter::once(&model.metadata)
+        .chain(model.datasets.iter().map(|d| &d.metadata))
+        .chain(
+            model
+                .datasets
+                .iter()
+                .flat_map(|d| d.fields.iter().map(|f| &f.metadata)),
+        )
+        .chain(model.dimensions.iter().map(|d| &d.metadata))
+        .chain(model.measures.iter().map(|m| &m.metadata))
+        .chain(model.metrics.iter().map(|m| &m.metadata))
+        .chain(model.relationships.iter().map(|r| &r.metadata))
+        .chain(model.bridges.iter().map(|b| &b.metadata))
+        .chain(model.policies.iter().map(|p| &p.metadata))
+        .chain(model.entities.iter().map(|e| &e.metadata))
+        .map(|metadata| metadata.id().as_str());
+    let short = |id: &str| id.rsplit('/').next().unwrap_or(id).to_owned();
+    // A short name the request itself used reveals nothing new.
+    let known: std::collections::BTreeSet<String> = uses.named_ids().map(short).collect();
+    ids.filter(|id| !uses.is_named(id)).any(|id| {
+        let name = short(id);
+        message.contains(id)
+            || (!name.is_empty() && !known.contains(&name) && message.contains(&name))
+    })
 }
 
 /// Appends the explanation's audit event (#71): who, which model, what

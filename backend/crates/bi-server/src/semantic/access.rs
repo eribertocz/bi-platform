@@ -342,6 +342,11 @@ impl Uses {
         self.named.contains(id)
     }
 
+    /// The identifiers the request named.
+    pub fn named_ids(&self) -> impl Iterator<Item = &str> {
+        self.named.iter().map(String::as_str)
+    }
+
     /// Every metric `metric` is computed from, transitively. Deriving
     /// reveals values, so each needs its own `Lineage` use, also when the
     /// same metric is selected and shown masked (ADR 0012 §5).
