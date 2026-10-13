@@ -10,6 +10,7 @@
 pub mod canonical;
 mod canonical_projection;
 pub mod diagnostic;
+pub mod diff;
 pub mod expressions;
 pub mod functions;
 pub mod grain;
