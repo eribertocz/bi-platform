@@ -1,8 +1,10 @@
 # Documentación Fundamental – Herramienta BI Open Source
 
+*Documento aportado por el propietario el 2026-10-11. Se conserva tal cual. Su evaluación está en [`fundamentos-claude.md`](fundamentos-claude.md); la versión conjunta con las 10 decisiones aprobadas por el propietario, en [`version-comun.md`](version-comun.md). **No es el reglamento vigente**: las reglas de trabajo son `AGENTS.md`, en la raíz del repositorio.*
+
 **Stack:** ELT propio (estilo SQLMesh) · Motor Semántico (Rust + Apache Arrow) · Frontend (Svelte 5 + ECharts)
 
-Este documento contiene los **8 documentos base** que deben usarse como contexto de sistema / project rules para Claude Code, Codex u otros asistentes de código.
+Este documento contiene los **8 documentos base** que el propietario propuso como contexto de sistema / project rules para Claude Code, Codex u otros asistentes de código; lo que se adoptó de ellos está en los documentos enlazados arriba.
 
 ---
 

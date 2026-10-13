@@ -18,7 +18,19 @@ Cada registro contiene: contexto, decisión, alternativas descartadas, consecuen
 | [0010](0010-seguridad-del-blueprint-en-g2.md) | Punto único de aplicación de permisos; motor de permisos, auditoría mínima y OIDC en G2; WCAG 2.2 AA | Aprobada 2026-10-11 | Amplía el gate G2 del roadmap y concreta el blueprint del propietario |
 | [0011](0011-motor-semantico-como-producto.md) | El motor semántico como producto: dentro de bi-platform, como biblioteca y como servicio independiente; Apache-2.0 para toda bi-platform | Aprobada 2026-10-11 | Amplía 0006 y 0008 |
 | [0012](0012-motor-de-permisos-cedar.md) | Motor de permisos: Cedar dentro del motor semántico (RBAC + ABAC, CLS en tres niveles; RLS sigue en CSMIR) | Aprobada 2026-10-12 | Concreta 0010 §A |
-
-| [0013](0013-presupuesto-memoria-consulta.md) | Presupuesto independiente de memoria por consulta activa | Técnica, pendiente de revisión 2026-10-12 | Pool de conexiones G1; concreta M13 §13 y §19 |
+| [0013](0013-presupuesto-memoria-consulta.md) | Presupuesto independiente de memoria por consulta activa | Aprobada 2026-10-13 | Pool de conexiones G1; concreta M13 §13 y §19 |
 
 Plantilla: copiar un registro existente y numerar con el siguiente número libre.
+
+## Menciones obsoletas en documentos históricos
+
+`docs/arquitectura/` no se modifica (huella en `INVENTARIO.md`): las menciones de abajo siguen escritas en esos archivos aunque una ADR ya las sustituyó. No seguirlas; son historia, no diseño vigente.
+
+| Dónde | Qué dice | Qué manda en realidad |
+|---|---|---|
+| `docs/arquitectura/modulos/BI_Modulo_13_..._Polars_ADBC_2026-10-10.md` (título y cuerpo) | Polars como motor de transformación de primera clase, junto a DuckDB | ADR 0001: un solo motor, DuckDB. Polars fuera del núcleo |
+| `docs/arquitectura/INDICE_17_MODULOS.md` (título de M13) | "Runtime analítico Rust, DuckDB y Polars" | Igual: ADR 0001 |
+| `docs/arquitectura/DECISIONES_TECNICAS_RC2.md` (enmienda I.2) | "Polars 2.0 de primera clase" | Igual: ADR 0001 (la sustituye explícitamente) |
+| `docs/semantica/06_TECHNOLOGY.md` (tabla de tecnología) | Polars para "DataFrame/ETL tooling" | ADR 0001. Este documento no está en `INVENTARIO.md`, pero se conserva igual (ver `docs/semantica/README.md`) |
+
+**ADBC no está en esta lista:** sigue vigente para conectores a otras bases (ADR 0002, ADR 0007). Solo Polars se descartó del núcleo.

@@ -1,6 +1,6 @@
 # Evaluación de la "Documentación Fundamental" (8 documentos) — Claude
 
-*Evaluación de Claude, 2026-10-11, independiente de la de Codex. En discusión en el PR; el propietario aprueba o rechaza al final.*
+*Evaluación de Claude, 2026-10-11, independiente de la de Codex. **Cerrada:** la versión conjunta, con las 10 decisiones aprobadas por el propietario el 2026-10-12, está en [`version-comun.md`](version-comun.md). Este documento queda como la evaluación original, para seguir la discusión.*
 
 **Leyenda:** ✅ ya lo cumplimos (con evidencia) · ➕ adoptar · ⚠ choca con una decisión vigente (con recomendación) · ⬆ mejora nuestra.
 

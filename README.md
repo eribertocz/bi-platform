@@ -7,7 +7,7 @@ Plataforma BI nueva: monolito modular Rust (Axum, DuckDB, PostgreSQL) y frontend
 - Contrato HTTP vigente: [docs/api/openapi.json](docs/api/openapi.json).
 - Reglas de colaboración: [AGENTS.md](AGENTS.md).
 
-Estado: G0 — Fundaciones, en construcción.
+Estado: en desarrollo activo (gate G2, semántica y seguridad). El estado real, por módulo, vive en GitHub (Issues y Pull Requests) para no quedar desactualizado aquí; ver también [ROADMAP_GLOBAL.md](docs/arquitectura/gobierno/ROADMAP_GLOBAL.md) para la secuencia de gates.
 
 ## Inicio local con un comando
 
