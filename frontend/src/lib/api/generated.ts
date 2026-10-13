@@ -135,6 +135,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/semantic/explain': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Explains a semantic query without executing it. */
+    post: operations['explain'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/session': {
     parameters: {
       query?: never;
@@ -203,6 +220,31 @@ export interface components {
     };
     /** @enum {string} */
     DiagnosticSeverity: 'error' | 'warning';
+    ExplainDecision: {
+      /** @description Selections returned as typed `NULL`, flagged as masked. */
+      masked: string[];
+      /** @description Stable reason code (`permitted`). */
+      reason: string;
+      /** @description The roles the project grants to the session's user. */
+      roles: string[];
+    };
+    ExplainPlan: {
+      /** @description Stable explanation: one line per operator, then type and unit contracts. */
+      explanation: string;
+      /**
+       * Format: int32
+       * @description Correctness obligations the certificate discharges.
+       */
+      obligations: number;
+    };
+    ExplainRequest: {
+      /**
+       * @description The project file, as `/api/v1/models` lists it (`metrics/ventas.yaml`).
+       * @example metrics/ventas.yaml
+       */
+      model: string;
+      query: components['schemas']['SemanticQuery'];
+    };
     Filter: {
       /** @description A dimension of the dataset. */
       field: string;
@@ -342,6 +384,10 @@ export interface components {
      *       "dimensions": [
      *         "region"
      *       ],
+     *       "measures": [
+     *         "row_count",
+     *         "amount_sum"
+     *       ],
      *       "filters": [
      *         {
      *           "field": "region",
@@ -352,17 +398,13 @@ export interface components {
      *           ]
      *         }
      *       ],
-     *       "limit": 100,
-     *       "measures": [
-     *         "row_count",
-     *         "amount_sum"
-     *       ],
      *       "sort": [
      *         {
-     *           "direction": "desc",
-     *           "field": "amount_sum"
+     *           "field": "amount_sum",
+     *           "direction": "desc"
      *         }
-     *       ]
+     *       ],
+     *       "limit": 100
      *     }
      */
     QueryRequest: {
@@ -409,6 +451,190 @@ export interface components {
       scale?: number | null;
       type: components['schemas']['ColumnType'];
     };
+    /** @enum {string} */
+    SemanticComparison: '=' | '<>' | '<' | '<=' | '>' | '>=';
+    /** @description A use the session's roles do not allow. */
+    SemanticDenial: components['schemas']['Problem'] & {
+      denied?: components['schemas']['SemanticDeniedUse'] | null;
+      /** @description `no_permit`, `forbidden`, `evaluation_error` or `invalid_request`. */
+      reason: string;
+    };
+    SemanticDeniedUse: {
+      /** @description `metric`, `dimension`, `dataset` or `model`. */
+      kind: string;
+      /** @description Only for objects the query named; what the plan reads stays unnamed. */
+      name?: string | null;
+      /** @description `project`, `filter`, `order`, `group`, `join` or `lineage`. */
+      usage: string;
+    };
+    SemanticDiagnostic: {
+      /** @description Stable code (§32). */
+      code: string;
+      message: string;
+      /** @description JSON pointer into the request, when the binder knows it. */
+      path?: string | null;
+      /** @description `binding`, `correctness`, `planning` or `model`. */
+      phase: string;
+    };
+    /** @description The answer: what was decided, the certified plan and its receipt. */
+    SemanticExplanation: {
+      decision: components['schemas']['ExplainDecision'];
+      plan: components['schemas']['ExplainPlan'];
+      receipt: components['schemas']['SemanticReceipt'];
+    };
+    SemanticFilter:
+      | {
+          comparison: components['schemas']['SemanticComparison'];
+          /** @enum {string} */
+          op: 'compare';
+          target: components['schemas']['SemanticTarget'];
+          value: components['schemas']['SemanticValue'];
+        }
+      | {
+          high: components['schemas']['SemanticValue'];
+          low: components['schemas']['SemanticValue'];
+          /** @enum {string} */
+          op: 'between';
+          target: components['schemas']['SemanticTarget'];
+        }
+      | {
+          /** @enum {string} */
+          op: 'in';
+          target: components['schemas']['SemanticTarget'];
+          values: components['schemas']['SemanticValue'][];
+        }
+      | {
+          /** @enum {string} */
+          op: 'is_null';
+          target: components['schemas']['SemanticTarget'];
+        }
+      | {
+          /** @enum {string} */
+          op: 'is_not_null';
+          target: components['schemas']['SemanticTarget'];
+        }
+      | {
+          filters: components['schemas']['SemanticFilter'][];
+          /** @enum {string} */
+          op: 'and';
+        }
+      | {
+          filters: components['schemas']['SemanticFilter'][];
+          /** @enum {string} */
+          op: 'or';
+        }
+      | {
+          filter: components['schemas']['SemanticFilter'];
+          /** @enum {string} */
+          op: 'not';
+        };
+    /** @enum {string} */
+    SemanticGrain: 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
+    SemanticOrder: {
+      descending?: boolean;
+      /** @description Nulls go last unless stated. */
+      nulls_first?: boolean;
+      /** @description A selection `id` of this query. */
+      selection: string;
+    };
+    SemanticQuery: {
+      filter?: components['schemas']['SemanticFilter'] | null;
+      having?: components['schemas']['SemanticFilter'] | null;
+      /** Format: int64 */
+      limit?: number | null;
+      /** Format: int64 */
+      offset?: number | null;
+      order_by?: components['schemas']['SemanticOrder'][];
+      /** @description Output columns, in order. The selected dimensions are the grain. */
+      selections: components['schemas']['SemanticSelection'][];
+    };
+    /** @description Fingerprints of everything the answer depended on. */
+    SemanticReceipt: {
+      /** @description The session values the model's row policies read; never the values. */
+      context: string;
+      decision: string;
+      /** @description Covers every fingerprint below. */
+      id: string;
+      model: string;
+      plan: string;
+      policies: string;
+      query: string;
+    };
+    /** @description A query the engine cannot answer as asked, with stable diagnostics. */
+    SemanticRejection: components['schemas']['Problem'] & {
+      diagnostics: components['schemas']['SemanticDiagnostic'][];
+    };
+    SemanticSelection:
+      | {
+          /** @description Query-local name of the column; ordering and `having` use it. */
+          id: string;
+          /** @enum {string} */
+          kind: 'metric';
+          label?: string | null;
+          /** @description The metric's name in the model. */
+          name: string;
+        }
+      | {
+          id: string;
+          /** @enum {string} */
+          kind: 'dimension';
+          label?: string | null;
+          name: string;
+          /** @description Relationship roles it is reached through, when ambiguous. */
+          roles?: string[];
+        }
+      | {
+          calendar?: string | null;
+          grain: components['schemas']['SemanticGrain'];
+          id: string;
+          /** @enum {string} */
+          kind: 'time_dimension';
+          label?: string | null;
+          name: string;
+          roles?: string[];
+          /** @description IANA zone overriding the governed one. */
+          timezone?: string | null;
+        };
+    SemanticTarget:
+      | {
+          /** @enum {string} */
+          kind: 'dimension';
+          name: string;
+          roles?: string[];
+        }
+      | {
+          /** @enum {string} */
+          kind: 'metric';
+          selection: string;
+        };
+    /** @description A literal as written; binding types it after its target. */
+    SemanticValue:
+      | {
+          /** @enum {string} */
+          type: 'null';
+        }
+      | {
+          /** @enum {string} */
+          type: 'boolean';
+          value: boolean;
+        }
+      | {
+          /** @enum {string} */
+          type: 'number';
+          /** @description Exact decimal text (`"12.50"`), never a binary float. */
+          value: string;
+        }
+      | {
+          /** @enum {string} */
+          type: 'text';
+          value: string;
+        }
+      | {
+          /** @enum {string} */
+          type: 'date';
+          /** @description ISO `YYYY-MM-DD`. */
+          value: string;
+        };
     Session: {
       /** @description Server-derived restriction. This session grants no access to real sources. */
       data_scope: components['schemas']['DataScope'];
@@ -865,6 +1091,93 @@ export interface operations {
         };
       };
       /** @description Superó el tiempo máximo y se canceló */
+      504: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  explain: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ExplainRequest'];
+      };
+    };
+    responses: {
+      /** @description Decisión, plan certificado y recibo */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['SemanticExplanation'];
+        };
+      };
+      /** @description Sin sesión */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Un uso no permitido para los roles de la sesión */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['SemanticDenial'];
+        };
+      };
+      /** @description El modelo no existe en el proyecto */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Consulta mal formada, modelo con errores o consulta incorrecta */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['SemanticRejection'];
+        };
+      };
+      /** @description Demasiadas compilaciones simultáneas */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Políticas no válidas, motor o auditoría no disponibles */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Tiempo agotado */
       504: {
         headers: {
           [name: string]: unknown;

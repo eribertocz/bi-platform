@@ -12,6 +12,7 @@ pub mod oidc;
 pub mod openapi;
 pub mod problem;
 pub mod query;
+pub mod semantic;
 mod static_files;
 pub mod telemetry;
 
@@ -77,6 +78,10 @@ pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Route
         .route(
             "/api/v1/queries",
             post(query::run).layer(DefaultBodyLimit::max(QUERY_BODY_LIMIT)),
+        )
+        .route(
+            "/api/v1/semantic/explain",
+            post(semantic::explain).layer(DefaultBodyLimit::max(QUERY_BODY_LIMIT)),
         )
         .with_state(state.clone());
     let app = if let Some(directory) = static_dir {

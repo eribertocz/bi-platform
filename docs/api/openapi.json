@@ -517,6 +517,112 @@
         ]
       }
     },
+    "/api/v1/semantic/explain": {
+      "post": {
+        "tags": [
+          "semantic"
+        ],
+        "summary": "Explains a semantic query without executing it.",
+        "operationId": "explain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Decisión, plan certificado y recibo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticExplanation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Un uso no permitido para los roles de la sesión",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticDenial"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "El modelo no existe en el proyecto",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Consulta mal formada, modelo con errores o consulta incorrecta",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticRejection"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Demasiadas compilaciones simultáneas",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Políticas no válidas, motor o auditoría no disponibles",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "Tiempo agotado",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [
@@ -652,6 +758,71 @@
           "error",
           "warning"
         ]
+      },
+      "ExplainDecision": {
+        "type": "object",
+        "required": [
+          "reason",
+          "masked",
+          "roles"
+        ],
+        "properties": {
+          "masked": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Selections returned as typed `NULL`, flagged as masked."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Stable reason code (`permitted`)."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The roles the project grants to the session's user."
+          }
+        }
+      },
+      "ExplainPlan": {
+        "type": "object",
+        "required": [
+          "explanation",
+          "obligations"
+        ],
+        "properties": {
+          "explanation": {
+            "type": "string",
+            "description": "Stable explanation: one line per operator, then type and unit contracts."
+          },
+          "obligations": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Correctness obligations the certificate discharges.",
+            "minimum": 0
+          }
+        }
+      },
+      "ExplainRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "query"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "The project file, as `/api/v1/models` lists it (`metrics/ventas.yaml`).",
+            "example": "metrics/ventas.yaml"
+          },
+          "query": {
+            "$ref": "#/components/schemas/SemanticQuery"
+          }
+        },
+        "additionalProperties": false
       },
       "Filter": {
         "type": "object",
@@ -1218,6 +1389,10 @@
           "dimensions": [
             "region"
           ],
+          "measures": [
+            "row_count",
+            "amount_sum"
+          ],
           "filters": [
             {
               "field": "region",
@@ -1228,17 +1403,13 @@
               ]
             }
           ],
-          "limit": 100,
-          "measures": [
-            "row_count",
-            "amount_sum"
-          ],
           "sort": [
             {
-              "direction": "desc",
-              "field": "amount_sum"
+              "field": "amount_sum",
+              "direction": "desc"
             }
-          ]
+          ],
+          "limit": 100
         }
       },
       "QueryResult": {
@@ -1316,6 +1487,711 @@
             "$ref": "#/components/schemas/ColumnType"
           }
         }
+      },
+      "SemanticComparison": {
+        "type": "string",
+        "enum": [
+          "=",
+          "<>",
+          "<",
+          "<=",
+          ">",
+          ">="
+        ]
+      },
+      "SemanticDenial": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Problem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "denied": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SemanticDeniedUse"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "description": "`no_permit`, `forbidden`, `evaluation_error` or `invalid_request`."
+              }
+            }
+          }
+        ],
+        "description": "A use the session's roles do not allow."
+      },
+      "SemanticDeniedUse": {
+        "type": "object",
+        "required": [
+          "kind",
+          "usage"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`metric`, `dimension`, `dataset` or `model`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only for objects the query named; what the plan reads stays unnamed."
+          },
+          "usage": {
+            "type": "string",
+            "description": "`project`, `filter`, `order`, `group`, `join` or `lineage`."
+          }
+        }
+      },
+      "SemanticDiagnostic": {
+        "type": "object",
+        "required": [
+          "code",
+          "phase",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable code (§32)."
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "JSON pointer into the request, when the binder knows it."
+          },
+          "phase": {
+            "type": "string",
+            "description": "`binding`, `correctness`, `planning` or `model`."
+          }
+        }
+      },
+      "SemanticExplanation": {
+        "type": "object",
+        "description": "The answer: what was decided, the certified plan and its receipt.",
+        "required": [
+          "decision",
+          "plan",
+          "receipt"
+        ],
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/ExplainDecision"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ExplainPlan"
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/SemanticReceipt"
+          }
+        }
+      },
+      "SemanticFilter": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "comparison",
+              "value",
+              "op"
+            ],
+            "properties": {
+              "comparison": {
+                "$ref": "#/components/schemas/SemanticComparison"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "compare"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/SemanticTarget"
+              },
+              "value": {
+                "$ref": "#/components/schemas/SemanticValue"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "low",
+              "high",
+              "op"
+            ],
+            "properties": {
+              "high": {
+                "$ref": "#/components/schemas/SemanticValue"
+              },
+              "low": {
+                "$ref": "#/components/schemas/SemanticValue"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "between"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/SemanticTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "values",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "in"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/SemanticTarget"
+              },
+              "values": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SemanticValue"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "is_null"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/SemanticTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "target",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "is_not_null"
+                ]
+              },
+              "target": {
+                "$ref": "#/components/schemas/SemanticTarget"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "filters",
+              "op"
+            ],
+            "properties": {
+              "filters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SemanticFilter"
+                }
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "and"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "filters",
+              "op"
+            ],
+            "properties": {
+              "filters": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SemanticFilter"
+                }
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "or"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "filter",
+              "op"
+            ],
+            "properties": {
+              "filter": {
+                "$ref": "#/components/schemas/SemanticFilter"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "not"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "SemanticGrain": {
+        "type": "string",
+        "enum": [
+          "second",
+          "minute",
+          "hour",
+          "day",
+          "week",
+          "month",
+          "quarter",
+          "year"
+        ]
+      },
+      "SemanticOrder": {
+        "type": "object",
+        "required": [
+          "selection"
+        ],
+        "properties": {
+          "descending": {
+            "type": "boolean"
+          },
+          "nulls_first": {
+            "type": "boolean",
+            "description": "Nulls go last unless stated."
+          },
+          "selection": {
+            "type": "string",
+            "description": "A selection `id` of this query."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SemanticQuery": {
+        "type": "object",
+        "required": [
+          "selections"
+        ],
+        "properties": {
+          "filter": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SemanticFilter",
+                "description": "Pre-aggregate filter over dimensions."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "having": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SemanticFilter",
+                "description": "Filter over this query's metric selections (`HAVING`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "order_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticOrder"
+            }
+          },
+          "selections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticSelection"
+            },
+            "description": "Output columns, in order. The selected dimensions are the grain."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SemanticReceipt": {
+        "type": "object",
+        "description": "Fingerprints of everything the answer depended on.",
+        "required": [
+          "id",
+          "query",
+          "model",
+          "plan",
+          "decision",
+          "policies",
+          "context"
+        ],
+        "properties": {
+          "context": {
+            "type": "string",
+            "description": "The session values the model's row policies read; never the values."
+          },
+          "decision": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "Covers every fingerprint below."
+          },
+          "model": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "policies": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        }
+      },
+      "SemanticRejection": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Problem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "diagnostics"
+            ],
+            "properties": {
+              "diagnostics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SemanticDiagnostic"
+                }
+              }
+            }
+          }
+        ],
+        "description": "A query the engine cannot answer as asked, with stable diagnostics."
+      },
+      "SemanticSelection": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Query-local name of the column; ordering and `having` use it."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "metric"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "The metric's name in the model."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "dimension"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Relationship roles it is reached through, when ambiguous."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "grain",
+              "kind"
+            ],
+            "properties": {
+              "calendar": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "grain": {
+                "$ref": "#/components/schemas/SemanticGrain"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "time_dimension"
+                ]
+              },
+              "label": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "timezone": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "IANA zone overriding the governed one."
+              }
+            }
+          }
+        ]
+      },
+      "SemanticTarget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "dimension"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "roles": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A metric selection of this query, by its `id`.",
+            "required": [
+              "selection",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "metric"
+                ]
+              },
+              "selection": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "SemanticValue": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "value",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "boolean"
+                ]
+              },
+              "value": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Exact decimal text (`\"12.50\"`), never a binary float.",
+            "required": [
+              "value",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "number"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "Exact decimal text (`\"12.50\"`), never a binary float."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "value",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "ISO `YYYY-MM-DD`.",
+            "required": [
+              "value",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "date"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "description": "ISO `YYYY-MM-DD`."
+              }
+            }
+          }
+        ],
+        "description": "A literal as written; binding types it after its target."
       },
       "Session": {
         "type": "object",
