@@ -11,6 +11,7 @@
 //! to type what they build and validation uses it to check what it is given.
 
 use crate::expressions::ScalarExpr;
+use crate::time::TimestampSemantics;
 use crate::types::{DecimalType, Literal, ValueType, ZeroDivisionPolicy};
 use crate::units::Unit;
 
@@ -95,6 +96,97 @@ pub enum ScalarFunction {
     Greatest,
     /// The smallest argument, in the same order as [`Self::Greatest`].
     Least,
+
+    // ---- Dates: proleptic Gregorian calendar, ISO weeks starting Monday -------
+    /// The `part` of a date or a local date-time as a 64-bit integer. `Week`
+    /// is the ISO week number (1–53), `DayOfWeek` the ISO weekday (Monday 1
+    /// … Sunday 7) and `Second` whole seconds. An instant has no calendar
+    /// fields by itself: converters first bucket it to its local date in
+    /// the business zone.
+    Extract { part: DatePart },
+    /// Adds an integer number of `part`s. Calendar parts move the date and
+    /// clamp to the last day of a shorter month (January 31 plus one month
+    /// is the last day of February); a week is 7 days; clock parts are
+    /// exact durations, the only ones an instant admits. A result out of
+    /// range is an error.
+    DateAdd { part: DatePart },
+    /// The number of `part` boundaries crossed from the first argument to
+    /// the second, negative when the second is earlier: months count
+    /// `12 * year + month`, weeks count ISO Mondays, days count dates, and
+    /// clock parts count whole units of the wall clock of a local
+    /// date-time. Instants admit only minutes and seconds, counted on the
+    /// UTC epoch and never on a local clock
+    /// ([`DatePart::instant_boundaries`]). The count is zero when both
+    /// values fall within one unit, even if the second is earlier.
+    DateDiff { part: DatePart },
+    /// An ISO 8601 calendar date (`YYYY-MM-DD`) read from text; anything
+    /// else is an error, never a guess.
+    ToDate,
+}
+
+/// A calendar or clock field of a date or date-time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DatePart {
+    Year,
+    Quarter,
+    Month,
+    Week,
+    Day,
+    DayOfWeek,
+    DayOfYear,
+    Hour,
+    Minute,
+    Second,
+}
+
+impl DatePart {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Year => "year",
+            Self::Quarter => "quarter",
+            Self::Month => "month",
+            Self::Week => "week",
+            Self::Day => "day",
+            Self::DayOfWeek => "day-of-week",
+            Self::DayOfYear => "day-of-year",
+            Self::Hour => "hour",
+            Self::Minute => "minute",
+            Self::Second => "second",
+        }
+    }
+
+    /// Hours, minutes and seconds: fields of the clock, not of the date.
+    #[must_use]
+    pub const fn is_clock(self) -> bool {
+        matches!(self, Self::Hour | Self::Minute | Self::Second)
+    }
+
+    /// Fields that name a position (weekday, day of year) and cannot be
+    /// added or counted.
+    const fn is_position(self) -> bool {
+        matches!(self, Self::DayOfWeek | Self::DayOfYear)
+    }
+
+    /// `DATEDIFF(part, start, end)` between two instants in microseconds
+    /// since 1970-01-01T00:00:00Z: the boundaries of the UTC epoch crossed,
+    /// `floor(end / unit) - floor(start / unit)`, rounding toward negative
+    /// infinity before 1970 as well. Neither the session zone nor the
+    /// business zone takes part: a historical offset with seconds
+    /// (`America/La_Paz` was -04:32:36 in 1900) would move local minute
+    /// boundaries. `None` for the parts an instant cannot be counted in:
+    /// hours, because offsets such as +05:30 make UTC hours differ from
+    /// the local ones, and calendar parts, which need a zone.
+    #[must_use]
+    pub const fn instant_boundaries(self, start: i64, end: i64) -> Option<i64> {
+        let unit = match self {
+            Self::Second => 1_000_000,
+            Self::Minute => 60_000_000,
+            _ => return None,
+        };
+        // Both quotients lie within ±i64::MAX / 10^6: no overflow.
+        Some(end.div_euclid(unit) - start.div_euclid(unit))
+    }
 }
 
 /// Why arguments do not fit a function.
@@ -106,6 +198,29 @@ fn text(argument: &ScalarExpr) -> bool {
 
 fn integer(argument: &ScalarExpr) -> bool {
     matches!(argument.value_type, ValueType::Integer { .. })
+}
+
+fn instant(argument: &ScalarExpr) -> bool {
+    matches!(
+        argument.value_type,
+        ValueType::Timestamp {
+            timezone_semantics: TimestampSemantics::Instant
+        }
+    )
+}
+
+/// Whether `argument` has the field `part`: dates only calendar parts;
+/// local date-times every part; instants only clock parts, and only when
+/// `arithmetic` (adding or counting exact durations).
+fn temporal(argument: &ScalarExpr, part: DatePart, arithmetic: bool) -> bool {
+    match &argument.value_type {
+        ValueType::Date => !part.is_clock(),
+        ValueType::Timestamp {
+            timezone_semantics: TimestampSemantics::Instant,
+        } => arithmetic && part.is_clock(),
+        ValueType::Timestamp { .. } => true,
+        _ => false,
+    }
 }
 
 fn exact(argument: &ScalarExpr) -> bool {
@@ -240,6 +355,10 @@ impl ScalarFunction {
             Self::Mod { .. } => "mod",
             Self::Greatest => "greatest",
             Self::Least => "least",
+            Self::Extract { .. } => "extract",
+            Self::DateAdd { .. } => "date-add",
+            Self::DateDiff { .. } => "date-diff",
+            Self::ToDate => "to-date",
         }
     }
 
@@ -330,6 +449,9 @@ impl ScalarFunction {
                 [dividend, divisor] => Self::modulo(dividend, divisor),
                 _ => Err("MOD takes two integers or decimals"),
             },
+            Self::Extract { .. } | Self::DateAdd { .. } | Self::DateDiff { .. } | Self::ToDate => {
+                self.dated(arguments)
+            }
             Self::Greatest | Self::Least => match arguments {
                 [first, _, ..]
                     if ordered(&first.value_type)
@@ -344,6 +466,44 @@ impl ScalarFunction {
                      text, booleans, dates or times) and one unit",
                 ),
             },
+        }
+    }
+
+    fn dated(self, arguments: &[ScalarExpr]) -> Result<(ValueType, Option<Unit>), TypingError> {
+        match self {
+            Self::Extract { part } => match arguments {
+                [value] if temporal(value, part, false) => Ok((int64(), None)),
+                [value] if instant(value) => {
+                    Err("an instant has no calendar fields: bucket it to its local date first")
+                }
+                _ => Err("EXTRACT takes a date (calendar parts) or a local date-time"),
+            },
+            Self::DateAdd { part } => match arguments {
+                [count, value]
+                    if integer(count) && !part.is_position() && temporal(value, part, true) =>
+                {
+                    Ok((value.value_type.clone(), None))
+                }
+                _ => Err("DATEADD takes a part, an integer and a date or date-time that admits it"),
+            },
+            Self::DateDiff { part } => match arguments {
+                [start, end]
+                    if start.value_type == end.value_type
+                        && !part.is_position()
+                        && temporal(start, part, true)
+                        && (!instant(start) || part.instant_boundaries(0, 0).is_some()) =>
+                {
+                    Ok((int64(), None))
+                }
+                _ => Err(
+                    "DATEDIFF takes a part and two values of one date or date-time type that admits it",
+                ),
+            },
+            Self::ToDate => match arguments {
+                [value] if text(value) => Ok((ValueType::Date, None)),
+                _ => Err("TO_DATE takes one ISO 8601 date string"),
+            },
+            _ => Err("not a date function"),
         }
     }
 
