@@ -388,6 +388,12 @@ impl<N: Names> Translator<'_, N> {
                 trim_what,
                 trim_characters: None,
             } => self.trim(value, trim_where.as_ref(), trim_what.as_deref())?,
+            Expr::Extract {
+                field, expr: value, ..
+            } => {
+                let part = functions::part_named(&field.to_string().to_uppercase())?;
+                self.extract(part, value)?
+            }
             Expr::IsDistinctFrom(left, right) => self.distinct(left, right, true)?,
             Expr::IsNotDistinctFrom(left, right) => self.distinct(left, right, false)?,
             Expr::Function(function) => self.function(function)?,

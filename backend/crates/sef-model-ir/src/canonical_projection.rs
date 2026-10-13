@@ -447,6 +447,10 @@ impl Canonical for crate::functions::ScalarFunction {
             Self::Mod { zero } => {
                 C::record("function.mod", [("zero_division", zero.canonical_value())])
             }
+            Self::Extract { part } | Self::DateAdd { part } | Self::DateDiff { part } => C::record(
+                format!("function.{}", self.code()),
+                [("part", C::text(part.code()))],
+            ),
             other => C::text(other.code()),
         }
     }

@@ -1055,6 +1055,27 @@ impl<'a> Converter<'a> {
         tzdb: Option<String>,
     ) -> Result<Option<TimeSemantics>, Failure> {
         let ScalarExprKind::TemporalDerivation { bucket, .. } = &expression.kind else {
+            // The zone may serve a nested derivation (the local date that
+            // `YEAR(instant)` reads); the field itself is then no bucket.
+            let mut pending = expression.children();
+            while let Some(child) = pending.pop() {
+                if matches!(child.kind, ScalarExprKind::TemporalDerivation { .. }) {
+                    // A pinned TZDB lives in the `TimeSemantics` of a bucket;
+                    // a nested derivation has nowhere to keep it, and
+                    // accepting the pin only to forget it would hide which
+                    // version was asked for.
+                    if tzdb.is_some() {
+                        return Err(Failure::new(
+                            Code::InvalidExtension,
+                            "\"tzdb\" solo se conserva en una dimensión DATE_TRUNC; para la fecha \
+                             local que lee una expresión (como YEAR(instante)) declara solo \
+                             \"timezone\".",
+                        ));
+                    }
+                    return Ok(None);
+                }
+                pending.extend(child.children());
+            }
             if self.datasets[d].fields[f].extension.time.is_some() {
                 return Err(Failure::new(
                     Code::InvalidExtension,
