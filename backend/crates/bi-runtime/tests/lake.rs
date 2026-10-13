@@ -21,6 +21,7 @@ fn lake_config(data_path: &Path) -> RuntimeConfig {
         NEXT.fetch_add(1, Ordering::Relaxed)
     );
     RuntimeConfig {
+        query_memory_limit: Some("64MiB".to_owned()),
         lake: Some(LakeConfig {
             catalog: std::env::var("BI_TEST_LAKE_CATALOG")
                 .unwrap_or_else(|_| DEV_LAKE_CATALOG.to_owned()),
@@ -193,4 +194,42 @@ fn an_unreachable_catalog_is_reported_without_credentials() {
         assert!(!message.contains(secret), "{message}");
         assert!(!message.contains("p@ss word"), "{message}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn query_memory_failure_keeps_the_real_lake_readable_from_both_workers() {
+    let data = tempfile::tempdir().unwrap();
+    let mut config = lake_config(data.path());
+    config.query_memory_limit = Some("32MiB".to_owned());
+    config.duckdb_threads = Some(2);
+    let spec = FixtureSpec {
+        seed: 42,
+        rows: 20000,
+    };
+    let start = std::time::Instant::now();
+    let bootstrap = Bootstrap::open(config).unwrap();
+    load_sales(&bootstrap, spec).unwrap();
+    let runtime = bootstrap.finish().unwrap();
+    println!(
+        "isolated_lake_startup_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    let (first, second) = tokio::join!(sales_oracle(&runtime, spec), sales_oracle(&runtime, spec));
+    assert_matches_oracle(&first.unwrap(), spec);
+    assert_matches_oracle(&second.unwrap(), spec);
+    let exhausted = runtime
+        .run(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM (SELECT DISTINCT i FROM range(10000000) t(i))",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .await;
+    assert!(
+        matches!(exhausted, Err(RuntimeError::MemoryLimit)),
+        "{exhausted:?}"
+    );
+    assert_matches_oracle(&sales_oracle(&runtime, spec).await.unwrap(), spec);
+    assert_eq!(runtime.load().workers, 2);
 }

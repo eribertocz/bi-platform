@@ -27,6 +27,7 @@ const SPEC: FixtureSpec = FixtureSpec {
 };
 
 fn lake(data_path: std::path::PathBuf) -> (Analytics, Oracle) {
+    let started = Instant::now();
     let oracle = Oracle::from_rows(SPEC, sales::rows(SPEC));
     let bootstrap = Bootstrap::open(RuntimeConfig {
         lake: Some(LakeConfig {
@@ -36,11 +37,17 @@ fn lake(data_path: std::path::PathBuf) -> (Analytics, Oracle) {
             data_path,
         }),
         duckdb_threads: Some(4),
+        query_memory_limit: std::env::var("BI_BENCH_QUERY_MEMORY_LIMIT").ok(),
         ..RuntimeConfig::in_memory(2)
     })
     .unwrap();
     fixtures::load_sales(&bootstrap, SPEC).unwrap();
-    (Analytics::ready(bootstrap.finish().unwrap()), oracle)
+    let analytics = Analytics::ready(bootstrap.finish().unwrap());
+    println!(
+        "bootstrap_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    (analytics, oracle)
 }
 
 async fn sample(app: &Router, oracle: &Oracle) -> (f64, String, usize) {
@@ -136,7 +143,7 @@ async fn query_latency() {
         phases.into_iter().map(|(k, v)| (k, summary(v))).collect();
     println!(
         "{}",
-        json!({"task": "23", "mode": if sdk { "sdk" } else { "noop" }, "os": System::long_os_version(), "cpu": system.cpus()[0].brand(), "ram_bytes": system.total_memory(), "logical_cpus": system.cpus().len(), "seed": SPEC.seed, "rows": SPEC.rows, "workers": 2, "duckdb_threads": 4, "warmup": 20, "samples": 500, "latency": summary(samples), "phases": phase_report, "cold_ms": cold_ms, "rss_peak_bytes_sampled": rss_peak, "response_bytes": bytes, "wall_seconds_including_assertions_and_rss": wall_seconds, "oracle": true})
+        json!({"task": "23", "query_memory_limit": std::env::var("BI_BENCH_QUERY_MEMORY_LIMIT").ok(), "mode": if sdk { "sdk" } else { "noop" }, "os": System::long_os_version(), "cpu": system.cpus()[0].brand(), "ram_bytes": system.total_memory(), "logical_cpus": system.cpus().len(), "seed": SPEC.seed, "rows": SPEC.rows, "workers": 2, "duckdb_threads": 4, "warmup": 20, "samples": 500, "latency": summary(samples), "phases": phase_report, "cold_ms": cold_ms, "rss_peak_bytes_sampled": rss_peak, "response_bytes": bytes, "wall_seconds_including_assertions_and_rss": wall_seconds, "oracle": true})
     );
     if let Some(provider) = provider {
         tokio::task::spawn_blocking(move || provider.shutdown().unwrap())

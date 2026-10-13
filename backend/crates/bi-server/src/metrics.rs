@@ -52,6 +52,7 @@ pub(crate) enum Rejected {
     Busy,
     Timeout,
     ResultTooLarge,
+    MemoryLimit,
     Unavailable,
 }
 
@@ -62,6 +63,7 @@ impl Rejected {
             Self::Busy => "busy",
             Self::Timeout => "timeout",
             Self::ResultTooLarge => "result_too_large",
+            Self::MemoryLimit => "query_memory_limit",
             Self::Unavailable => "unavailable",
         }
     }

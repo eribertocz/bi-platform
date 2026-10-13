@@ -218,6 +218,7 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
                     "busy",
                     "timeout",
                     "result_too_large",
+                    "query_memory_limit",
                     "unavailable",
                 ],
                 _ => panic!("unsafe metric label: {key}"),
@@ -679,4 +680,51 @@ async fn invalid_exporter_configuration_can_fall_back_to_noop() {
         .0,
         200
     );
+}
+
+#[tokio::test]
+async fn query_memory_rejection_is_typed_and_exported_without_killing_http() {
+    let runtime = tokio::task::spawn_blocking(|| {
+        Bootstrap::open(RuntimeConfig {
+            query_memory_limit: Some("16MiB".to_owned()),
+            duckdb_threads: Some(1),
+            ..RuntimeConfig::in_memory(1)
+        })
+        .unwrap()
+        .finish()
+        .unwrap()
+    })
+    .await
+    .unwrap();
+    // A real analytical view creates a large hash table while returning one row.
+    runtime.run(|conn| conn.execute_batch("ATTACH ':memory:' AS lake;
+        CREATE VIEW lake.main.sales AS SELECT i::BIGINT AS order_id, NULL::TIMESTAMPTZ AS ordered_at,
+        NULL::VARCHAR AS region, NULL::BIGINT AS quantity, NULL::DECIMAL(18,2) AS amount
+        FROM (SELECT DISTINCT i FROM range(10000000) t(i))")).await.unwrap();
+    let capture = Capture::new(Analytics::ready(runtime.clone()), Duration::from_secs(30));
+    let (status, body) = request(&capture.app, QUERY).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "query_memory_limit");
+    assert_eq!(
+        body["detail"],
+        "La consulta superó su límite de memoria. Añade filtros o reduce las dimensiones."
+    );
+    let points = capture.points();
+    assert_eq!(
+        count(
+            &points,
+            "bi_query_rejected",
+            Some(("reason", "query_memory_limit"))
+        ),
+        1
+    );
+    assert_eq!(
+        count(&points, "bi_query_execute", Some(("result", "error"))),
+        1
+    );
+    runtime.run(|conn| conn.execute_batch("DROP VIEW lake.main.sales;
+        CREATE TABLE lake.main.sales (order_id BIGINT, ordered_at TIMESTAMPTZ, region VARCHAR, quantity BIGINT, amount DECIMAL(18,2));
+        INSERT INTO lake.main.sales VALUES (1, NULL, NULL, 1, 1.00)")).await.unwrap();
+    assert_eq!(request(&capture.app, QUERY).await.0, StatusCode::OK);
+    assert_eq!(runtime.load().workers, 1);
 }
