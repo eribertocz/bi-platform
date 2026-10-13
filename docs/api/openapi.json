@@ -235,6 +235,172 @@
         ]
       }
     },
+    "/api/v1/oidc/callback": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "description": "Acción session:login, recurso sesión propia. Requiere state, code y cookie temporal; consume el intento atómicamente antes del intercambio. Solo redirige a /.",
+        "operationId": "completeOidcLogin",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "State de un solo uso",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "description": "Código del proveedor",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Sesión de servidor creada; cookie HttpOnly SameSite=Strict"
+          },
+          "401": {
+            "description": "Intento o token inválido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OIDC deshabilitado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Admisión OIDC limitada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Proveedor, PostgreSQL o capacidad de intentos no disponible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/oidc/config": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "description": "Acción session:login, recurso sesión propia; público, no revela secretos.",
+        "operationId": "getOidcConfig",
+        "responses": {
+          "200": {
+            "description": "Disponibilidad del login corporativo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginConfig"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/oidc/start": {
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "description": "Acción session:login, recurso sesión propia. Origin obligatorio. PKCE S256, nonce y state con vida de cinco minutos. Redirección fija.",
+        "operationId": "startOidcLogin",
+        "responses": {
+          "200": {
+            "description": "URL del proveedor y cookie temporal HttpOnly",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginStart"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Parámetros no permitidos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin inválido",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OIDC deshabilitado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Admisión OIDC limitada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Proveedor, PostgreSQL o capacidad de intentos no disponible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/queries": {
       "post": {
         "tags": [
@@ -567,6 +733,28 @@
           "degraded",
           "unavailable"
         ]
+      },
+      "LoginConfig": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LoginStart": {
+        "type": "object",
+        "required": [
+          "authorization_url"
+        ],
+        "properties": {
+          "authorization_url": {
+            "type": "string"
+          }
+        }
       },
       "ModelAiContext": {
         "oneOf": [

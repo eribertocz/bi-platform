@@ -76,6 +76,7 @@ struct Instruments {
     execute: Histogram<f64>,
     serialize: Histogram<f64>,
     rejected: Counter<u64>,
+    oidc_logins: Counter<u64>,
     _pool: Vec<ObservableGauge<u64>>,
 }
 
@@ -154,8 +155,19 @@ impl QueryMetrics {
                 .with_unit("{query}")
                 .with_description("Rejected query requests")
                 .build(),
+            oidc_logins: meter
+                .u64_counter("bi_oidc_login")
+                .with_unit("{login}")
+                .with_description("OIDC login outcomes; no identity or token labels")
+                .build(),
             _pool: pool,
         })))
+    }
+
+    pub(crate) fn oidc_login(&self, result: &'static str) {
+        if let Some(metrics) = &self.0 {
+            metrics.oidc_logins.add(1, &[KeyValue::new("code", result)]);
+        }
     }
 
     pub(crate) fn compile(&self, duration: Duration, outcome: Outcome) {

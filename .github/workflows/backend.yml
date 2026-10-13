@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - "backend/**"
+      - "docker/oidc/**"
+      - "compose.oidc.yaml"
       - "docs/api/openapi.json"
       - ".github/workflows/backend.yml"
   push:
     branches: [main]
     paths:
       - "backend/**"
+      - "docker/oidc/**"
+      - "compose.oidc.yaml"
       - "docs/api/openapi.json"
       - ".github/workflows/backend.yml"
 
@@ -67,11 +71,21 @@ jobs:
         run: cargo test --locked
       - name: DuckLake catalog database
         run: psql postgres://bi:bi@localhost:5432/bi -c "CREATE DATABASE bi_lake_catalog"
+      - name: Start real OIDC provider
+        working-directory: .
+        run: |
+          docker compose -f compose.oidc.yaml up -d keycloak
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18071/realms/bi-test/.well-known/openid-configuration >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          exit 1
       - name: Tests (including PostgreSQL and DuckLake integration)
         run: cargo test --locked --all-features
         env:
           DATABASE_URL: postgres://bi:bi@localhost:5432/bi
           BI_TEST_LAKE_CATALOG: dbname=bi_lake_catalog host=localhost port=5432 user=bi password=bi
+          BI_TEST_OIDC_ISSUER: http://127.0.0.1:18071/realms/bi-test
       - name: Layering - the semantic engine stays independent (ADR 0008)
         # SEF cores (every sef-* except sef-adapter-*) are reusable by other
         # BI tools: with every feature on, no async runtime, transport,
