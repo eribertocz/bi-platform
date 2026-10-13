@@ -13,8 +13,10 @@ pub mod expression;
 pub mod extension;
 pub mod ids;
 pub mod load;
+pub mod positions;
 pub mod validate;
 
 pub use diagnostic::{Code, Diagnostic, Severity};
 pub use document::{SPEC_VERSION, SemanticModel};
 pub use load::{Loaded, load, parse, to_json, to_yaml};
+pub use positions::Positions;

@@ -40,7 +40,7 @@ use sqlparser::ast::{
 };
 
 use super::scalar::{
-    self, Division, Failure, Names, Translator, arguments, cast_target, describe, division,
+    self, Division, Failure, Name, Names, Translator, arguments, cast_target, describe, division,
     function_name, normalize, not_representable,
 };
 use super::{Converter, compatible, field_ref, strip, unit};
@@ -1211,13 +1211,17 @@ struct MetricScope<'c, 'a> {
 }
 
 impl Names for MetricScope<'_, '_> {
-    fn reference(&mut self, qualifier: Option<&str>, name: &str) -> Result<ScalarExpr, Failure> {
+    fn reference(
+        &mut self,
+        qualifier: Option<&Name<'_>>,
+        name: &Name<'_>,
+    ) -> Result<ScalarExpr, Failure> {
         let converter = &mut *self.converter;
         let candidates: Vec<usize> = match qualifier {
             Some(qualifier) => converter
                 .datasets
                 .iter()
-                .position(|dataset| dataset.normalized == qualifier)
+                .position(|dataset| dataset.normalized == qualifier.normalized)
                 .into_iter()
                 .collect(),
             None => (0..converter.datasets.len())
@@ -1225,18 +1229,19 @@ impl Names for MetricScope<'_, '_> {
                     converter.datasets[d]
                         .fields
                         .iter()
-                        .any(|f| f.normalized == name)
+                        .any(|f| f.normalized == name.normalized)
                 })
                 .collect(),
         };
+        let written = name.written;
         let d = match candidates.as_slice() {
             [d] => *d,
             [] => {
                 return Err(Failure::new(
                     Code::UnknownReference,
                     match qualifier {
-                        Some(qualifier) => format!("No existe el dataset {qualifier:?}."),
-                        None => format!("Ningún dataset tiene el campo {name:?}."),
+                        Some(qualifier) => format!("No existe el dataset {:?}.", qualifier.written),
+                        None => format!("Ningún dataset tiene el campo {written:?}."),
                     },
                 ));
             }
@@ -1244,7 +1249,8 @@ impl Names for MetricScope<'_, '_> {
                 return Err(Failure::new(
                     Code::AmbiguousReference,
                     format!(
-                        "Varios datasets tienen el campo {name:?}: escríbelo como dataset.campo."
+                        "Varios datasets tienen el campo {written:?}: escríbelo como \
+                         dataset.campo."
                     ),
                 ));
             }
@@ -1253,14 +1259,14 @@ impl Names for MetricScope<'_, '_> {
         let Some(f) = state
             .fields
             .iter()
-            .position(|field| field.normalized == name)
+            .position(|field| field.normalized == name.normalized)
         else {
+            // Only reachable with a qualifier: unqualified names were
+            // looked up among the fields themselves.
+            let dataset = qualifier.map_or(state.normalized.as_str(), |q| q.written);
             return Err(Failure::new(
                 Code::UnknownReference,
-                format!(
-                    "El dataset {:?} no tiene el campo {name:?}.",
-                    state.normalized
-                ),
+                format!("El dataset {dataset:?} no tiene el campo {written:?}."),
             ));
         };
         self.used.insert(d);

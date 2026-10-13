@@ -256,6 +256,24 @@ async fn compiles_each_file_with_exact_metadata_and_reloads_without_stale_values
         first["models"][0]["diagnostics"][0]["path"],
         "/datasets/0/source"
     );
+    // Where `source:` names the missing table.
+    assert_eq!(first["models"][0]["diagnostics"][0]["line"], 5);
+    assert_eq!(first["models"][0]["diagnostics"][0]["column"], 13);
+    // A conversion error: located, and quoting names as written.
+    write(
+        p.path(),
+        "ventas.yaml",
+        &VALID.replace("SUM(sales.amount)", "SUM(sales.importe)"),
+    );
+    let (_, broken) = response(&app).await;
+    let reference = &broken["models"][2]["diagnostics"][0];
+    assert_eq!(reference["code"], "unknown_reference", "{broken:#}");
+    assert_eq!(
+        reference["message"],
+        r#"El dataset "sales" no tiene el campo "importe"."#
+    );
+    assert_eq!(reference["line"], 56);
+    assert_eq!(reference["column"], 23);
     write(p.path(), "ventas.yaml", "version: [\n");
     let (_, changed) = response(&app).await;
     let bad = &changed["models"][2];

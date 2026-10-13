@@ -390,9 +390,9 @@ impl CompiledSemanticModel {
         };
         let content_hash = fingerprint(Domain::Csmir, &definition).map_err(|_| error())?;
         let mut object_hashes = BTreeMap::new();
-        for (id, value) in definition.semantic_objects() {
+        for (metadata, value) in definition.semantic_objects() {
             object_hashes.insert(
-                id.clone(),
+                metadata.id().clone(),
                 fingerprint(Domain::Csmir, &value).map_err(|_| error())?,
             );
         }
@@ -745,12 +745,14 @@ impl Canonical for ModelDefinition {
 }
 
 impl ModelDefinition {
-    pub(crate) fn semantic_objects(&self) -> Vec<(&StableId, C)> {
-        let mut values = vec![(self.metadata.id(), self.canonical_value())];
+    /// Every object with an identity, with its canonical value: the unit of
+    /// object hashes and of [`crate::diff`].
+    pub(crate) fn semantic_objects(&self) -> Vec<(&ObjectMetadata, C)> {
+        let mut values = vec![(&self.metadata, self.canonical_value())];
         macro_rules! collect {
             ($items:expr) => {
                 for item in $items {
-                    values.push((item.metadata.id(), item.canonical_value()));
+                    values.push((&item.metadata, item.canonical_value()));
                 }
             };
         }

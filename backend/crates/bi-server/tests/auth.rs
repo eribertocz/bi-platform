@@ -70,6 +70,15 @@ async fn assert_problem(response: axum::response::Response, status: StatusCode, 
     assert_eq!(body.status, status.as_u16());
     assert_eq!(body.code, code);
     assert_eq!(body.request_id, id);
+    if code == "origin_forbidden" {
+        assert_eq!(body.public_origin.as_deref(), Some("http://127.0.0.1:8080"));
+        assert_eq!(
+            body.detail.as_deref(),
+            Some("Abre la aplicación desde http://127.0.0.1:8080.")
+        );
+    } else {
+        assert!(body.public_origin.is_none());
+    }
 }
 
 #[tokio::test]
@@ -250,6 +259,31 @@ async fn login_validates_origin_and_payload_before_database_access() {
             "origin_forbidden",
         )
         .await;
+    }
+}
+
+#[cfg(feature = "dev-auth")]
+#[tokio::test]
+async fn origin_hint_ignores_host_proxy_and_referrer_and_never_sets_a_cookie() {
+    let app = offline(config("http://127.0.0.1:8080"));
+    for origin in ["http://localhost:8080", "https://attacker.test"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/dev/login")
+                    .header("origin", origin)
+                    .header("host", "attacker.test")
+                    .header("x-forwarded-host", "attacker.test")
+                    .header("x-forwarded-proto", "https")
+                    .header("referer", "https://attacker.test/")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"user_id":"analyst"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert_problem(response, StatusCode::FORBIDDEN, "origin_forbidden").await;
     }
 }
 
