@@ -25,6 +25,10 @@ pub const LAKE: &str = "lake";
 
 #[derive(Debug)]
 pub enum RuntimeError {
+    /// Invalid operator-provided resource configuration.
+    Config(config::ConfigError),
+    /// DuckDB exhausted the query instance's managed-memory budget.
+    MemoryLimit,
     /// The engine rejected or failed the statement.
     Engine(duckdb::Error),
     /// The lake could not be attached; the message never includes credentials.
@@ -43,6 +47,8 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Config(error) => error.fmt(f),
+            Self::MemoryLimit => f.write_str("query memory limit exceeded"),
             Self::Engine(error) => write!(f, "query engine error: {error}"),
             Self::Lake(message) => write!(f, "lake unavailable: {message}"),
             Self::Io(error) => write!(f, "I/O error: {error}"),
@@ -57,6 +63,7 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Config(error) => Some(error),
             Self::Engine(error) => Some(error),
             Self::Io(error) => Some(error),
             _ => None,
@@ -66,7 +73,15 @@ impl std::error::Error for RuntimeError {
 
 impl From<duckdb::Error> for RuntimeError {
     fn from(error: duckdb::Error) -> Self {
-        Self::Engine(error)
+        // duckdb-rs 1.10506.0 erases duckdb_result_error_type and sets every
+        // ffi::Error::code to Unknown. Match only the native exception prefix.
+        if matches!(&error, duckdb::Error::DuckDBFailure(_, Some(message))
+            if message.starts_with("Out of Memory Error:"))
+        {
+            Self::MemoryLimit
+        } else {
+            Self::Engine(error)
+        }
     }
 }
 
@@ -90,5 +105,21 @@ mod tests {
     fn quotes_sql_strings() {
         assert_eq!(sql_string("a"), "'a'");
         assert_eq!(sql_string("o'clock"), "'o''clock'");
+    }
+}
+
+#[cfg(test)]
+mod memory_error_tests {
+    use super::*;
+    #[test]
+    fn only_the_native_oom_prefix_is_a_memory_error() {
+        for message in [
+            "Binder Error: no column memory_limit",
+            "Invalid Input Error: Out of Memory Error: user text",
+        ] {
+            let error =
+                duckdb::Error::DuckDBFailure(duckdb::ffi::Error::new(1), Some(message.to_owned()));
+            assert!(matches!(RuntimeError::from(error), RuntimeError::Engine(_)));
+        }
     }
 }

@@ -73,6 +73,13 @@ DuckDB embebido con un DuckLake cuyo catálogo vive en la base `bi_lake_catalog`
 Cargar y verificar el fixture sintético contra su oráculo, desde `backend/`: `cargo run -p bi-runtime -- load-sales` (idempotente).
 Variables: `BI_LAKE_CATALOG`, `BI_LAKE_DATA_PATH`, `BI_LAKE_METADATA_SCHEMA`, `BI_DUCKDB_WORKERS`, `BI_DUCKDB_QUEUE`, `BI_DUCKDB_THREADS`, `BI_DUCKDB_MEMORY_LIMIT`, `BI_DUCKDB_EXTENSION_DIR`.
 
+Memoria de consultas: `BI_QUERY_MEMORY_LIMIT` (por defecto `256MiB`) reserva un presupuesto
+independiente de memoria gestionada por DuckDB para cada consulta activa. Si se configura
+`BI_DUCKDB_MEMORY_LIMIT`, el presupuesto total se divide entre trabajadores. El límite no
+abarca todo el RSS del proceso. El rechazo HTTP 422 `query_memory_limit` recomienda reducir
+la consulta y se cuenta en `bi_query_rejected{reason="query_memory_limit"}`. Véase
+[ADR 0013](docs/decisiones/0013-presupuesto-memoria-consulta.md) para alcance y costes.
+
 ## Frontend
 
 Requiere Node >=22.17 (CI usa 24.21.0). En `frontend/`: `npm ci` y

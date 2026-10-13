@@ -57,7 +57,7 @@ pub struct QueryResult {
         (status = 400, description = "JSON inválido o campos desconocidos", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Sin sesión válida (`session_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Origin ausente o distinto al configurado (`origin_forbidden`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Consulta fuera del catálogo o de los límites (`invalid_query`), resultado mayor que el presupuesto de bytes (`result_too_large`) o memoria de consulta agotada (`query_memory_limit`)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Cola de consultas llena; reintentar", body = Problem, content_type = "application/problem+json"),
         (status = 500, description = "Fallo interno al ejecutar", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "Motor analítico no disponible", body = Problem, content_type = "application/problem+json"),
@@ -80,6 +80,7 @@ pub async fn run(
                 "too_many_queries" => Some(Rejected::Busy),
                 "query_timeout" => Some(Rejected::Timeout),
                 "result_too_large" => Some(Rejected::ResultTooLarge),
+                "query_memory_limit" => Some(Rejected::MemoryLimit),
                 "analytics_unavailable" => Some(Rejected::Unavailable),
                 _ => None,
             };
@@ -167,7 +168,9 @@ async fn handle(
         Failure::Runtime(error) => {
             tracing::error!(%error, dataset = %request.dataset, "query failed");
             let (status, code) = status_for(&error);
-            Rejection::new(status, code, None)
+            let detail = matches!(error, RuntimeError::MemoryLimit).then(||
+                "La consulta superó su límite de memoria. Añade filtros o reduce las dimensiones.".to_owned());
+            Rejection::new(status, code, detail)
         }
     })?;
     let Fetched::Rows(mut rows) = fetched else {
@@ -285,7 +288,9 @@ async fn execute(
             Err(_) => Outcome::Timeout,
             Ok(Ok(_)) => Outcome::Ok,
             Ok(Err(RuntimeError::Busy)) => Outcome::Busy,
-            Ok(Err(RuntimeError::Engine(_) | RuntimeError::Panicked)) => Outcome::Error,
+            Ok(Err(
+                RuntimeError::Engine(_) | RuntimeError::MemoryLimit | RuntimeError::Panicked,
+            )) => Outcome::Error,
             Ok(Err(_)) => Outcome::Unavailable,
         });
     }
@@ -303,6 +308,7 @@ async fn execute(
 /// Status and problem code for a runtime failure.
 fn status_for(error: &RuntimeError) -> (StatusCode, &'static str) {
     match error {
+        RuntimeError::MemoryLimit => (StatusCode::UNPROCESSABLE_ENTITY, "query_memory_limit"),
         RuntimeError::Busy => (StatusCode::TOO_MANY_REQUESTS, "too_many_queries"),
         RuntimeError::Engine(_) | RuntimeError::Panicked => {
             (StatusCode::INTERNAL_SERVER_ERROR, "query_failed")

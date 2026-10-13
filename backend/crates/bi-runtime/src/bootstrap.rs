@@ -170,6 +170,27 @@ impl Bootstrap {
     /// # Errors
     /// When the lockdown or a worker connection fails.
     pub fn finish(self) -> Result<Runtime, RuntimeError> {
+        if let Some(worker_config) = self.config.query_worker().map_err(RuntimeError::Config)? {
+            let count = self.config.workers.max(1);
+            // Only durable lake data is shared; each worker gets its own buffer manager.
+            self.conn.execute_batch(&format!(
+                "SET memory_limit = {}; SET threads = {}; SET temp_directory = ''",
+                sql_string(worker_config.memory_limit.as_deref().unwrap_or("256MiB")),
+                worker_config.duckdb_threads.unwrap_or(1),
+            ))?;
+            let mut roots = Vec::with_capacity(count);
+            let queue_capacity = self.config.queue_capacity;
+            roots.push(self.locked(true)?);
+            for _ in 1..count {
+                roots.push(Self::open(worker_config.clone())?.locked(true)?);
+            }
+            return Runtime::start_independent(roots, queue_capacity);
+        }
+        let config = self.config.clone();
+        Runtime::start(self.locked(false)?, &config)
+    }
+
+    fn locked(self, disable_spill: bool) -> Result<Connection, RuntimeError> {
         // DuckLake reads its Parquet files through the same file-system checks
         // as user SQL, so its directory must stay allowed after the lockdown.
         let allowed = self
@@ -178,8 +199,11 @@ impl Bootstrap {
             .map_or_else(String::new, sql_string);
         self.conn
             .execute_batch(&format!("SET allowed_directories = [{allowed}]"))?;
+        if disable_spill {
+            self.conn.execute_batch("SET temp_directory = ''")?;
+        }
         self.conn.execute_batch(LOCKDOWN)?;
-        Runtime::start(self.conn, &self.config)
+        Ok(self.conn)
     }
 }
 

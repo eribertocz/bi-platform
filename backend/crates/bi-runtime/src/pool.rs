@@ -156,7 +156,7 @@ impl Worker {
         }
         match outcome {
             _ if interrupted => Err(RuntimeError::Cancelled),
-            Ok(result) => result.map_err(RuntimeError::Engine),
+            Ok(result) => result.map_err(RuntimeError::from),
             Err(_) => Err(RuntimeError::Panicked),
         }
     }
@@ -189,6 +189,26 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Runtime {
+    /// One buffer manager and one active job per worker. The anchor preserves
+    /// that worker's locked database configuration during connection recovery.
+    pub(crate) fn start_independent(
+        roots: Vec<Connection>,
+        queue_capacity: usize,
+    ) -> Result<Self, RuntimeError> {
+        let workers = roots
+            .into_iter()
+            .map(|root| {
+                let root = Arc::new(Mutex::new(root));
+                let conn = lock(&root).try_clone()?;
+                Ok(Worker {
+                    conn,
+                    replace: Box::new(move || lock(&root).try_clone()),
+                    retired: false,
+                })
+            })
+            .collect::<duckdb::Result<Vec<_>>>()?;
+        Self::spawn(workers, queue_capacity)
+    }
     /// Starts `config.workers` threads with connections cloned from `root`,
     /// which must already be locked down.
     pub(crate) fn start(root: Connection, config: &RuntimeConfig) -> Result<Self, RuntimeError> {

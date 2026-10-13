@@ -833,7 +833,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Consulta fuera del catálogo o de los límites (`invalid_query`), o resultado mayor que el presupuesto de bytes (`result_too_large`) */
+      /** @description Consulta fuera del catálogo o de los límites (`invalid_query`), resultado mayor que el presupuesto de bytes (`result_too_large`) o memoria de consulta agotada (`query_memory_limit`) */
       422: {
         headers: {
           [name: string]: unknown;

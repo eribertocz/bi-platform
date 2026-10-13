@@ -10,6 +10,7 @@ pub const DEV_LAKE_CATALOG: &str =
     "dbname=bi_lake_catalog host=127.0.0.1 port=54320 user=bi password=bi";
 pub const DEFAULT_LAKE_DATA_PATH: &str = "data/lake";
 pub const DEFAULT_QUEUE_CAPACITY: usize = 64;
+pub const DEFAULT_QUERY_MEMORY_LIMIT: &str = "256MiB";
 const MAX_WORKERS: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -18,10 +19,15 @@ pub struct RuntimeConfig {
     pub workers: usize,
     /// Jobs allowed to wait for a free worker; beyond that, requests are refused.
     pub queue_capacity: usize,
-    /// DuckDB `threads` for the whole database instance.
+    /// DuckDB thread budget, divided across independent query instances.
     pub duckdb_threads: Option<u32>,
-    /// DuckDB `memory_limit`, e.g. `2GB`.
+    /// Total DuckDB managed-memory budget, e.g. `2GB`; divided across
+    /// workers when query isolation is enabled.
     pub memory_limit: Option<String>,
+    /// Independent managed-memory budget per active query. `None` keeps a
+    /// shared instance for embedders that need shared in-memory tables.
+    /// The server always configures a budget and uses independent instances.
+    pub query_memory_limit: Option<String>,
     /// Where DuckDB installs extensions (the default lives in the user's home).
     pub extension_directory: Option<PathBuf>,
     pub lake: Option<LakeConfig>,
@@ -75,6 +81,7 @@ impl RuntimeConfig {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             duckdb_threads: None,
             memory_limit: None,
+            query_memory_limit: None,
             extension_directory: None,
             lake: None,
         }
@@ -109,6 +116,14 @@ impl RuntimeConfig {
                 value: value.clone(),
             });
         }
+        let query_memory_limit = lookup("BI_QUERY_MEMORY_LIMIT")
+            .unwrap_or_else(|| DEFAULT_QUERY_MEMORY_LIMIT.to_owned());
+        if !is_memory_size(&query_memory_limit) {
+            return Err(ConfigError::Invalid {
+                variable: "BI_QUERY_MEMORY_LIMIT",
+                value: query_memory_limit,
+            });
+        }
         let metadata_schema = lookup("BI_LAKE_METADATA_SCHEMA");
         if let Some(value) = &metadata_schema
             && !is_identifier(value)
@@ -127,11 +142,12 @@ impl RuntimeConfig {
             })
             .transpose()?;
 
-        Ok(Self {
+        let config = Self {
             workers: number("BI_DUCKDB_WORKERS")?.unwrap_or(default_workers),
             queue_capacity: number("BI_DUCKDB_QUEUE")?.unwrap_or(DEFAULT_QUEUE_CAPACITY),
             duckdb_threads,
             memory_limit,
+            query_memory_limit: Some(query_memory_limit),
             extension_directory: lookup("BI_DUCKDB_EXTENSION_DIR").map(PathBuf::from),
             lake: Some(LakeConfig {
                 catalog: lookup("BI_LAKE_CATALOG").unwrap_or_else(|| DEV_LAKE_CATALOG.to_owned()),
@@ -139,7 +155,44 @@ impl RuntimeConfig {
                 data_path: lookup("BI_LAKE_DATA_PATH")
                     .map_or_else(|| PathBuf::from(DEFAULT_LAKE_DATA_PATH), PathBuf::from),
             }),
-        })
+        };
+        config.query_worker()?;
+        Ok(config)
+    }
+
+    /// Configuration for one independent query instance. The old global
+    /// budget and CPU count are divided across workers instead of multiplied.
+    pub(crate) fn query_worker(&self) -> Result<Option<Self>, ConfigError> {
+        let Some(limit) = &self.query_memory_limit else {
+            return Ok(None);
+        };
+        let parse = |variable, value: &str| {
+            memory_bytes(value).ok_or_else(|| ConfigError::Invalid {
+                variable,
+                value: value.to_owned(),
+            })
+        };
+        let count = self.workers.max(1);
+        let mut bytes = parse("BI_QUERY_MEMORY_LIMIT", limit)?;
+        if let Some(total) = &self.memory_limit {
+            bytes = bytes.min(parse("BI_DUCKDB_MEMORY_LIMIT", total)? / count as u64);
+        }
+        if bytes == 0 {
+            return Err(ConfigError::Invalid {
+                variable: "BI_QUERY_MEMORY_LIMIT",
+                value: limit.clone(),
+            });
+        }
+        let mut worker = self.clone();
+        worker.workers = 1;
+        worker.query_memory_limit = None;
+        worker.memory_limit = Some(format!("{bytes}B"));
+        let threads = self.duckdb_threads.map_or_else(
+            || std::thread::available_parallelism().map_or(1, std::num::NonZero::get),
+            |threads| threads as usize,
+        );
+        worker.duckdb_threads = Some(u32::try_from((threads / count).max(1)).unwrap_or(u32::MAX));
+        Ok(Some(worker))
     }
 }
 
@@ -156,14 +209,52 @@ pub fn is_identifier(value: &str) -> bool {
 
 /// A number followed by a DuckDB size unit, e.g. `512MB`, `1.5 GiB`.
 fn is_memory_size(value: &str) -> bool {
+    memory_bytes(value).is_some()
+}
+
+/// Parse operator-configured sizes without rounding or accepting infinity.
+fn memory_bytes(value: &str) -> Option<u64> {
     let value = value.trim();
     let split = value
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
         .unwrap_or(value.len());
     let (number, unit) = value.split_at(split);
-    number.parse::<f64>().is_ok_and(|n| n > 0.0)
-        && ["KB", "MB", "GB", "TB", "KIB", "MIB", "GIB", "TIB"]
-            .contains(&unit.trim().to_ascii_uppercase().as_str())
+    let multiplier: u128 = match unit.trim().to_ascii_uppercase().as_str() {
+        "KB" => 1000,
+        "MB" => 1000_u128.pow(2),
+        "GB" => 1000_u128.pow(3),
+        "TB" => 1000_u128.pow(4),
+        "KIB" => 1024,
+        "MIB" => 1024_u128.pow(2),
+        "GIB" => 1024_u128.pow(3),
+        "TIB" => 1024_u128.pow(4),
+        _ => return None,
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if (whole.is_empty() && fraction.is_empty())
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let denominator = 10_u128.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+    let numerator = (if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u128>().ok()?
+    })
+    .checked_mul(denominator)?
+    .checked_add(if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u128>().ok()?
+    })?;
+    let bytes = numerator
+        .checked_mul(multiplier)?
+        .checked_div(denominator)?;
+    u64::try_from(bytes).ok().filter(|bytes| *bytes > 0)
 }
 
 #[cfg(test)]
@@ -225,5 +316,57 @@ mod tests {
         let debug = format!("{lake:?}");
         assert!(!debug.contains("s3cret"), "{debug}");
         assert!(!debug.contains("dbname"), "{debug}");
+    }
+}
+
+#[cfg(test)]
+mod memory_properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn sizes_are_exact_and_global_budget_is_never_multiplied(kib in 1_u64..1_000_000, workers in 1_usize..8) {
+            let text = format!("{kib}KiB");
+            prop_assert_eq!(memory_bytes(&text), Some(kib * 1024));
+            let config = RuntimeConfig { memory_limit: Some(text), query_memory_limit: Some("1TiB".to_owned()), ..RuntimeConfig::in_memory(workers) };
+            let worker = config.query_worker().unwrap().unwrap();
+            prop_assert_eq!(worker.memory_limit, Some(format!("{}B", kib*1024/workers as u64)));
+        }
+
+        #[test]
+        fn arbitrary_sizes_never_panic(text in ".{0,100}") {
+            let _ = memory_bytes(&text);
+        }
+    }
+
+    #[test]
+    fn server_budget_is_default_and_cannot_be_disabled_by_environment() {
+        assert_eq!(
+            RuntimeConfig::from_lookup(|_| None)
+                .unwrap()
+                .query_memory_limit
+                .as_deref(),
+            Some(DEFAULT_QUERY_MEMORY_LIMIT)
+        );
+        for value in [
+            "",
+            "0MB",
+            "-1GB",
+            "unlimited",
+            "1e999GB",
+            "999999999999999999999999999TB",
+            "1GB'; SET",
+            "0.00000000000000001KB",
+        ] {
+            assert!(
+                RuntimeConfig::from_lookup(
+                    |key| (key == "BI_QUERY_MEMORY_LIMIT").then(|| value.to_owned())
+                )
+                .is_err(),
+                "{value}"
+            );
+        }
+        assert_eq!(memory_bytes("1.5 GiB"), Some(1_610_612_736));
     }
 }

@@ -33,6 +33,7 @@ it.each([
   [403, 'origin_forbidden'],
   [422, 'invalid_query'],
   [422, 'result_too_large'],
+  [422, 'query_memory_limit'],
   [429, 'too_many_queries'],
   [500, 'query_failed'],
   [503, 'analytics_unavailable'],
