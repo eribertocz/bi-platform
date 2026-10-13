@@ -17,7 +17,7 @@ use sef_model_ir::relationships::{
 use sef_model_ir::time::{IanaZoneId, NullPlacement, OrderTerm, SortDirection};
 use sef_model_ir::types::{DecimalValue, ValueType};
 
-use super::scalar::{Failure, Names, Translator, describe, not_representable};
+use super::scalar::{Failure, Name, Names, Translator, describe, not_representable};
 use super::{Converter, RowScope};
 use crate::diagnostic::Code;
 use crate::extension::{
@@ -338,7 +338,11 @@ struct PredicateScope<'s, 'c, 'a> {
 }
 
 impl Names for PredicateScope<'_, '_, '_> {
-    fn reference(&mut self, qualifier: Option<&str>, name: &str) -> Result<ScalarExpr, Failure> {
+    fn reference(
+        &mut self,
+        qualifier: Option<&Name<'_>>,
+        name: &Name<'_>,
+    ) -> Result<ScalarExpr, Failure> {
         self.row.reference(qualifier, name)
     }
 

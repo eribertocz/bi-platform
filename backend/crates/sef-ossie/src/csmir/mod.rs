@@ -47,7 +47,7 @@ use sef_model_ir::units::Unit;
 use sqlparser::ast::Expr;
 
 use self::governance::Governed;
-use self::scalar::{Division, Failure, Names, Translator, describe, normalize};
+use self::scalar::{Division, Failure, Name, Names, Translator, describe};
 use crate::catalog::{Catalog, Column, Relation};
 use crate::diagnostic::{Code, Diagnostic};
 use crate::document::{self, DataType, SemanticModel};
@@ -556,14 +556,14 @@ impl<'a> Converter<'a> {
         path: &str,
     ) -> Option<&'r Column> {
         let (qualifier, name) = match reference? {
-            Expr::Identifier(ident) => (None, normalize(ident)),
+            Expr::Identifier(ident) => (None, Name::of(ident)),
             Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-                [qualifier, name] => (Some(normalize(qualifier)), normalize(name)),
+                [qualifier, name] => (Some(Name::of(qualifier)), Name::of(name)),
                 _ => return None,
             },
             _ => return None,
         };
-        match resolve_column(state, relation, qualifier.as_deref(), &name) {
+        match resolve_column(state, relation, qualifier.as_ref(), &name) {
             Ok(column) => Some(column),
             Err(failure) => {
                 self.fail(path, failure);
@@ -1321,7 +1321,11 @@ struct RowScope<'c, 'a> {
 }
 
 impl Names for RowScope<'_, '_> {
-    fn reference(&mut self, qualifier: Option<&str>, name: &str) -> Result<ScalarExpr, Failure> {
+    fn reference(
+        &mut self,
+        qualifier: Option<&Name<'_>>,
+        name: &Name<'_>,
+    ) -> Result<ScalarExpr, Failure> {
         let converter = &mut *self.converter;
         let state = &converter.datasets[self.dataset];
         let relation = state
@@ -1381,31 +1385,33 @@ impl Names for RowScope<'_, '_> {
 fn resolve_column<'r>(
     state: &DatasetState<'_>,
     relation: &'r Relation,
-    qualifier: Option<&str>,
-    name: &str,
+    qualifier: Option<&Name<'_>>,
+    name: &Name<'_>,
 ) -> Result<&'r Column, Failure> {
     if let Some(qualifier) = qualifier
-        && qualifier != state.normalized
+        && qualifier.normalized != state.normalized
     {
         return Err(Failure::new(
             Code::UnknownReference,
             format!(
-                "Un campo solo lee columnas de su propio dataset, no de {qualifier:?}; para \
-                 combinar datasets usa una relación."
+                "Un campo solo lee columnas de su propio dataset, no de {:?}; para combinar \
+                 datasets usa una relación.",
+                qualifier.written
             ),
         ));
     }
-    match relation.columns_named(name).as_slice() {
+    let written = name.written;
+    match relation.columns_named(&name.normalized).as_slice() {
         [column] => Ok(column),
         [] => Err(Failure::new(
             Code::UnknownColumn,
-            format!("El origen no tiene la columna {name:?}."),
+            format!("El origen no tiene la columna {written:?}."),
         )),
         _ => Err(Failure::new(
             Code::AmbiguousReference,
             format!(
-                "Varias columnas se llaman {name:?} sin distinguir mayúsculas; escríbela entre \
-                 comillas dobles."
+                "Varias columnas se llaman {written:?} sin distinguir mayúsculas; escríbela \
+                 entre comillas dobles."
             ),
         )),
     }

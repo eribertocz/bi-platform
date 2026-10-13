@@ -12,6 +12,7 @@ use serde_saphyr::{DuplicateKeyPolicy, MergeKeyPolicy};
 
 use crate::diagnostic::{Code, Diagnostic};
 use crate::document::SemanticModel;
+use crate::positions::Positions;
 use crate::validate;
 
 /// Largest document accepted, in bytes.
@@ -31,7 +32,10 @@ pub struct Loaded {
 /// followed by the warnings.
 pub fn load(text: &str) -> Result<Loaded, Vec<Diagnostic>> {
     let model = parse(text).map_err(|diagnostic| vec![diagnostic])?;
-    let diagnostics = validate::validate(&model);
+    let mut diagnostics = validate::validate(&model);
+    if diagnostics.iter().any(|d| d.location.is_none()) {
+        Positions::of(text).fill(&mut diagnostics);
+    }
     if diagnostics.iter().any(Diagnostic::is_error) {
         return Err(diagnostics);
     }
@@ -113,7 +117,7 @@ pub fn to_json(model: &SemanticModel) -> serde_json::Result<String> {
     Ok(output)
 }
 
-fn options() -> serde_saphyr::Options {
+pub(crate) fn options() -> serde_saphyr::Options {
     serde_saphyr::options! {
         duplicate_keys: DuplicateKeyPolicy::Error,
         merge_keys: MergeKeyPolicy::Error,

@@ -589,32 +589,10 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
         Err(ds) => return invalid(file.name, ds.into_iter().map(Into::into).collect()),
     };
     let name = loaded.model.name.clone();
-    let mut catalog = Catalog::default();
-    let mut diagnostics = vec![];
-    for (i, dataset) in loaded.model.datasets.iter().enumerate() {
-        match sef_adapter_duckdb::describe(conn, &dataset.source) {
-            Ok(relation) => {
-                catalog.relations.insert(dataset.source.clone(), relation);
-            }
-            Err(error) => {
-                let code = match error {
-                    sef_adapter_duckdb::CatalogError::UnknownSource => "unknown_source",
-                    sef_adapter_duckdb::CatalogError::AmbiguousSource => "ambiguous_source",
-                    sef_adapter_duckdb::CatalogError::UnsupportedType { .. } => {
-                        "unsupported_source_type"
-                    }
-                    sef_adapter_duckdb::CatalogError::Engine(_)
-                    | sef_adapter_duckdb::CatalogError::InvalidHandle => "catalog_unavailable",
-                };
-                let mut d = ModelDiagnostic::error(code, error.to_string());
-                d.path = format!("/datasets/{i}/source");
-                diagnostics.push(d);
-            }
-        }
-    }
-    if !diagnostics.is_empty() {
-        return invalid(name, diagnostics);
-    }
+    let catalog = match catalog(&loaded.model, conn) {
+        Ok(catalog) => catalog,
+        Err(diagnostics) => return invalid(name, located(&text, diagnostics)),
+    };
     // Exact UTF-8 filename, including extension/case, encoded as a logical ID.
     let model_id = file
         .name
@@ -633,7 +611,10 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
             model: model_id,
         },
     ) {
-        Err(ds) => invalid(name, ds.into_iter().map(Into::into).collect()),
+        Err(ds) => invalid(
+            name,
+            located(&text, ds.into_iter().map(Into::into).collect()),
+        ),
         Ok(compiled) => {
             let definition = compiled.semantic.definition();
             ModelFile::Valid {
@@ -664,15 +645,69 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
                         )
                     })
                     .collect(),
-                diagnostics: loaded
-                    .warnings
-                    .into_iter()
-                    .chain(compiled.warnings)
-                    .map(Into::into)
-                    .collect(),
+                diagnostics: located(
+                    &text,
+                    loaded
+                        .warnings
+                        .into_iter()
+                        .chain(compiled.warnings)
+                        .map(Into::into)
+                        .collect(),
+                ),
             }
         }
     }
+}
+
+/// The exact source types of every dataset, or one diagnostic per source
+/// the engine cannot describe.
+fn catalog(
+    model: &sef_ossie::SemanticModel,
+    conn: &bi_runtime::duckdb::Connection,
+) -> Result<Catalog, Vec<ModelDiagnostic>> {
+    let mut catalog = Catalog::default();
+    let mut diagnostics = vec![];
+    for (i, dataset) in model.datasets.iter().enumerate() {
+        match sef_adapter_duckdb::describe(conn, &dataset.source) {
+            Ok(relation) => {
+                catalog.relations.insert(dataset.source.clone(), relation);
+            }
+            Err(error) => {
+                let code = match error {
+                    sef_adapter_duckdb::CatalogError::UnknownSource => "unknown_source",
+                    sef_adapter_duckdb::CatalogError::AmbiguousSource => "ambiguous_source",
+                    sef_adapter_duckdb::CatalogError::UnsupportedType { .. } => {
+                        "unsupported_source_type"
+                    }
+                    sef_adapter_duckdb::CatalogError::Engine(_)
+                    | sef_adapter_duckdb::CatalogError::InvalidHandle => "catalog_unavailable",
+                };
+                let mut d = ModelDiagnostic::error(code, error.to_string());
+                d.path = format!("/datasets/{i}/source");
+                diagnostics.push(d);
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        Ok(catalog)
+    } else {
+        Err(diagnostics)
+    }
+}
+
+/// Diagnostics found after parsing (catalog, CSMIR) know only their JSON
+/// pointer; this places them in the file the person edits.
+fn located(text: &str, mut diagnostics: Vec<ModelDiagnostic>) -> Vec<ModelDiagnostic> {
+    if diagnostics.iter().any(|d| d.line.is_none()) {
+        let positions = sef_ossie::Positions::of(text);
+        for diagnostic in diagnostics.iter_mut().filter(|d| d.line.is_none()) {
+            if let Some((line, column)) = positions.locate(&diagnostic.path) {
+                diagnostic.line = Some(line);
+                diagnostic.column = Some(column);
+            }
+        }
+    }
+    diagnostics
 }
 
 fn datasets(model: &sef_ossie::SemanticModel) -> Vec<ModelDataset> {

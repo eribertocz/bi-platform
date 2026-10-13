@@ -65,10 +65,30 @@ fn type_mismatch(message: impl Into<String>) -> Failure {
     Failure::new(Code::TypeMismatch, message)
 }
 
+/// An identifier as it is compared ([`normalize`]) and as its author wrote
+/// it, which is how messages quote it.
+pub(crate) struct Name<'i> {
+    pub normalized: String,
+    pub written: &'i str,
+}
+
+impl<'i> Name<'i> {
+    pub(crate) fn of(ident: &'i Ident) -> Self {
+        Self {
+            normalized: normalize(ident),
+            written: &ident.value,
+        }
+    }
+}
+
 /// Resolves the names an expression reads.
 pub(crate) trait Names {
-    /// `name` or `qualifier.name`, normalized, as a typed scalar.
-    fn reference(&mut self, qualifier: Option<&str>, name: &str) -> Result<ScalarExpr, Failure>;
+    /// `name` or `qualifier.name` as a typed scalar.
+    fn reference(
+        &mut self,
+        qualifier: Option<&Name<'_>>,
+        name: &Name<'_>,
+    ) -> Result<ScalarExpr, Failure>;
     /// The zone `DATE_TRUNC` buckets in, when the expression may bucket time.
     fn timezone(&self) -> Option<&IanaZoneId>;
     /// A request context value (`:name`), where the expression admits them.
@@ -210,11 +230,11 @@ impl<N: Names> Translator<'_, N> {
                 }),
                 _ => return Err(not_representable("Un literal de hora o fecha y hora")),
             },
-            Expr::Identifier(ident) => self.names.reference(None, &normalize(ident))?,
+            Expr::Identifier(ident) => self.names.reference(None, &Name::of(ident))?,
             Expr::CompoundIdentifier(parts) => match parts.as_slice() {
                 [qualifier, name] => self
                     .names
-                    .reference(Some(&normalize(qualifier)), &normalize(name))?,
+                    .reference(Some(&Name::of(qualifier)), &Name::of(name))?,
                 _ => return Err(not_representable("Una referencia de más de dos partes")),
             },
             Expr::UnaryOp { op, expr: inner } => match op {
