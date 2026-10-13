@@ -27,6 +27,7 @@ cap-fs-ext.workspace = true
 sef-adapter-duckdb = { path = "../sef-adapter-duckdb" }
 sef-ossie = { path = "../sef-ossie" }
 sef-model-ir = { path = "../sef-model-ir" }
+sef-correctness = { path = "../sef-correctness" }
 getrandom.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
@@ -45,6 +46,9 @@ utoipa.workspace = true
 openidconnect = { version = "4.0.1", default-features = false }
 
 [dev-dependencies]
+sef-planner = { path = "../sef-planner" }
+sef-query-ir = { path = "../sef-query-ir" }
+serde-saphyr = "1.3.0"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 opentelemetry-proto.workspace = true
 prost.workspace = true

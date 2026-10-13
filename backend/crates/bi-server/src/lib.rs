@@ -12,6 +12,7 @@ pub mod oidc;
 pub mod openapi;
 pub mod problem;
 pub mod query;
+pub mod semantic_execution;
 mod static_files;
 pub mod telemetry;
 
