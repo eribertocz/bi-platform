@@ -43,6 +43,11 @@ pub enum CanonicalValue {
     Float(f64),
     Bytes(Vec<u8>),
     Text(String),
+    /// A stable identifier: encoded exactly as [`Self::Text`], so no
+    /// fingerprint depends on the distinction, but kept apart in memory so a
+    /// reader can tell a reference from free text, a source handle or a
+    /// literal (the semantic diff, `crate::diff`).
+    Id(String),
     Sequence(Vec<Self>),
     Set(Vec<Self>),
     Map(Vec<(String, Self)>),
@@ -125,7 +130,7 @@ impl CanonicalValue {
                 budget.payload(value.len())?;
                 (5, Value::Bytes(value.clone()))
             }
-            Self::Text(value) => {
+            Self::Text(value) | Self::Id(value) => {
                 budget.payload(value.len())?;
                 (6, Value::Text(value.clone()))
             }
