@@ -255,7 +255,14 @@ pub(crate) async fn enforce_session(
                 .extensions()
                 .get::<RequestId>()
                 .expect("request id exists");
-            return problem(StatusCode::FORBIDDEN, "origin_forbidden", id);
+            let mut rejection = Problem::new(
+                StatusCode::FORBIDDEN,
+                "origin_forbidden",
+                Some(format!("Abre la aplicación desde {}.", state.auth.origin)),
+                id.header_value().to_str().unwrap_or("unavailable"),
+            );
+            rejection.public_origin = Some(state.auth.origin.clone());
+            return rejection.into_response();
         }
     }
     let mut response = next.run(request).await;

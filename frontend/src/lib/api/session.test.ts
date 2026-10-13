@@ -88,3 +88,44 @@ describe('server session client', () => {
     expect(request.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
   });
 });
+
+it.each(['http://127.0.0.1:8080', 'https://bi.example.test'])(
+  'reads the configured destination from RFC 9457: %s',
+  async (origin) => {
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        Response.json(
+          { code: 'origin_forbidden', public_origin: origin },
+          { status: 403, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      );
+    await expect(login('analyst', request)).rejects.toMatchObject({
+      status: 403,
+      code: 'origin_forbidden',
+      publicOrigin: origin,
+    });
+  },
+);
+
+it.each([
+  'javascript:alert(1)',
+  'https://user:secret@example.test',
+  '//evil.test',
+  'https://example.test/path',
+  'https://example.test#fragment',
+])('never links to malformed destination %s', async (origin) => {
+  const request = vi
+    .fn<typeof fetch>()
+    .mockResolvedValue(
+      Response.json(
+        { code: 'origin_forbidden', public_origin: origin },
+        { status: 403, headers: { 'content-type': 'application/problem+json' } },
+      ),
+    );
+  await expect(login('analyst', request)).rejects.toMatchObject({
+    status: 403,
+    code: 'origin_forbidden',
+    publicOrigin: undefined,
+  });
+});

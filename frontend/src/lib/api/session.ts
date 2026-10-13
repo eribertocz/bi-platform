@@ -8,6 +8,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly requestId?: string,
+    public readonly code?: string,
+    public readonly publicOrigin?: string,
   ) {
     super(`La API respondió HTTP ${status}.`);
   }
@@ -37,7 +39,38 @@ export async function apiRequest(
   });
   if (!response.ok) {
     if (response.status === 401 && !init.signal?.aborted) onUnauthorized?.();
-    throw new ApiError(response.status, response.headers.get('x-request-id') ?? undefined);
+    let code: string | undefined;
+    let publicOrigin: string | undefined;
+    if (
+      response.headers.get('content-type')?.split(';')[0]?.trim() === 'application/problem+json'
+    ) {
+      try {
+        const problem: unknown = await response.json();
+        if (typeof problem === 'object' && problem !== null) {
+          if ('code' in problem && typeof problem.code === 'string') code = problem.code;
+          if ('public_origin' in problem && typeof problem.public_origin === 'string') {
+            const url = new URL(problem.public_origin);
+            if (
+              ['http:', 'https:'].includes(url.protocol) &&
+              !url.username &&
+              !url.password &&
+              !url.search &&
+              !url.hash &&
+              url.pathname === '/'
+            )
+              publicOrigin = problem.public_origin;
+          }
+        }
+      } catch {
+        // A malformed problem keeps its HTTP status; never invent a destination.
+      }
+    }
+    throw new ApiError(
+      response.status,
+      response.headers.get('x-request-id') ?? undefined,
+      code,
+      publicOrigin,
+    );
   }
   return response;
 }
