@@ -309,6 +309,9 @@ impl Resources {
 #[derive(Default)]
 pub struct Uses {
     seen: BTreeSet<(String, Usage)>,
+    /// The objects the request itself named (selections and filter
+    /// targets): the only ones an answer may call by name.
+    named: BTreeSet<String>,
     pub list: Vec<Use>,
 }
 
@@ -328,6 +331,36 @@ impl Uses {
         self.seen.iter().any(|(seen, _)| seen == id.as_str())
     }
 
+    fn name(&mut self, id: &StableId) {
+        self.named.insert(id.as_str().to_owned());
+    }
+
+    /// Whether the request named this object: a denial or a diagnostic may
+    /// call it by name only then.
+    #[must_use]
+    pub fn is_named(&self, id: &str) -> bool {
+        self.named.contains(id)
+    }
+
+    /// Every metric `metric` is computed from, transitively. Deriving
+    /// reveals values, so each needs its own `Lineage` use, also when the
+    /// same metric is selected and shown masked (ADR 0012 §5).
+    fn derivations(&mut self, resources: &Resources, model: &ModelDefinition, metric: &StableId) {
+        let mut found = BTreeSet::new();
+        let mut pending = vec![metric.clone()];
+        while let Some(id) = pending.pop() {
+            let Some(definition) = model.metrics.iter().find(|m| m.metadata.id() == &id) else {
+                continue;
+            };
+            for dependency in definition.expression.metric_refs() {
+                if found.insert(dependency.clone()) {
+                    self.add(resources, &dependency, Usage::Lineage);
+                    pending.push(dependency);
+                }
+            }
+        }
+    }
+
     fn join(&mut self, resources: &Resources, model: &ModelDefinition, role: &str) {
         for relationship in model.relationships.iter().filter(|r| r.role == role) {
             self.add(resources, &relationship.from_dataset, Usage::Join);
@@ -342,6 +375,7 @@ impl Uses {
         dimension: &QualifiedDimensionRef,
         usage: Usage,
     ) {
+        self.name(&dimension.dimension);
         self.add(resources, &dimension.dimension, usage);
         for role in &dimension.roles {
             self.join(resources, model, role);
@@ -397,7 +431,10 @@ pub fn requested(
     let mut uses = Uses::default();
     for selection in &block.selections {
         match &selection.item {
-            SelectionItem::Metric(metric) => uses.add(resources, metric, Usage::Project),
+            SelectionItem::Metric(metric) => {
+                uses.name(metric);
+                uses.add(resources, metric, Usage::Project);
+            }
             SelectionItem::Dimension(dimension) => {
                 uses.dimension(resources, model, dimension, Usage::Project);
                 uses.dimension(resources, model, dimension, Usage::Group);
@@ -406,6 +443,13 @@ pub fn requested(
                 uses.dimension(resources, model, &time.dimension, Usage::Project);
                 uses.dimension(resources, model, &time.dimension, Usage::Group);
             }
+        }
+    }
+    // What the selected metrics are derived from, before validating: a
+    // masked metric shown next to one derived from it does not waive it.
+    for selection in &block.selections {
+        if let SelectionItem::Metric(metric) = &selection.item {
+            uses.derivations(resources, model, metric);
         }
     }
     for filter in block.filter.iter().chain(&block.post_aggregate_filter) {
@@ -707,7 +751,11 @@ metrics:
             let id = object(&selection.item);
             expected.insert((id.clone(), Usage::Project));
             if !matches!(selection.item, SelectionItem::Metric(_)) {
-                expected.insert((id, Usage::Group));
+                expected.insert((id.clone(), Usage::Group));
+            }
+            // `doble = importe + importe` reads `importe`.
+            if id.ends_with("/doble") {
+                expected.insert((id.replace("/doble", "/importe"), Usage::Lineage));
             }
         }
         if let Some(FilterExpr::And(filters)) = &block.filter {

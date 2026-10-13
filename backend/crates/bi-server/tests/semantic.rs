@@ -460,3 +460,167 @@ async fn explain_latency(pool: sqlx::PgPool) {
         times[28].as_secs_f64() * 1e3
     );
 }
+
+// ---- From the review of #110: lineage and names never leak ------------------
+
+fn with_derived(extra: &str) -> String {
+    format!("{MODEL}{extra}")
+}
+
+const DOUBLE: &str = "  - name: doble\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: margen + margen\n";
+const QUADRUPLE: &str = "  - name: cuadruple\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: doble + doble\n";
+
+#[sqlx::test(migrations = false)]
+async fn showing_a_masked_metric_never_waives_deriving_from_it(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    h.write(
+        "metrics/ventas.yaml",
+        &with_derived(&format!("{DOUBLE}{QUADRUPLE}")),
+    );
+    let lector = h.login("lector").await;
+    // Deriving from the confidential metric: denied, without naming it.
+    let (status, denied) = h
+        .explain(Some(&lector), &query(&json!([metric("d", "doble")])))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
+    assert_eq!(denied["denied"]["usage"], "lineage", "{denied:#}");
+    assert!(denied["denied"].get("name").is_none(), "{denied:#}");
+    // Showing it masked next to the derived one changes nothing…
+    let (status, body) = h
+        .explain(
+            Some(&lector),
+            &query(&json!([metric("c", "margen"), metric("d", "doble")])),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "lineage bypass: {body:#}");
+    // …also through a chain of derivations.
+    let (status, body) = h
+        .explain(
+            Some(&lector),
+            &query(&json!([metric("c", "margen"), metric("q", "cuadruple")])),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "transitive bypass: {body:#}");
+    // The analyst may derive from it.
+    let analista = h.login("analista").await;
+    let (status, body) = h
+        .explain(
+            Some(&analista),
+            &query(&json!([metric("c", "margen"), metric("q", "cuadruple")])),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+}
+
+#[sqlx::test(migrations = false)]
+async fn an_audit_failure_closes_both_answers_and_denials(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    // An isolated database per test: nothing else is touched.
+    sqlx::query("DROP TABLE bi_meta.audit_events CASCADE")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    for name in ["importe", "coste"] {
+        let (status, body) = h
+            .explain(Some(&lector), &query(&json!([metric("m", name)])))
+            .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body:#}");
+        assert_eq!(body["code"], "audit_unavailable", "{body:#}");
+    }
+}
+
+#[sqlx::test(migrations = false)]
+async fn requests_over_the_bounds_are_refused(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    let selections: Vec<_> = (0..65)
+        .map(|n| metric(&format!("m{n}"), "importe"))
+        .collect();
+    let mut nodes = query(&json!([metric("m", "importe")]));
+    nodes["query"]["filter"] = json!({ "op": "and", "filters": (0..256)
+        .map(|_| json!({ "op": "is_null", "target": { "kind": "dimension", "name": "sales.region" } }))
+        .collect::<Vec<_>>() });
+    for body in [
+        query(&json!(selections)),
+        query(&json!([metric("m", &"x".repeat(257))])),
+        nodes,
+    ] {
+        let (status, body) = h.explain(Some(&lector), &body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+        assert_eq!(body["code"], "invalid_request", "{body:#}");
+    }
+}
+
+#[sqlx::test(migrations = false)]
+async fn authorization_comes_before_correctness(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    let mut body = query(&json!([metric("m", "coste")]));
+    body["query"]["having"] = json!({ "op": "compare",
+        "target": { "kind": "metric", "selection": "m" }, "comparison": ">",
+        "value": { "type": "number", "value": "1" } });
+    let (status, body) = h.explain(Some(&lector), &body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+}
+
+#[sqlx::test(migrations = false)]
+async fn model_errors_never_disclose_objects_the_request_did_not_name(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    h.write(
+        "metrics/ventas.yaml",
+        &MODEL.replace("SUM(sales.quantity)", "SUM(sales.secret_internal)"),
+    );
+    for user in ["sinrol", "lector"] {
+        let cookie = h.login(user).await;
+        let (status, body) = h
+            .explain(Some(&cookie), &query(&json!([metric("m", "importe")])))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+        assert_eq!(body["code"], "model_invalid", "{body:#}");
+        assert!(
+            !body["diagnostics"].as_array().unwrap().is_empty(),
+            "{body:#}"
+        );
+        assert!(
+            !body.to_string().contains("secret_internal"),
+            "{user}: unrequested name disclosed: {body:#}"
+        );
+    }
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_joined_dataset_is_never_named_when_denied(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let model = MODEL
+        .replace(
+            "  - name: sales\n",
+            "  - name: sales\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n",
+        )
+        .replace(
+            "        dimension: {}",
+            "        dimension: {}\n        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\": 1, \"dimension\": \"region\"}'",
+        );
+    h.write(
+        "metrics/ventas.yaml",
+        &format!(
+            "{model}\nrelationships:\n  - name: self_role\n    from: sales\n    to: sales\n    from_columns: [order_id]\n    to_columns: [order_id]\n"
+        ),
+    );
+    let lector = h.login("lector").await;
+    let (status, body) = h
+        .explain(
+            Some(&lector),
+            &query(&json!([
+                metric("m", "importe"),
+                { "kind": "dimension", "id": "r", "name": "region", "roles": ["self_role"] }
+            ])),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+    assert_eq!(body["denied"]["kind"], "dataset", "{body:#}");
+    assert!(
+        body["denied"].get("name").is_none(),
+        "unrequested dataset disclosed: {body:#}"
+    );
+}

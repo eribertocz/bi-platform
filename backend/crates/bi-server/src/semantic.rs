@@ -21,6 +21,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use sef_authz::{Constraint, QueryDecision, ResourceKind, authorize_query};
 use sef_correctness::SemanticContext;
+use sef_model_ir::identity::StableId;
 use sef_model_ir::model::ModelDefinition;
 use sef_model_ir::types::{Literal, ValueType};
 use sef_query_ir::query::{SelectionItem, SemanticQueryBlock};
@@ -432,7 +433,9 @@ fn explain_file(
         Err(rejected) => {
             return Outcome::Invalid {
                 code: "model_invalid",
-                message: "El modelo tiene errores; corrígelos en la pantalla Modelos.".to_owned(),
+                message: "El modelo tiene errores. Quien lo mantiene los ve en la pantalla \
+                          Modelos."
+                    .to_owned(),
                 diagnostics: rejected
                     .diagnostics
                     .into_iter()
@@ -450,15 +453,7 @@ fn explain_file(
             return Outcome::Invalid {
                 code: "query_invalid",
                 message: "La consulta no corresponde al modelo.".to_owned(),
-                diagnostics: errors
-                    .into_iter()
-                    .map(|error| SemanticDiagnostic {
-                        code: error.code.as_str().to_owned(),
-                        phase: "binding".to_owned(),
-                        message: error.message,
-                        path: Some(error.path.replacen("/blocks/0", "/query", 1)),
-                    })
-                    .collect(),
+                diagnostics: errors.into_iter().map(binding_diagnostic).collect(),
                 audit: None,
             };
         }
@@ -494,7 +489,7 @@ fn decide(
     // First what the query asks for, before validating anything.
     let asked = authorize_query(&access.snapshot, &principal, &uses.list, &context);
     if !asked.allowed {
-        return denied(&asked, definition, true, audit(&asked, true));
+        return denied(&asked, definition, &uses, audit(&asked, true));
     }
     let slots = context_slots(definition, &session.attributes);
     let validated = match sef_correctness::validate(model, bound, &slots) {
@@ -503,7 +498,10 @@ fn decide(
             return Outcome::Invalid {
                 code: "query_incorrect",
                 message: "La consulta no tiene un resultado correcto con este modelo.".to_owned(),
-                diagnostics: diagnostics.into_iter().map(semantic_diagnostic).collect(),
+                diagnostics: diagnostics
+                    .into_iter()
+                    .map(|d| semantic_diagnostic(d, &uses))
+                    .collect(),
                 audit: Some(audit(&asked, false)),
             };
         }
@@ -515,7 +513,10 @@ fn decide(
                 code: "query_unplannable",
                 message: "El planificador no puede garantizar el resultado de esta consulta."
                     .to_owned(),
-                diagnostics: diagnostics.into_iter().map(semantic_diagnostic).collect(),
+                diagnostics: diagnostics
+                    .into_iter()
+                    .map(|d| semantic_diagnostic(d, &uses))
+                    .collect(),
                 audit: Some(audit(&asked, false)),
             };
         }
@@ -524,7 +525,7 @@ fn decide(
     access::read_by_plan(&mut uses, &resources, definition, &planned.plan);
     let decision = authorize_query(&access.snapshot, &principal, &uses.list, &context);
     if !decision.allowed {
-        return denied(&decision, definition, false, audit(&decision, true));
+        return denied(&decision, definition, &uses, audit(&decision, true));
     }
     let (Ok(query), Ok(plan)) = (bound.fingerprint(), planned.plan.fingerprint()) else {
         return Outcome::Failed(
@@ -563,13 +564,20 @@ fn decide(
     }
 }
 
-fn denied(decision: &QueryDecision, model: &ModelDefinition, named: bool, audit: Audit) -> Outcome {
+/// A denial names the object only when the request named it: what a
+/// relationship joins or a metric derives from stays unnamed.
+fn denied(
+    decision: &QueryDecision,
+    model: &ModelDefinition,
+    uses: &access::Uses,
+    audit: Audit,
+) -> Outcome {
     let denied = decision
         .denied
         .as_ref()
         .map(|(kind, id, usage)| SemanticDeniedUse {
             kind: kind_code(*kind).to_owned(),
-            name: named.then(|| display_name(model, id)),
+            name: uses.is_named(id).then(|| display_name(model, id)),
             usage: usage.code().to_owned(),
         });
     Outcome::Denied {
@@ -705,26 +713,67 @@ fn hex(bytes: &[u8]) -> String {
         })
 }
 
+/// A model error comes before any authorization: only its stable code
+/// leaves the server, never the objects its message names. Whoever
+/// maintains the model reads the details in the Models screen.
 fn model_diagnostic(diagnostic: ModelDiagnostic) -> SemanticDiagnostic {
     SemanticDiagnostic {
         code: diagnostic.code,
         phase: "model".to_owned(),
-        message: diagnostic.message,
+        message: "El modelo tiene un error en su definición.".to_owned(),
         path: None,
     }
 }
 
-fn semantic_diagnostic(diagnostic: sef_model_ir::diagnostic::Diagnostic) -> SemanticDiagnostic {
+/// Binding messages repeat what the request wrote, except an ambiguous
+/// name, which lists the identifiers it could mean.
+fn binding_diagnostic(error: sef_query_ir::QueryError) -> SemanticDiagnostic {
+    let message = if error.code == sef_query_ir::QueryErrorCode::AmbiguousName {
+        "Ese nombre corresponde a más de un objeto del modelo; usa un nombre que lo distinga."
+            .to_owned()
+    } else {
+        error.message
+    };
+    SemanticDiagnostic {
+        code: error.code.as_str().to_owned(),
+        phase: "binding".to_owned(),
+        message,
+        path: Some(error.path.replacen("/blocks/0", "/query", 1)),
+    }
+}
+
+/// A correctness or planning message is shown only when every object it is
+/// about was named by the request; otherwise only its stable code.
+fn semantic_diagnostic(
+    diagnostic: sef_model_ir::diagnostic::Diagnostic,
+    uses: &access::Uses,
+) -> SemanticDiagnostic {
     use sef_model_ir::diagnostic::Phase;
+    let refs: Vec<&StableId> = diagnostic
+        .primary_ref
+        .iter()
+        .chain(&diagnostic.related_refs)
+        .collect();
+    let disclosed = !refs.is_empty() && refs.iter().all(|id| uses.is_named(id.as_str()));
+    let (phase, generic) = match diagnostic.phase {
+        Phase::Model => ("model", "El modelo tiene un error en su definición."),
+        Phase::Correctness => (
+            "correctness",
+            "La consulta no tiene un resultado correcto con este modelo.",
+        ),
+        Phase::Planning => (
+            "planning",
+            "El planificador no puede garantizar el resultado de esta consulta.",
+        ),
+    };
     SemanticDiagnostic {
         code: diagnostic.code.as_str().to_owned(),
-        phase: match diagnostic.phase {
-            Phase::Model => "model",
-            Phase::Correctness => "correctness",
-            Phase::Planning => "planning",
-        }
-        .to_owned(),
-        message: diagnostic.message,
+        phase: phase.to_owned(),
+        message: if disclosed {
+            diagnostic.message
+        } else {
+            generic.to_owned()
+        },
         path: None,
     }
 }
