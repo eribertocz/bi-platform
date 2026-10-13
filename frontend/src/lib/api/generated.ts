@@ -364,6 +364,11 @@ export interface components {
       code: string;
       /** @description Human-readable explanation, safe to show; never internal errors. */
       detail?: string | null;
+      /**
+       * Format: uri
+       * @description Configured application origin, present only for an origin rejection.
+       */
+      public_origin?: string | null;
       /** @description Correlates with server logs (`x-request-id`). */
       request_id: string;
       /** Format: int32 */

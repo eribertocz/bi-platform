@@ -19,6 +19,23 @@
   let corporate = $state(false);
   let corporateBusy = $state(false);
   let corporateError = $state('');
+  let publicOrigin = $state<string>();
+
+  function loginError(cause: unknown): string {
+    if (cause instanceof ApiError) {
+      if (cause.code === 'origin_forbidden') {
+        publicOrigin = cause.publicOrigin;
+        return 'Esta dirección no está autorizada para iniciar sesión.';
+      }
+      if (cause.code === 'unknown_dev_user') return 'El usuario no existe. Elige otro usuario.';
+      if (cause.status === 429)
+        return 'Demasiados intentos. Espera un momento antes de volver a entrar.';
+      if (cause.status === 503)
+        return 'El servidor no está disponible. Intenta de nuevo más tarde.';
+      return 'No se pudo iniciar sesión. Intenta de nuevo.';
+    }
+    return 'El servidor no responde. Comprueba la conexión e intenta de nuevo.';
+  }
 
   async function load(signal?: AbortSignal) {
     loading = true;
@@ -55,11 +72,12 @@
   async function corporateLogin() {
     corporateBusy = true;
     corporateError = '';
+    publicOrigin = undefined;
     try {
       await startCorporateLogin();
-    } catch {
+    } catch (cause) {
       corporateBusy = false;
-      corporateError = 'No se pudo iniciar el acceso corporativo. Intenta de nuevo.';
+      corporateError = loginError(cause);
     }
   }
 
@@ -67,11 +85,12 @@
     event.preventDefault();
     busy = true;
     error = '';
+    publicOrigin = undefined;
     try {
       await login(selected);
       await goto(resolve('/'));
-    } catch {
-      error = 'No se pudo iniciar sesión. Intenta de nuevo.';
+    } catch (cause) {
+      error = loginError(cause);
     } finally {
       busy = false;
     }
@@ -107,5 +126,10 @@
 {/if}
 {#if error}
   <p role="alert">{error}</p>
-  <button onclick={() => void load()}>Reintentar</button>
+  {#if users.length === 0}<button onclick={() => void load()}>Reintentar</button>{/if}
+{/if}
+{#if publicOrigin}
+  <!-- The validated server origin is an external destination, not a Svelte route. -->
+  <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+  <p>Abre la aplicación desde <a class="underline" href={publicOrigin}>{publicOrigin}</a>.</p>
 {/if}

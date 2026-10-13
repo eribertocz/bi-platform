@@ -457,3 +457,13 @@ proptest! {
         prop_assert_ne!(fingerprint(Domain::Sqir, &signed), fingerprint(Domain::Seir, &signed));
     }
 }
+
+#[test]
+fn identifiers_and_text_encode_alike() -> Result<(), CanonicalError> {
+    // The distinction is for readers of the tree; fingerprints ignore it.
+    assert_eq!(
+        C::Id("corpus/metric/revenue".to_owned()).encode()?,
+        C::text("corpus/metric/revenue").encode()?
+    );
+    Ok(())
+}
