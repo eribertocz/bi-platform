@@ -286,7 +286,8 @@ fn untyped(value: &C) -> C {
 
 /// `value` with every identifier in `renames` replaced by its new one and
 /// every set in one order: a set keeps its insertion order until it is
-/// encoded, and a rename may move an element.
+/// encoded, and a rename may move an element. Only identifiers are
+/// replaced: a source handle or a literal equal to one stays as it is.
 fn normalized(value: &C, renames: &Renames) -> C {
     let parts = |items: &[(String, C)]| {
         items
@@ -295,7 +296,7 @@ fn normalized(value: &C, renames: &Renames) -> C {
             .collect()
     };
     match value {
-        C::Text(text) => C::Text(renames.get(text).cloned().unwrap_or_else(|| text.clone())),
+        C::Id(id) => C::Id(renames.get(id).cloned().unwrap_or_else(|| id.clone())),
         C::Sequence(items) => C::Sequence(items.iter().map(|v| normalized(v, renames)).collect()),
         C::Set(items) => {
             let mut items: Vec<(String, C)> = items
@@ -434,11 +435,12 @@ fn reads(tag: &str, field: &str) -> bool {
     )
 }
 
-/// The identifiers of `entries` that `value` mentions.
+/// The identifiers of `entries` that `value` references; text that merely
+/// equals one (a handle, a literal) is no reference.
 fn mentions<'a>(value: &C, entries: &'a Entries, found: &mut BTreeSet<&'a str>) {
     match value {
-        C::Text(text) => {
-            if let Some((key, _)) = entries.get_key_value(text.as_str()) {
+        C::Id(id) => {
+            if let Some((key, _)) = entries.get_key_value(id.as_str()) {
                 found.insert(key.as_str());
             }
         }

@@ -352,6 +352,81 @@ fn removed_and_added_objects_are_reported() {
     );
 }
 
+// ---- References are typed: handles and literals are never identifiers ---------
+
+#[test]
+fn a_source_handle_equal_to_an_identifier_is_no_reference() {
+    // `qty` is read through a handle spelled like the `amount` field's ID.
+    let mut before = definition(SALES, &sales_catalog(decimal(18, 2)));
+    let amount = before.datasets[0].fields[1].metadata.id().clone();
+    let qty = before.datasets[0].fields[2].metadata.id().clone();
+    let handle = SourceHandle::new(amount.as_str()).expect("handle");
+    before.datasets[0].fields[2].binding = handle.clone();
+    for binding in &mut before.source_bindings[0].field_bindings {
+        if binding.field == qty {
+            binding.handle = handle.clone();
+        }
+    }
+    let mut after = before.clone();
+    after.datasets[0].fields[1].nullable = true;
+    let changed = diff(&compiled(before), &compiled(after));
+    for untouched in ["/field/sales.qty", "/measure/unidades", "/metric/unidades"] {
+        assert!(
+            changed
+                .changes
+                .iter()
+                .all(|entry| !entry.id.as_str().ends_with(untouched)),
+            "{untouched}: {changed:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_rename_never_rewrites_a_source_handle() {
+    // The source's ID and its connection handle change together: that is a
+    // new connection, not the same source under another name.
+    let mut before = definition(SALES, &sales_catalog(decimal(18, 2)));
+    let old = before.source_bindings[0].metadata.id().clone();
+    before.source_bindings[0].source_id = SourceHandle::new(old.as_str()).expect("handle");
+    let mut after = before.clone();
+    let new = StableId::new(format!("{}/source/another", old.namespace())).expect("id");
+    after.source_bindings[0].metadata.identity.stable_id = new.clone();
+    after.source_bindings[0].source_id = SourceHandle::new(new.as_str()).expect("handle");
+    after.datasets[0].source_binding = new;
+    let changed = diff(&compiled(before), &compiled(after));
+    assert_eq!(
+        changed.of(&old).expect("change").change,
+        Change::Removed,
+        "{changed:#?}"
+    );
+}
+
+#[test]
+fn a_literal_equal_to_an_identifier_is_no_reference() {
+    let labelled = SALES.replace(
+        "      - name: region\n",
+        "      - name: etiqueta\n        expression:\n          dialects:\n            - dialect: OSSIE_SQL_2026\n              expression: \"'test/field/sales.amount'\"\n        dimension: {}\n      - name: region\n",
+    );
+    let before = definition(&labelled, &sales_catalog(decimal(18, 2)));
+    let mut after = before.clone();
+    after.datasets[0].fields[1].nullable = true;
+    let changed = diff(&compiled(before), &compiled(after));
+    assert!(
+        changed
+            .changes
+            .iter()
+            .any(|entry| entry.id.as_str().ends_with("/field/sales.amount")),
+        "{changed:#?}"
+    );
+    assert!(
+        changed
+            .changes
+            .iter()
+            .all(|entry| !entry.id.as_str().ends_with("etiqueta")),
+        "{changed:#?}"
+    );
+}
+
 // ---- Policies, from the normative corpus (CASE-015) ----------------------------
 
 fn corpus(file: &str) -> String {

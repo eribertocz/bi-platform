@@ -21,7 +21,7 @@ use crate::units::Unit;
 
 impl Canonical for StableId {
     fn canonical_value(&self) -> C {
-        C::text(self.as_str())
+        C::Id(self.as_str().to_owned())
     }
 }
 impl Canonical for SourceHandle {
