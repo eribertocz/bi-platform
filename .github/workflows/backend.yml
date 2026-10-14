@@ -32,7 +32,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  check:
+  check-backend:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
