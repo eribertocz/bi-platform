@@ -1,11 +1,9 @@
 name: frontend
 
 on:
-  pull_request:
-    paths:
-      - 'frontend/**'
-      - 'docs/api/openapi.json'
-      - '.github/workflows/frontend.yml'
+  # Sin filtro de rutas: es un check obligatorio de main (protección de
+  # rama) y debe reportar en todo PR, también los que no tocan frontend/.
+  pull_request: {}
   push:
     branches: [main]
     paths:

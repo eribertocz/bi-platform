@@ -1,13 +1,9 @@
 name: backend
 
 on:
-  pull_request:
-    paths:
-      - "backend/**"
-      - "docker/oidc/**"
-      - "compose.oidc.yaml"
-      - "docs/api/openapi.json"
-      - ".github/workflows/backend.yml"
+  # Sin filtro de rutas: es un check obligatorio de main (protección de
+  # rama) y debe reportar en todo PR, también los que no tocan backend/.
+  pull_request: {}
   push:
     branches: [main]
     paths:

@@ -1,7 +1,8 @@
 name: oidc
 on:
-  pull_request:
-    paths: ['backend/**', 'frontend/**', 'docker/oidc/**', 'compose.oidc.yaml', '.github/workflows/oidc.yml']
+  # Sin filtro de rutas: browser es un check obligatorio de main
+  # (protección de rama) y debe reportar en todo PR.
+  pull_request: {}
   push:
     branches: [main]
     paths: ['backend/**', 'frontend/**', 'docker/oidc/**', 'compose.oidc.yaml', '.github/workflows/oidc.yml']
