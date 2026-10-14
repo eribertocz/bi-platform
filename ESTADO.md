@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-*Escrito por Claude el 2026-10-13, con datos verificados contra el repositorio y GitHub en ese momento, en la rama del corte a roles. Codex lo actualiza al cerrar cada Issue (AGENTS.md); si algo aquí contradice el código o GitHub, mandan ellos.*
+*Inventario del corte escrito por Claude el 2026-10-13. Actualizado por Codex el mismo día tras verificar y cerrar #46 y hacer el triaje de G2 sobre `main` aa35372 y GitHub. Codex lo actualiza al cerrar cada Issue (AGENTS.md); si algo aquí contradice el código o GitHub, mandan ellos.*
 
 ## Cómo llegamos aquí
 
@@ -10,7 +10,9 @@ El 2026-10-13 el propietario decidió pasar a **roles estrictos** (`DECISIONES.m
 
 ## Gate actual: G2 — Semántica y seguridad
 
-Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con medidas y *drill* autorizado; criterio de cierre, «usuarios con permisos distintos no cruzan filas, caché ni exportación». G0 y G1 están cerrados (app, CI, datos a gráfico). **Milestone G2 en GitHub: 21 Issues cerrados, 10 abiertos** (los 10 de la tabla de abajo). Falta sobre todo la demo de aislamiento entre dos usuarios y migrar las rutas antiguas al punto único (Issue #69).
+Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con medidas y *drill* autorizado; criterio de cierre, «usuarios con permisos distintos no cruzan filas, caché ni exportación». G0 y G1 están cerrados (app, CI, datos a gráfico). **Milestone G2 en GitHub: 23 Issues cerrados, 10 abiertos**: 9 pendientes originales tras cerrar #46, más #113, primera entrega acotada de #71. El conteo de cerrados incluye #114 como **no planificado**, retirado tras consultar al propietario: exigir calidad y arquitectura del código en cada especificación sin crear nuevas reglas; no se entregó funcionalidad ni se integró documentación por ese Issue. Falta sobre todo la demo de aislamiento entre dos usuarios y migrar las rutas antiguas al punto único (Issue #69). No hay PR abiertos en el momento del triaje.
+
+**Orden registrado por Codex:** [#71 → #69 → #84 → #48 → #75 → #77 → #100 → #101 → #103](https://github.com/eribertocz/bi-platform/issues/71#issuecomment-6158911952). #71 se intercala: correcciones de frontera y roles antes de ampliar #69; productores restantes y lectura del auditor después. La investigación del riesgo RSS de #101 y la comprobación de las leyes prioritarias rigen desde ahora. **Claude puede tomar [#113](https://github.com/eribertocz/bi-platform/issues/113)**, especificado con la plantilla y marcado `spec-lista`; los demás paraguas se dividirán en Issues acotados antes de implementarse.
 
 ## Qué existe y funciona
 
@@ -39,11 +41,12 @@ Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con m
 
 | Issue | Qué falta exactamente |
 |---|---|
+| **#113** Frontera de auditoría (primera entrega) | Especificación lista: rechazar JSON duplicado en PostgreSQL, verificar enlaces/hashes posteriores a contenido inválido sin aceptar la historia, y distinguir SQLSTATE 22023 de indisponibilidad; parte de #71 |
 | **#69** Punto único de permisos | Los permisos ya deciden (#90) y la vía `/explain` ya autoriza (#110), pero `/api/v1/queries` sigue sin pasar por ahí, `/api/v1/models` no exige `view`, y falta la demo de dos usuarios con totales distintos |
 | **#48** Adaptador Ossie | Partes 1–3 integradas; falta la parte 4 (exportación CSMIR → Ossie de ida y vuelta) |
 | **#75** Metadatos Ossie en Modelos | El propietario ya validó la pantalla; falta lo mismo que #48 parte 4 |
 | **#77** Funciones de `OSSIE_SQL_2026` | Bloque 1 (texto/números, #92) y fechas (#95) integrados; falta agregados y funciones de ventana |
-| **#71** Auditoría a prueba de manipulación | El encadenamiento existe y se usa (login, vía semántica); Codex dejó recomendaciones pendientes antes de conectar más productores |
+| **#71** Auditoría a prueba de manipulación | El encadenamiento existe y se usa (sesiones, vía semántica explain); recomendaciones de frontera en #113, separación de roles y comprobación de privilegios en otra entrega antes de ampliar ejecución; después, productores restantes, endpoint paginado del auditor y coste por consulta |
 | **#101** Límite de memoria por consulta | ADR 0013 integrada (#111): protege la memoria que gestiona DuckDB. No protege toda la memoria del proceso (RSS); ese aislamiento más fuerte, por procesos del sistema operativo, queda pendiente de decisión |
 | **#84** Auditoría retroactiva de las leyes | Parcial: el gobierno de métricas, datasets y campos (leyes 1, 3 y 8) está integrado (#89); falta auditar el resto del código contra las 13 leyes y mostrar el aviso de métrica obsoleta en pantalla y API |
 | **#100** Caché de modelos compilados | No iniciada (hoy cada petición recompila el proyecto) |
@@ -51,7 +54,7 @@ Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con m
 | **#103** Borradores para la comunidad Ossie | No iniciada; la publica el propietario, nunca los agentes |
 | **#67** Identificadores estables ante renombrado | G4, no iniciada |
 
-**Candidato a cerrar en el primer triaje de Codex:** el **Issue #46** (planificador y SEIR) tiene sus tres criterios cumplidos por el PR #86 (21 casos deterministas, certificado, sin dependencias de motor). No lo cerré yo: verificar y cerrar issues es ahora tarea del arquitecto/verificador.
+**#46 verificado y cerrado por Codex (2026-10-13):** los tres criterios se cumplen en #86 y en `main` aa35372. Corpus de 21 casos: 18 planes/certificados deterministas y 3 rechazos normativos; ramas agregadas antes de alinear; sin dependencias de motor ni SQL. Ejecutadas 74 pruebas (0 fallos, 2 mediciones ignoradas), formato, Clippy y árbol de dependencias; leído el motor/verificador. [Evidencia y comandos](https://github.com/eribertocz/bi-platform/issues/46#issuecomment-6158878048). Los Issues #67 y #102 de la tabla pertenecen a G4 y G5, respectivamente, y no se inician durante G2.
 
 ## Huecos de diseño sin spec ni Issue (hallazgo, no orden de prioridad)
 

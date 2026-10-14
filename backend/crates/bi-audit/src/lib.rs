@@ -180,15 +180,37 @@ pub struct Checkpoint {
     pub hash: [u8; 32],
 }
 
+/// Whether a stored payload is exactly what a well-formed producer writes:
+/// it parses, every field is in range, and it serializes back byte-for-byte
+/// (catches anything that reached storage before this contract, or by a
+/// path this crate never validated).
+fn content_valid(payload: &str) -> bool {
+    serde_json::from_str::<Event>(payload)
+        .is_ok_and(|event| event.canonical_json().as_deref() == Ok(payload))
+}
+
 #[derive(Default)]
 pub struct Verifier {
     checkpoint: Checkpoint,
+    invalid_content_count: u64,
+    first_invalid_content_sequence: Option<u64>,
 }
 
 impl Verifier {
     /// Feed every row in order, starting at sequence 1. Memory stays constant.
+    ///
+    /// Cryptographic integrity (sequence, link, hash) and content validity are
+    /// independent: a row with a well-formed hash chain but invalid content
+    /// (written before this contract, or by a path that skipped validation)
+    /// does **not** stop the chain here. It is counted
+    /// ([`Self::invalid_content_count`]) and the walk continues, so a later
+    /// cryptographic break is still detected and reported with priority over
+    /// an earlier content defect. [`Self::finish`] stays cryptographic-only;
+    /// a caller that must also require valid content checks
+    /// [`Self::invalid_content_count`] after a successful `finish`.
+    ///
     /// # Errors
-    /// Rejects gaps, reordered/injected rows, altered payloads/links and schemas.
+    /// Rejects gaps, reordered/injected rows and altered payloads/links.
     pub fn push(
         &mut self,
         sequence: u64,
@@ -205,19 +227,44 @@ impl Verifier {
         if &event_hash(sequence, previous, payload) != hash {
             return Err(Error::HashMismatch);
         }
-        let event: Event = serde_json::from_str(payload).map_err(|_| Error::InvalidEvent)?;
-        if event.canonical_json()? != payload {
-            return Err(Error::InvalidEvent);
-        }
         self.checkpoint = Checkpoint {
             sequence,
             hash: *hash,
         };
+        if !content_valid(payload) {
+            self.invalid_content_count += 1;
+            self.first_invalid_content_sequence.get_or_insert(sequence);
+        }
         Ok(())
     }
 
+    /// The cryptographic state after every row pushed so far, whether or not
+    /// their content was valid.
+    #[must_use]
+    pub const fn checkpoint(&self) -> Checkpoint {
+        self.checkpoint
+    }
+
+    /// How many pushed rows had invalid content (zero means every row seen
+    /// so far is a well-formed `Event`, not that the whole history is clean:
+    /// a caller must still reach the expected head to know that).
+    #[must_use]
+    pub const fn invalid_content_count(&self) -> u64 {
+        self.invalid_content_count
+    }
+
+    /// The sequence of the first row with invalid content, if any.
+    #[must_use]
+    pub const fn first_invalid_content_sequence(&self) -> Option<u64> {
+        self.first_invalid_content_sequence
+    }
+
     /// # Errors
-    /// Detects deletion of the tail (including truncation of the entire table).
+    /// Detects deletion of the tail (including truncation of the entire
+    /// table). Cryptographic-only: a cryptographically complete chain with
+    /// invalid content still succeeds here; check
+    /// [`Self::invalid_content_count`] separately when content must be valid
+    /// too.
     pub fn finish(self, expected: Checkpoint) -> Result<Checkpoint, Error> {
         if self.checkpoint != expected {
             return Err(Error::HeadMismatch);

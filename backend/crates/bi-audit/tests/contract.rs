@@ -119,20 +119,74 @@ fn framing_prevents_sequence_and_link_substitution() {
 }
 
 #[test]
-fn recomputed_hash_does_not_hide_invalid_or_noncanonical_event() {
+fn a_recomputed_hash_over_invalid_content_advances_the_chain_but_is_counted() {
+    // Cryptographic integrity and content validity are independent: a row
+    // can be exactly what was stored (correct hash) while its content is
+    // not a well-formed Event (written before this contract existed, or by
+    // a path that skipped validation). The chain still advances past it, so
+    // a later cryptographic break is not hidden behind an earlier defect.
     for payload in [
         "{}".to_owned(),
         format!(" {}", event("event-1").canonical_json().unwrap()),
     ] {
+        let mut verifier = Verifier::default();
+        let hash = event_hash(1, &GENESIS, &payload);
+        assert_eq!(verifier.push(1, &payload, &GENESIS, &hash), Ok(()));
+        assert_eq!(verifier.invalid_content_count(), 1);
+        assert_eq!(verifier.first_invalid_content_sequence(), Some(1));
+        assert_eq!(verifier.checkpoint(), Checkpoint { sequence: 1, hash });
         assert_eq!(
-            Verifier::default().push(1, &payload, &GENESIS, &event_hash(1, &GENESIS, &payload)),
-            Err(Error::InvalidEvent)
+            verifier.finish(Checkpoint { sequence: 1, hash }),
+            Ok(Checkpoint { sequence: 1, hash })
         );
     }
     assert_eq!(
         Verifier::default().finish(Checkpoint::default()),
         Ok(Checkpoint::default())
     );
+}
+
+#[test]
+fn a_later_cryptographic_break_is_detected_past_earlier_invalid_content() {
+    let canonical = event("event-1").canonical_json().unwrap();
+    let mut rows = Vec::new();
+    let mut previous = GENESIS;
+    // #1 valid content, #2 invalid content (correct hash), #3 valid content
+    // linked to #2.
+    for payload in [canonical.clone(), "{}".to_owned(), canonical] {
+        let sequence = u64::try_from(rows.len()).unwrap() + 1;
+        let hash = event_hash(sequence, &previous, &payload);
+        rows.push((sequence, payload, previous, hash));
+        previous = hash;
+    }
+    let mut verifier = Verifier::default();
+    for (sequence, payload, previous, hash) in &rows {
+        assert_eq!(verifier.push(*sequence, payload, previous, hash), Ok(()));
+    }
+    assert_eq!(verifier.invalid_content_count(), 1);
+    assert_eq!(verifier.first_invalid_content_sequence(), Some(2));
+    let head = Checkpoint {
+        sequence: 3,
+        hash: previous,
+    };
+    assert_eq!(verifier.finish(head), Ok(head));
+
+    // Now corrupt #3's stored bytes without recomputing its hash: the chain
+    // breaks exactly there, independently of #2's content defect.
+    let mut tampered = rows.clone();
+    tampered[2].1 = "{}".to_owned();
+    let mut verifier = Verifier::default();
+    let mut stopped_at = None;
+    for (sequence, payload, previous, hash) in &tampered {
+        if verifier.push(*sequence, payload, previous, hash).is_err() {
+            stopped_at = Some(*sequence);
+            break;
+        }
+    }
+    assert_eq!(stopped_at, Some(3));
+    // The content defect at #2 was still recorded before the break at #3.
+    assert_eq!(verifier.invalid_content_count(), 1);
+    assert_eq!(verifier.first_invalid_content_sequence(), Some(2));
 }
 
 proptest! {

@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 const USAGE: &str =
     "usage: bi-server            run the API server (configured by BI_* environment variables)
        bi-server openapi [PATH]  write the OpenAPI document to PATH or stdout
-       bi-server audit-verify [SEQUENCE HASH]  verify audit history (BI_DATABASE_URL; read-only)";
+       bi-server audit-verify [SEQUENCE HASH]  verify audit history (BI_DATABASE_URL; read-only)
+       bi-server audit-verify --report [SEQUENCE HASH]  bounded JSON report instead of strict pass/fail";
 
 fn main() -> ExitCode {
     install_tls_provider();
@@ -25,9 +26,18 @@ fn main() -> ExitCode {
     {
         [] => run(),
         ["audit-verify"] => verify_audit(None),
+        ["audit-verify", "--report"] => report_audit(None),
         ["audit-verify", sequence, hash] => {
             if let Some(checkpoint) = parse_checkpoint(sequence, hash) {
                 verify_audit(Some(checkpoint))
+            } else {
+                eprintln!("audit_invalid_checkpoint");
+                ExitCode::from(2)
+            }
+        }
+        ["audit-verify", "--report", sequence, hash] => {
+            if let Some(checkpoint) = parse_checkpoint(sequence, hash) {
+                report_audit(Some(checkpoint))
             } else {
                 eprintln!("audit_invalid_checkpoint");
                 ExitCode::from(2)
@@ -71,31 +81,93 @@ fn parse_checkpoint(sequence: &str, hash: &str) -> Option<bi_audit::Checkpoint> 
     })
 }
 
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(text, "{byte:02x}").expect("String writing cannot fail");
+    }
+    text
+}
+
+/// Opens the read-only audit pool from `BI_DATABASE_URL`, or exits with the
+/// configuration error every audit CLI mode shares.
+fn audit_pool() -> Result<sqlx::PgPool, ExitCode> {
+    let url = std::env::var("BI_DATABASE_URL").map_err(|_| {
+        eprintln!("audit_database_url_required");
+        ExitCode::from(2)
+    })?;
+    db::lazy_pool(&url).map_err(|_| {
+        eprintln!("audit_invalid_database_url");
+        ExitCode::from(2)
+    })
+}
+
 #[tokio::main]
 async fn verify_audit(trusted: Option<bi_audit::Checkpoint>) -> ExitCode {
-    let Ok(url) = std::env::var("BI_DATABASE_URL") else {
-        eprintln!("audit_database_url_required");
-        return ExitCode::from(2);
-    };
-    let Ok(pool) = db::lazy_pool(&url) else {
-        eprintln!("audit_invalid_database_url");
-        return ExitCode::from(2);
+    let pool = match audit_pool() {
+        Ok(pool) => pool,
+        Err(code) => return code,
     };
     // No server, migration, engine or telemetry side effects in this command.
     let verified = bi_server::audit::verify(&pool, trusted).await;
     pool.close().await;
     match verified {
         Ok(checkpoint) => {
-            use std::fmt::Write as _;
-            let mut hash = String::with_capacity(64);
-            for byte in checkpoint.hash {
-                write!(hash, "{byte:02x}").expect("String writing cannot fail");
-            }
             println!(
                 "{}",
-                serde_json::json!({"schema_version": 1, "sequence": checkpoint.sequence.to_string(), "hash": hash})
+                serde_json::json!({
+                    "schema_version": 1,
+                    "sequence": checkpoint.sequence.to_string(),
+                    "hash": hex(&checkpoint.hash),
+                })
             );
             ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--report`: unlike `verify_audit`, a cryptographic or content defect is
+/// printed, not a bare failure. Only a storage/connection error prints
+/// nothing but a safe code, so no partial report is ever shown as complete.
+#[tokio::main]
+async fn report_audit(trusted: Option<bi_audit::Checkpoint>) -> ExitCode {
+    let pool = match audit_pool() {
+        Ok(pool) => pool,
+        Err(code) => return code,
+    };
+    let outcome = bi_server::audit::report(&pool, trusted).await;
+    pool.close().await;
+    match outcome {
+        Ok(report) => {
+            let fully_valid = report.chain_valid && report.content_valid == Some(true);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "chain_valid": report.chain_valid,
+                    "content_valid": report.content_valid,
+                    "invalid_content_count": report.invalid_content_count.to_string(),
+                    "first_invalid_content_sequence":
+                        report.first_invalid_content_sequence.map(|s| s.to_string()),
+                    "integrity_error": report.integrity_error.map(|e| e.to_string()),
+                    "first_integrity_error_sequence":
+                        report.first_integrity_error_sequence.map(|s| s.to_string()),
+                    "checkpoint": report.checkpoint.map(|c| serde_json::json!({
+                        "sequence": c.sequence.to_string(),
+                        "hash": hex(&c.hash),
+                    })),
+                })
+            );
+            if fully_valid {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
         }
         Err(error) => {
             eprintln!("{error}");
