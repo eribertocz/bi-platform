@@ -13,21 +13,21 @@
 
 | Capacidad (módulo) | Referentes principales | Qué destaca, a verificar con la fuente al implementar |
 |---|---|---|
-| Capa semántica y métricas (M04) | Looker (LookML), Cube, dbt Semantic Layer, Power BI (TMDL/DAX), Rill, Apache Ossie | Métricas reutilizables, joins declarados, medidas derivadas y de ventana, comparación de periodos, formatos |
-| Seguridad por filas y campos (M11) | Power BI (RLS/OLS), Looker (access filters), Cube (security context), Rill (policies) | Atributos de usuario en las políticas; probar "ver como" otro usuario |
-| Aceleración de consultas (M05) | Cube (pre-aggregations), Power BI (aggregations, Direct Lake), Looker (aggregate awareness), Tableau (extracts/Hyper), Rill (rollups) | Enrutado automático a tablas pre-agregadas cuando la consulta encaja |
 | Fuentes e ingesta (M01) | Rill, Metabase, Superset, Power Query, Airbyte | Conexiones en vivo frente a importación; asistentes de conexión |
 | Modelos y transformación (M02/M03) | dbt, SQLMesh, Rill models | DAG, incrementales, particiones, pruebas de datos, entornos dev/prod |
+| Capa semántica y métricas (M04) | Looker (LookML), Cube, dbt Semantic Layer, Power BI (TMDL/DAX), Rill, Apache Ossie | Métricas reutilizables, joins declarados, medidas derivadas y de ventana, comparación de periodos, formatos |
+| Aceleración de consultas (M05) | Cube (pre-aggregations), Power BI (aggregations, Direct Lake), Looker (aggregate awareness), Tableau (extracts/Hyper), Rill (rollups) | Enrutado automático a tablas pre-agregadas cuando la consulta encaja |
 | Exploración (M06) | Tableau, Power BI, Rill Explore, Metabase (preguntas, X-rays), Omni, Sigma | Exploración sin código; leaderboards; drill; estado en la URL |
 | Tabla dinámica (M07) | Power BI (matriz), Excel, Sigma, Tableau | Pivot con subtotales y totales exactos sobre grandes volúmenes |
 | Dashboards (M08) | Power BI, Tableau, Grafana, Superset, Metabase, Rill Canvas, Evidence | Composición, filtros cruzados, variables, temas, dashboards como código |
 | Visualización (M09) | Tableau (VizQL), Power BI, ECharts, Vega-Lite, Observable Plot | Gramática de gráficos y elección automática del gráfico adecuado |
+| Seguridad por filas y campos (M11) | Power BI (RLS/OLS), Looker (access filters), Cube (security context), Rill (policies) | Atributos de usuario en las políticas; probar "ver como" otro usuario |
 | APIs y embebido (M12) | Cube (REST, GraphQL, SQL API), Metabase/Superset/Power BI embedded, Rill APIs | SQL sobre métricas, embebido seguro con tokens firmados |
 | Alertas e informes (M14) | Grafana (alerting), Metabase, Power BI, Rill | Condiciones sobre métricas, re-notificación, recuperación, envío programado |
 | Observabilidad (M15) | Grafana, CubeStore metrics, Lightdash | Métricas por fase, colas, diagnóstico por consulta |
 | IA y BI conversacional (M16) | Power BI Copilot, Tableau Pulse/Agent, Looker + Gemini, ThoughtSpot, Rill (AI, MCP), Metabase Metabot, Omni | Preguntas sobre la capa semántica (no SQL libre), instrucciones por modelo, MCP |
 | Diseño y UX (M17) | Tableau, Power BI, Linear/Vercel (patrones de producto), Rill | Rapidez percibida, teclado, accesibilidad |
-| BI como código y cuadernos | Evidence, Hex, Observable, Rill | Markdown con consultas, revisión en Git, vistas previas por rama |
+| BI como código y cuadernos (sin módulo numerado) | Evidence, Hex, Observable, Rill | Markdown con consultas, revisión en Git, vistas previas por rama |
 
 ## Fichas por herramienta
 - [Rill](rill.md): primera ficha (v0.90.5).

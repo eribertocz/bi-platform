@@ -5,14 +5,9 @@ name: dependencies
 # package. Runs when dependencies change and daily, because advisories are
 # published without any change on our side.
 on:
-  pull_request:
-    paths:
-      - "backend/Cargo.lock"
-      - "backend/**/Cargo.toml"
-      - "backend/deny.toml"
-      - "frontend/package.json"
-      - "frontend/package-lock.json"
-      - ".github/workflows/dependencies.yml"
+  # Sin filtro de rutas: cargo-deny y npm-audit son checks obligatorios de
+  # main (protección de rama) y deben reportar en todo PR.
+  pull_request: {}
   push:
     branches: [main]
     paths:

@@ -1,16 +1,9 @@
 name: e2e
 
 on:
-  pull_request:
-    paths:
-      - 'backend/**'
-      - 'frontend/**'
-      - 'docs/api/openapi.json'
-      - 'compose.yaml'
-      - 'examples/models-project/**'
-      - 'Dockerfile'
-      - '.dockerignore'
-      - '.github/workflows/e2e.yml'
+  # Sin filtro de rutas: health es un check obligatorio de main
+  # (protección de rama) y debe reportar en todo PR.
+  pull_request: {}
   push:
     branches: [main]
     paths:

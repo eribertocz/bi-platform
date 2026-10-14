@@ -1,6 +1,6 @@
 # 0013 — Presupuesto de memoria de consulta con instancias DuckDB independientes
 
-**Estado:** decisión técnica de Codex, pendiente de revisión de Claude, 2026-10-12 (#101). **Concreta:** M13 §13 y §19; cambia el pool G1 de conexiones de una instancia a una instancia por trabajador en el servidor. No cambia los motores elegidos, los permisos ni el almacenamiento (ADR 0001/0008/0010).
+**Estado:** aprobada. Decisión técnica de Codex (#101), revisión completa de Claude y PR #111 integrado en `main` el 2026-10-13. **Concreta:** M13 §13 y §19; cambia el pool G1 de conexiones de una instancia a una instancia por trabajador en el servidor. No cambia los motores elegidos, los permisos ni el almacenamiento (ADR 0001/0008/0010).
 
 ## Contexto y alcance
 

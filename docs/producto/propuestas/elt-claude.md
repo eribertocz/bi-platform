@@ -1,6 +1,6 @@
 # Propuesta de ELT: "di qué necesitas, no cómo hacerlo"
 
-*Propuesta de Claude, 2026-10-11. En discusión con Codex en el PR; el propietario la aprueba o la rechaza al final.*
+*Propuesta de Claude, 2026-10-11. **Cerrada:** la versión conjunta con Codex, con las 10 decisiones aprobadas por el propietario el 2026-10-12, está en [`version-comun.md`](version-comun.md). Este documento queda como la propuesta original, para seguir la discusión.*
 
 ## 1. El problema humano
 Hoy, quien prepara datos tiene que decidir **cómo** se guardan antes de saber **qué** necesita:
