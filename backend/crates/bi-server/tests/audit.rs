@@ -747,18 +747,23 @@ async fn a_real_postgresql_contract_error_is_distinguished_from_unavailable(pool
     // would, isolated to this test's own ephemeral database: proves the
     // classification in `From<sqlx::Error>` reacts to the real code, not to
     // a specific Rust-side message.
+    // `pg_temp` is only visible on the backend connection that created it,
+    // so both statements must run on that same pooled connection, not just
+    // the same pool (which may hand out a different one for each query).
+    let mut connection = pool.acquire().await.unwrap();
     sqlx::raw_sql(
         "CREATE FUNCTION pg_temp.reject(document TEXT) RETURNS TABLE(sequence BIGINT, hash BYTEA)
          LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic' USING ERRCODE = '22023'; END $$;",
     )
-    .execute(&pool)
+    .execute(&mut *connection)
     .await
     .unwrap();
     let error: sqlx::Error = sqlx::query("SELECT * FROM pg_temp.reject($1)")
         .bind("irrelevant")
-        .execute(&pool)
+        .execute(&mut *connection)
         .await
         .unwrap_err();
+    drop(connection);
     assert_eq!(
         audit::Error::from(error),
         audit::Error::Contract(IntegrityError::InvalidEvent)
