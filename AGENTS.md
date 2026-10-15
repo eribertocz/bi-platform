@@ -1,6 +1,6 @@
 # AGENTS.md — reglas de trabajo (Claude Code y Codex)
 
-**Roles estrictos, desde el 2026-10-13** (`DECISIONES.md`). Cada uno trabaja en su propia ventana de VS Code, con su propio clon. Coordinación únicamente con Git, GitHub Issues, Pull Requests, comentarios y GitHub Actions. No crear scripts ni protocolos propios de coordinación de agentes.
+**Roles estrictos, desde el 2026-10-13; coordinación actualizada por el propietario el 2026-10-15** (`DECISIONES.md`). Cada uno trabaja en su propia ventana de VS Code, con su propio clon. Claude avisa y lanza a Codex para revisar entregas o correcciones con CI en verde; cuando no hay un Issue `spec-lista` disponible para tomar, le pide el siguiente. La especificación, las preguntas, las respuestas y los veredictos quedan en GitHub; la activación remite al Issue o PR correspondiente. Coordinación únicamente con Git, GitHub Issues, Pull Requests, comentarios y GitHub Actions. No crear scripts ni protocolos propios de coordinación de agentes.
 
 - **Codex — arquitecto, orquestador y verificador.** Decide **qué** se construye y en qué orden, crea y prioriza los Issues con su especificación, verifica cada PR ejecutando sus pruebas contra los criterios del Issue, y **fusiona**. No escribe código de producto (solo prototipos mínimos para decidir un diseño, o pruebas de aceptación).
 - **Claude — implementador.** Escribe el código de los Issues que Codex especificó y ejecuta todo lo operativo de Git (ramas, commits, *push*, PR, conflictos, *tags* cuando Codex lo indique). Nunca fusiona su propio trabajo.
@@ -20,7 +20,7 @@ Antes de empezar cualquier sesión: leer este archivo, `ESTADO.md` (qué existe,
 
 El propietario define el objetivo. A partir de ahí:
 
-1. **Codex especifica.** Un Issue, dentro del milestone del gate (G0, G1, G2…; no se inicia un gate sin cerrar el anterior en `ROADMAP_GLOBAL.md`), con: objetivo acotado a un PR que se revise de una sentada; criterios de aceptación medibles, incluidos los casos que deben **rechazarse**; datos o casos de prueba cuando aplique. Nunca se asigna trabajo sin esa especificación.
+1. **Codex especifica.** Presenta las especificaciones al propietario **en tandas**, manteniendo un Issue por entrega acotada a un PR que se revise de una sentada. Cada Issue pertenece al milestone del gate (G0, G1, G2…; no se inicia un gate sin cerrar el anterior en `ROADMAP_GLOBAL.md`) y contiene criterios de aceptación medibles, incluidos los casos que deben **rechazarse**, y datos o casos de prueba cuando aplique. Nunca se asigna trabajo sin esa especificación.
 2. **Claude implementa.** Solo Issues con criterios claros. Si encuentra un caso no contemplado, **se detiene**, comenta la duda en el Issue y espera: no decide comportamiento de producto por su cuenta. Un Issue a la vez: completarlo, verificarlo en local y abrir el PR antes de tomar el siguiente. Toca solo lo que el Issue cubre, nada de refactors de paso en archivos ajenos a la tarea. Tras tres intentos fallidos de verificación en la misma tarea, escala en el Issue en vez de seguir iterando a ciegas.
 3. **Codex verifica.** Ejecutando las pruebas del área y comprobando cada criterio del Issue — no releyendo el código buscando estilo, salvo en seguridad, exactitud de datos, motor/concurrencia y contrato de la API, donde además **lee el cambio**: un fallo ahí es caro. Veredicto como comentario del PR, porque los dos usamos la misma cuenta de GitHub y no existe "Approve": **Aprobado**, o cambios concretos con reproducción. Al verificar una corrección, solo se mira lo pedido.
 4. **Codex fusiona** (squash) con CI en verde y su propia aprobación; antes, comprueba PR dependientes (`gh pr list --base <rama>`) y los reapunta. Borra la rama.
@@ -32,6 +32,10 @@ El propietario define el objetivo. A partir de ahí:
 ## Protocolo de comunicación
 
 - La especificación vive en el **cuerpo del Issue**; las dudas de alcance, como **comentario** del Issue; la entrega, en la **descripción del PR** (qué se hizo, cómo se verificó: pruebas corridas, comandos, resultados). Cero decisiones fuera de la especificación en el PR.
+- Al entregar o corregir un PR con CI en verde, **Claude avisa y lanza a Codex por su cuenta para que lo revise**, indicando el PR y el commit entregado. Si no hay un Issue `spec-lista` disponible para tomar, le pide el siguiente a Codex en GitHub. Se mantiene un Issue a la vez.
+- **Dudas técnicas:** Codex las pregunta a Claude en el Issue o PR y Claude responde directamente allí. Al propietario solo se escalan decisiones de producto y desacuerdos.
+- **Consultas al propietario:** Codex escribe las preguntas en el Issue o PR y Claude se las avisa. Una pregunta pendiente no detiene toda la revisión: Codex da veredicto sobre lo demás y deja aparte únicamente lo que depende de esa respuesta; esa parte conserva su estado pendiente hasta recibirla.
+- **Respuestas del propietario:** cualquier respuesta que Codex reciba en su ventana se registra en el Issue o PR correspondiente **en ese mismo turno**, con la pregunta o decisión a la que responde y su alcance.
 - Correcciones por rechazo: *push* a la misma rama (el PR se actualiza solo) y responder en el hilo qué cambió respecto al fallo reportado.
 - Ninguna decisión de proyecto se resuelve en un chat efímero: todo acuerdo va al repositorio (Issue, PR o `DECISIONES.md`).
 - Si el criterio técnico de Claude difiere de la especificación de Codex, la especificación manda. Un desacuerdo real se escala al propietario, nunca se resuelve a escondidas entre agentes.
@@ -43,7 +47,8 @@ El propietario define el objetivo. A partir de ahí:
 ## Flujo Git
 
 - Rama desde `main` actualizado por Issue: `claude/<n>-descripcion` o `codex/<n>-descripcion`. Nunca *push* directo ni *force-push* a `main`.
-- Commits con la identidad del agente configurada en su propio clon, nunca la del propietario.
+- **Commits de los clones:** llevan la identidad del agente configurada en su propio clon, nunca la del propietario.
+- **Commit de fusión:** lo crea GitHub mediante squash con la cuenta compartida y Claude como coautor (`Co-authored-by: Claude Code <claude-code@bi-platform.invalid>`). Es el flujo ordinario acordado por el propietario; Codex sigue verificando y fusionando con su aprobación y CI en verde.
 - Un PR pequeño por Issue, con `Closes #n`.
 - Conflictos de un PR contra `main`: los resuelve Claude.
 - *Hotfix* (fallo crítico en producción): rama `hotfix/<descripcion>`, PR marcado como *hotfix*, verificación express de Codex limitada a los criterios del fallo, sin bloquear el resto del trabajo en curso.

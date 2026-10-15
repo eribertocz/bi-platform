@@ -39,9 +39,23 @@
 
 - **Codex** es arquitecto, orquestador y verificador: crea y prioriza los Issues con sus criterios de aceptación, puede escribir pruebas de aceptación (nunca código de producto), verifica cada PR ejecutando sus pruebas, y **integra** (el verificador cierra, el autor nunca fusiona su propio trabajo).
 - **Claude** es el implementador: solo trabaja issues que Codex especificó, escribe el código y ejecuta todo lo operativo de Git.
-- Cada uno en su propia ventana de VS Code; ya no hay lanzamiento de uno por el otro.
+- Cada uno en su propia ventana de VS Code y con su propio clon. La regla inicial de no lanzarse entre agentes se actualiza por la decisión del propietario del 2026-10-15 recogida a continuación.
 - El trabajo en vuelo antes del corte se cerró con las reglas anteriores (PR #104–#111); este corte empieza con `main` en ese punto.
 - **No sustituye ninguna ley, ADR ni decisión de producto anterior:** es una decisión de proceso, sobre cómo se trabaja, no sobre qué se construye.
+
+## Decisión: activación por Claude, consultas y autoría de fusiones (2026-10-15)
+
+**Aprobada expresamente por el propietario.** Se mantienen los roles estrictos: Codex especifica, verifica y fusiona; Claude implementa y ejecuta lo operativo de Git en su clon, sin fusionar su propio trabajo. Esta decisión actualiza la coordinación y la interpretación de la identidad del commit de fusión; no cambia el alcance de producto, las especificaciones aceptadas ni los criterios de calidad.
+
+- **Aviso y activación:** al entregar o corregir un PR con CI en verde, Claude avisa y lanza a Codex por su cuenta para que lo revise. Cuando no hay un Issue `spec-lista` disponible para tomar, le pide el siguiente. Toda la coordinación sigue en GitHub: la activación remite al Issue o PR donde están la entrega, las preguntas y los veredictos. Se mantienen los clones separados, un Issue a la vez y la prohibición de crear scripts o protocolos propios de coordinación.
+- **Dudas técnicas:** Codex se las pregunta a Claude en GitHub y Claude responde directamente. Al propietario solo le llegan decisiones de producto y desacuerdos.
+- **Revisión mientras se consulta:** una pregunta al propietario no detiene la revisión completa. Codex da veredicto sobre todo lo demás y deja aparte únicamente lo que depende de la respuesta, sin dar por resuelta esa parte mientras esté pendiente.
+- **Preguntas al propietario:** se escriben en el Issue o PR correspondiente y Claude se las avisa.
+- **Respuestas en la ventana de Codex:** toda respuesta del propietario recibida allí se registra en el Issue o PR correspondiente en ese mismo turno, con su contexto y alcance.
+- **Especificaciones:** Codex las presenta al propietario en tandas; cada entrega conserva su Issue acotado, sus criterios medibles y su PR, conforme a `AGENTS.md`.
+- **Identidad:** la regla de usar la identidad del agente, nunca la del propietario, aplica a los commits creados en los clones. El commit de fusión squash lo crea GitHub con la cuenta compartida y Claude como coautor. Este es el flujo ordinario de fusión; la aprobación de Codex y el CI verde siguen siendo requisitos. La autorización puntual aplicada al PR #119 queda concretada por esta regla general para las fusiones siguientes.
+
+Se actualiza `AGENTS.md` para reflejar esta decisión y se sustituye la prohibición inicial de que Claude active a Codex. La activación no sustituye el registro de la coordinación en GitHub.
 
 ## Decisión: documentación limpia antes del corte (2026-10-13)
 
