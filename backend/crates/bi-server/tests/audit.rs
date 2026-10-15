@@ -317,6 +317,93 @@ async fn out_of_order_insert_detected(pool: PgPool) {
     tamper(&pool, "INSERT INTO bi_meta.audit_events(sequence, payload, previous_hash, hash) SELECT 5, replace(payload, 'event-1', 'injected'), previous_hash, hash FROM bi_meta.audit_events WHERE sequence = 1").await;
 }
 
+/// Applies only migrations through 0003 (the original `audit_append`,
+/// before 0005 adds the unique-keys check), so a history can be written
+/// under the old contract and then upgraded.
+async fn migrate_through_0003(pool: &PgPool) {
+    sqlx::raw_sql(include_str!("../migrations/0001_metadata_schema.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0002_sessions.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0003_audit_chain.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn migration_0005_preserves_an_existing_history_written_under_0003(pool: PgPool) {
+    migrate_through_0003(&pool).await;
+    let before = append(&pool, "event-1").await;
+    let before2 = append(&pool, "event-2").await;
+    let before_payloads: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM bi_meta.audit_events ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    // Upgrade to 0005 over that existing history.
+    sqlx::raw_sql(include_str!(
+        "../migrations/0005_audit_reject_ambiguous_json.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after_payloads: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM bi_meta.audit_events ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before_payloads, after_payloads, "bytes must be untouched");
+    // The chain (hashes, checkpoint) still verifies exactly as before.
+    assert_eq!(audit::verify(&pool, None).await.unwrap(), before2);
+    assert_eq!(audit::verify(&pool, Some(before)).await.unwrap(), before2);
+    // New writes after the upgrade are rejected by the new contract (0005).
+    let error = sqlx::query("SELECT * FROM bi_meta.audit_append($1)")
+        .bind(r#"{"a":1,"a":2}"#)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_database_error().unwrap().code().unwrap(), "22023");
+    // ...and a well-formed one still extends the same chain.
+    let after = append(&pool, "event-3").await;
+    assert_eq!(audit::verify(&pool, None).await.unwrap(), after);
+}
+
+/// `Event::validate` never bounds `occurred_at`'s year, but the stored SQL
+/// contract (0005) requires an exactly-4-digit year. This is the one field
+/// where a Rust-valid `Event` can still be rejected by PostgreSQL with a
+/// real SQLSTATE 22023, reaching it through the normal `append_observed`
+/// path rather than a hand-crafted raw `audit_append` call.
+#[sqlx::test(migrations = false)]
+async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(pool: PgPool) {
+    use chrono::Datelike as _;
+    use opentelemetry::metrics::MeterProvider as _;
+    MIGRATOR.run(&pool).await.unwrap();
+    let mut out_of_range = event("event-year-10000");
+    out_of_range.occurred_at = out_of_range.occurred_at.with_year(10_000).unwrap();
+    assert!(
+        out_of_range.validate().is_ok(),
+        "Rust validation does not bound occurred_at's year"
+    );
+    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
+    let metrics = audit::AuditMetrics::new(&provider.meter("audit-test"));
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = audit::append_observed(&mut transaction, &out_of_range, &metrics).await;
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        outcome,
+        Err(audit::Error::Contract(IntegrityError::InvalidEvent))
+    );
+    assert_eq!(
+        audit::verify(&pool, None).await.unwrap(),
+        Checkpoint::default()
+    );
+}
+
 #[sqlx::test(migrations = false)]
 async fn external_checkpoint_detects_owner_rewinding_head_and_tail(pool: PgPool) {
     MIGRATOR.run(&pool).await.unwrap();
