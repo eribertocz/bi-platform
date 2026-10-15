@@ -192,13 +192,19 @@ pub async fn verify(pool: &PgPool, trusted: Option<Checkpoint>) -> Result<Checkp
     }
     // A cryptographic break found while reaching here would already have
     // returned above (`?` on `push`), taking priority over any earlier
-    // content defect. Only once the chain is cryptographically complete do
-    // we also require every row's content to be a well-formed `Event`:
-    // this call stays strict, unlike `report`.
-    if verifier.invalid_content_count() > 0 {
+    // content defect. `finish` must run first: it is what detects a
+    // truncated tail (the stored head moved past where the walk stopped,
+    // or was never reached), which is a cryptographic break and must take
+    // priority over a content defect seen earlier in the walk, exactly
+    // like a break found mid-walk already does via `push`. Only once the
+    // chain is cryptographically complete, head included, do we also
+    // require every row's content to be a well-formed `Event`: this call
+    // stays strict, unlike `report`.
+    let invalid_content_count = verifier.invalid_content_count();
+    let result = verifier.finish(head).map_err(Error::Contract)?;
+    if invalid_content_count > 0 {
         return Err(Error::Contract(bi_audit::Error::InvalidEvent));
     }
-    let result = verifier.finish(head).map_err(Error::Contract)?;
     transaction.commit().await?;
     Ok(result)
 }

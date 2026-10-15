@@ -693,6 +693,30 @@ async fn a_later_hash_break_takes_priority_over_an_earlier_content_defect(pool: 
     ));
 }
 
+/// Deleting the tail after an earlier content defect must surface as a
+/// cryptographic break (`HeadMismatch`), not be masked by that defect: a
+/// truncated tail is the more serious failure and takes priority, exactly
+/// like a mid-walk hash break already does.
+#[sqlx::test(migrations = false)]
+async fn tail_integrity_failure_precedes_content_failure(pool: PgPool) {
+    history_with_invalid_content_at_two(&pool).await;
+    sqlx::raw_sql(
+        "ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable; \
+         DELETE FROM bi_meta.audit_events WHERE sequence = 3;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = audit::report(&pool, None).await.unwrap();
+    assert_eq!(report.integrity_error, Some(IntegrityError::HeadMismatch));
+    assert_eq!(report.content_valid, Some(false));
+    assert_eq!(report.checkpoint, None);
+    assert_eq!(
+        audit::verify(&pool, None).await,
+        Err(audit::Error::Contract(IntegrityError::HeadMismatch))
+    );
+}
+
 #[sqlx::test(migrations = false)]
 async fn report_scans_past_a_page_boundary_without_losing_the_first_defect(pool: PgPool) {
     MIGRATOR.run(&pool).await.unwrap();
@@ -773,10 +797,10 @@ async fn a_real_postgresql_contract_error_is_distinguished_from_unavailable(pool
     assert_eq!(audit::Error::from(closed), audit::Error::StoreUnavailable);
 }
 
-#[sqlx::test(migrations = false)]
-async fn cli_report_mode_prints_json_and_exit_code_matches_validity(pool: PgPool) {
+/// Runs `bi-server audit-verify --report` against `pool` and returns
+/// `(exit_code, parsed_stdout_or_none, stderr)`.
+async fn run_report_cli(pool: &PgPool) -> (Option<i32>, Option<serde_json::Value>, Vec<u8>) {
     use sqlx::ConnectOptions as _;
-    let checkpoints = history_with_invalid_content_at_two(&pool).await;
     let url = pool
         .connect_options()
         .as_ref()
@@ -792,12 +816,17 @@ async fn cli_report_mode_prints_json_and_exit_code_matches_validity(pool: PgPool
     })
     .await
     .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "invalid content still exits 1"
-    );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report =
+        (!output.stdout.is_empty()).then(|| serde_json::from_slice(&output.stdout).unwrap());
+    (output.status.code(), report, output.stderr)
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_prints_json_and_exit_code_matches_validity(pool: PgPool) {
+    let checkpoints = history_with_invalid_content_at_two(&pool).await;
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(1), "invalid content still exits 1");
+    let report = report.unwrap();
     assert_eq!(report["chain_valid"], true);
     assert_eq!(report["content_valid"], false);
     assert_eq!(report["invalid_content_count"], "1");
@@ -806,5 +835,98 @@ async fn cli_report_mode_prints_json_and_exit_code_matches_validity(pool: PgPool
         report["checkpoint"]["sequence"],
         checkpoints[2].sequence.to_string()
     );
-    assert_eq!(output.stderr.as_slice(), b"");
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_exits_zero_on_a_fully_valid_history(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    let checkpoint = append(&pool, "event-1").await;
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(0));
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], true);
+    assert_eq!(report["content_valid"], true);
+    assert_eq!(report["invalid_content_count"], "0");
+    assert_eq!(
+        report["checkpoint"]["sequence"],
+        checkpoint.sequence.to_string()
+    );
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_reports_a_broken_tail_with_no_prior_content_defect(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    append(&pool, "event-1").await;
+    append(&pool, "event-2").await;
+    sqlx::raw_sql(
+        "ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable; \
+         DELETE FROM bi_meta.audit_events WHERE sequence = 2;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(1));
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], false);
+    // No content defect was ever seen in the remainder that was walked.
+    assert_eq!(report["content_valid"], serde_json::Value::Null);
+    assert_eq!(report["integrity_error"], "audit_head_mismatch");
+    assert_eq!(report["checkpoint"], serde_json::Value::Null);
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_reports_both_an_earlier_content_defect_and_a_later_break(pool: PgPool) {
+    history_with_invalid_content_at_two(&pool).await;
+    sqlx::raw_sql(
+        "ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable; \
+         UPDATE bi_meta.audit_events SET payload = replace(payload, 'event-3', 'tampered') WHERE sequence = 3;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(1));
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], false);
+    assert_eq!(report["content_valid"], false);
+    assert_eq!(report["invalid_content_count"], "1");
+    assert_eq!(report["first_invalid_content_sequence"], "2");
+    assert_eq!(report["integrity_error"], "audit_hash_mismatch");
+    assert_eq!(report["first_integrity_error_sequence"], "3");
+    assert_eq!(report["checkpoint"], serde_json::Value::Null);
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[test]
+fn cli_report_mode_rejects_malformed_checkpoint_arguments_without_touching_storage() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bi-server"))
+        .args(["audit-verify", "--report", "not-a-number", "short"])
+        .env_remove("BI_DATABASE_URL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.stdout.as_slice(), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "audit_invalid_checkpoint"
+    );
+}
+
+#[test]
+fn cli_report_mode_prints_no_partial_report_when_storage_is_unavailable() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bi-server"))
+        .args(["audit-verify", "--report"])
+        .env("BI_DATABASE_URL", "postgres://bi:bi@127.0.0.1:1/bi")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout.as_slice(), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "audit_store_unavailable"
+    );
 }
