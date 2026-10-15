@@ -382,17 +382,48 @@ async fn migration_0005_preserves_an_existing_history_written_under_0003(pool: P
 async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(pool: PgPool) {
     use chrono::Datelike as _;
     use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::data::{
+        AggregatedMetrics, MetricData, ResourceMetrics, ScopeMetrics,
+    };
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing::instrument::WithSubscriber as _;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
     MIGRATOR.run(&pool).await.unwrap();
     let mut out_of_range = event("event-year-10000");
+    out_of_range.request_id = "request-year-10000".into();
     out_of_range.occurred_at = out_of_range.occurred_at.with_year(10_000).unwrap();
     assert!(
         out_of_range.validate().is_ok(),
         "Rust validation does not bound occurred_at's year"
     );
-    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder().build();
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter.clone())
+        .build();
     let metrics = audit::AuditMetrics::new(&provider.meter("audit-test"));
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let output = Capture(bytes.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || output.clone())
+        .finish();
     let mut transaction = pool.begin().await.unwrap();
-    let outcome = audit::append_observed(&mut transaction, &out_of_range, &metrics).await;
+    let outcome = audit::append_observed(&mut transaction, &out_of_range, &metrics)
+        .with_subscriber(subscriber)
+        .await;
     transaction.rollback().await.unwrap();
     assert_eq!(
         outcome,
@@ -402,6 +433,36 @@ async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(po
         audit::verify(&pool, None).await.unwrap(),
         Checkpoint::default()
     );
+
+    // The attempt was recorded with result=invalid, not silently dropped.
+    provider.force_flush().unwrap();
+    let exports = exporter.get_finished_metrics().unwrap();
+    let mut invalid_attempts = 0_u64;
+    for metric in exports
+        .iter()
+        .flat_map(ResourceMetrics::scope_metrics)
+        .flat_map(ScopeMetrics::metrics)
+    {
+        if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
+            for point in sum.data_points() {
+                if point
+                    .attributes()
+                    .any(|kv| kv.key.as_str() == "result" && kv.value.to_string() == "invalid")
+                {
+                    invalid_attempts += point.value();
+                }
+            }
+        }
+    }
+    assert_eq!(invalid_attempts, 1);
+
+    // The log carries the real request_id and a stable code, never the raw
+    // SQL error message, error code or rejected payload.
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("request-year-10000"));
+    assert!(logs.contains("audit_invalid_event"));
+    assert!(!logs.contains("22023"));
+    assert!(!logs.to_lowercase().contains("postgres"));
 }
 
 #[sqlx::test(migrations = false)]
