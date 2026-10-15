@@ -27,10 +27,23 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// PostgreSQL's `data_exception` class for a value rejected by the function
+/// itself (`RAISE ... USING ERRCODE = '22023'`): a contract violation the
+/// caller wrote, not an availability problem. Every other code (connection,
+/// timeout, serialization, internal errors...) stays `StoreUnavailable`.
+const INVALID_EVENT_SQLSTATE: &str = "22023";
+
 impl From<sqlx::Error> for Error {
-    fn from(_: sqlx::Error) -> Self {
+    fn from(error: sqlx::Error) -> Self {
         // Database errors can contain payloads or credentials; do not log them.
-        Self::StoreUnavailable
+        match &error {
+            sqlx::Error::Database(database)
+                if database.code().as_deref() == Some(INVALID_EVENT_SQLSTATE) =>
+            {
+                Self::Contract(bi_audit::Error::InvalidEvent)
+            }
+            _ => Self::StoreUnavailable,
+        }
     }
 }
 
@@ -177,7 +190,146 @@ pub async fn verify(pool: &PgPool, trusted: Option<Checkpoint>) -> Result<Checkp
     if !trusted_seen {
         return Err(Error::Contract(bi_audit::Error::HeadMismatch));
     }
+    // A cryptographic break found while reaching here would already have
+    // returned above (`?` on `push`), taking priority over any earlier
+    // content defect. `finish` must run first: it is what detects a
+    // truncated tail (the stored head moved past where the walk stopped,
+    // or was never reached), which is a cryptographic break and must take
+    // priority over a content defect seen earlier in the walk, exactly
+    // like a break found mid-walk already does via `push`. Only once the
+    // chain is cryptographically complete, head included, do we also
+    // require every row's content to be a well-formed `Event`: this call
+    // stays strict, unlike `report`.
+    let invalid_content_count = verifier.invalid_content_count();
     let result = verifier.finish(head).map_err(Error::Contract)?;
+    if invalid_content_count > 0 {
+        return Err(Error::Contract(bi_audit::Error::InvalidEvent));
+    }
     transaction.commit().await?;
     Ok(result)
+}
+
+/// A point-in-time account of the audit history, bounded in memory
+/// (paginated, no accumulated history or per-row diagnostics): how far the
+/// hash chain stayed intact, whether every row along the way was a
+/// well-formed `Event`, and where the first defect of each kind was.
+///
+/// Unlike [`verify`], a cryptographic or content defect is reported, not an
+/// error: only a genuine storage or connection failure returns `Err`, since
+/// then nothing could be printed as a trustworthy report at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Report {
+    /// `false` only for a cryptographic break (sequence, link, hash or an
+    /// external checkpoint mismatch); independent of content validity.
+    pub chain_valid: bool,
+    /// `None` when the walk stopped (a cryptographic break) before every
+    /// row up to the head was seen, and no content defect was found yet: a
+    /// defect may exist in the unseen remainder. `Some(false)` as soon as
+    /// one is found, whether or not the walk later stops. `Some(true)` only
+    /// once the entire history was walked with none.
+    pub content_valid: Option<bool>,
+    pub invalid_content_count: u64,
+    pub first_invalid_content_sequence: Option<u64>,
+    /// The first cryptographic break, if the chain did not stay intact to
+    /// its expected head (and external checkpoint, if one was given).
+    pub integrity_error: Option<bi_audit::Error>,
+    pub first_integrity_error_sequence: Option<u64>,
+    /// Only `Some` once the chain was followed, cryptographically intact,
+    /// all the way to the expected head (and external checkpoint, if any).
+    pub checkpoint: Option<Checkpoint>,
+}
+
+/// Same scan as [`verify`], reported instead of enforced.
+/// # Errors
+/// Storage or connection failures only; a cryptographic or content defect
+/// is a field of the returned [`Report`], not an `Err`.
+pub async fn report(pool: &PgPool, trusted: Option<Checkpoint>) -> Result<Report, Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await?;
+    let head = sqlx::query("SELECT sequence, hash FROM bi_meta.audit_head WHERE singleton")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let head = checkpoint(&head)?;
+    let mut verifier = Verifier::default();
+    let mut cursor = 0_i64;
+    let mut trusted_seen = trusted.is_none() || trusted == Some(Checkpoint::default());
+    let mut integrity_error = None;
+    let mut first_integrity_error_sequence = None;
+    'scan: loop {
+        let rows = sqlx::query("SELECT sequence, payload, previous_hash, hash FROM bi_meta.audit_events WHERE sequence > $1 ORDER BY sequence LIMIT 256")
+            .bind(cursor).fetch_all(&mut *transaction).await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let sequence: i64 = row.try_get("sequence")?;
+            let previous: Vec<u8> = row.try_get("previous_hash")?;
+            let hash: Vec<u8> = row.try_get("hash")?;
+            let payload: String = row.try_get("payload")?;
+            // Our own storage producing a value outside its declared shape
+            // (never attacker-controlled JSON) is itself an integrity
+            // defect, at the same severity as a broken link.
+            let (Ok(current_sequence), Ok(previous), Ok(hash)) = (
+                u64::try_from(sequence),
+                <[u8; 32]>::try_from(previous),
+                <[u8; 32]>::try_from(hash),
+            ) else {
+                integrity_error = Some(bi_audit::Error::HashMismatch);
+                first_integrity_error_sequence = u64::try_from(sequence).ok();
+                break 'scan;
+            };
+            if let Err(error) = verifier.push(current_sequence, &payload, &previous, &hash) {
+                integrity_error = Some(error);
+                first_integrity_error_sequence = Some(current_sequence);
+                break 'scan;
+            }
+            if trusted.is_some_and(|t| t.sequence == current_sequence) {
+                if trusted
+                    != Some(Checkpoint {
+                        sequence: current_sequence,
+                        hash,
+                    })
+                {
+                    integrity_error = Some(bi_audit::Error::HeadMismatch);
+                    first_integrity_error_sequence = Some(current_sequence);
+                    break 'scan;
+                }
+                trusted_seen = true;
+            }
+            cursor = sequence;
+        }
+    }
+    transaction.commit().await?;
+
+    let mut checkpoint_out = None;
+    if integrity_error.is_none() {
+        if !trusted_seen {
+            integrity_error = Some(bi_audit::Error::HeadMismatch);
+        } else if verifier.checkpoint() == head {
+            checkpoint_out = Some(head);
+        } else {
+            integrity_error = Some(bi_audit::Error::HeadMismatch);
+            first_integrity_error_sequence = Some(head.sequence);
+        }
+    }
+
+    let invalid_content_count = verifier.invalid_content_count();
+    let content_valid = if invalid_content_count > 0 {
+        Some(false)
+    } else if checkpoint_out.is_some() {
+        Some(true)
+    } else {
+        None
+    };
+    Ok(Report {
+        chain_valid: integrity_error.is_none(),
+        content_valid,
+        invalid_content_count,
+        first_invalid_content_sequence: verifier.first_invalid_content_sequence(),
+        integrity_error,
+        first_integrity_error_sequence,
+        checkpoint: checkpoint_out,
+    })
 }

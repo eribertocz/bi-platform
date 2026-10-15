@@ -317,6 +317,231 @@ async fn out_of_order_insert_detected(pool: PgPool) {
     tamper(&pool, "INSERT INTO bi_meta.audit_events(sequence, payload, previous_hash, hash) SELECT 5, replace(payload, 'event-1', 'injected'), previous_hash, hash FROM bi_meta.audit_events WHERE sequence = 1").await;
 }
 
+/// Applies only migrations through 0003 (the original `audit_append`,
+/// before 0005 adds the unique-keys check), so a history can be written
+/// under the old contract and then upgraded.
+async fn migrate_through_0003(pool: &PgPool) {
+    sqlx::raw_sql(include_str!("../migrations/0001_metadata_schema.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0002_sessions.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0003_audit_chain.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = false)]
+async fn migration_0005_preserves_an_existing_history_written_under_0003(pool: PgPool) {
+    migrate_through_0003(&pool).await;
+    let before = append(&pool, "event-1").await;
+    let before2 = append(&pool, "event-2").await;
+    let before_payloads: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM bi_meta.audit_events ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    // Upgrade to 0005 over that existing history.
+    sqlx::raw_sql(include_str!(
+        "../migrations/0005_audit_reject_ambiguous_json.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let after_payloads: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM bi_meta.audit_events ORDER BY sequence")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before_payloads, after_payloads, "bytes must be untouched");
+    // The chain (hashes, checkpoint) still verifies exactly as before.
+    assert_eq!(audit::verify(&pool, None).await.unwrap(), before2);
+    assert_eq!(audit::verify(&pool, Some(before)).await.unwrap(), before2);
+    // New writes after the upgrade are rejected by the new contract (0005).
+    let error = sqlx::query("SELECT * FROM bi_meta.audit_append($1)")
+        .bind(r#"{"a":1,"a":2}"#)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_database_error().unwrap().code().unwrap(), "22023");
+    // ...and a well-formed one still extends the same chain.
+    let after = append(&pool, "event-3").await;
+    assert_eq!(audit::verify(&pool, None).await.unwrap(), after);
+}
+
+/// Runs one `append_observed` in a rolled-back transaction, capturing the
+/// exported OpenTelemetry metrics and every log line it emits.
+async fn observe_append(
+    pool: &PgPool,
+    event: &Event,
+) -> (
+    Result<Checkpoint, audit::Error>,
+    Vec<opentelemetry_sdk::metrics::data::ResourceMetrics>,
+    String,
+) {
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing::instrument::WithSubscriber as _;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter.clone())
+        .build();
+    let metrics = audit::AuditMetrics::new(&provider.meter("audit-test"));
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let output = Capture(bytes.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || output.clone())
+        .finish();
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = audit::append_observed(&mut transaction, event, &metrics)
+        .with_subscriber(subscriber)
+        .await;
+    transaction.rollback().await.unwrap();
+    provider.force_flush().unwrap();
+    let exports = exporter.get_finished_metrics().unwrap();
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    (outcome, exports, logs)
+}
+
+/// Exactly one attempt and one duration sample, both named, both labelled
+/// only `result=invalid`; any other metric or label fails the test.
+fn assert_one_invalid_attempt(exports: &[opentelemetry_sdk::metrics::data::ResourceMetrics]) {
+    use opentelemetry_sdk::metrics::data::{
+        AggregatedMetrics, HistogramDataPoint, MetricData, ResourceMetrics, ScopeMetrics,
+    };
+    let only_invalid = |labels: Vec<&opentelemetry::KeyValue>| {
+        assert_eq!(labels.len(), 1, "labels stay bounded to one");
+        assert_eq!(labels[0].key.as_str(), "result");
+        assert_eq!(labels[0].value.to_string(), "invalid");
+    };
+    let mut attempts = 0_u64;
+    let mut durations = 0_u64;
+    for metric in exports
+        .iter()
+        .flat_map(ResourceMetrics::scope_metrics)
+        .flat_map(ScopeMetrics::metrics)
+    {
+        match metric.data() {
+            AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                assert_eq!(metric.name(), "bi.audit.append.attempts");
+                for point in sum.data_points() {
+                    only_invalid(point.attributes().collect());
+                    attempts += point.value();
+                }
+            }
+            AggregatedMetrics::F64(MetricData::Histogram(histogram)) => {
+                assert_eq!(metric.name(), "bi.audit.append.duration");
+                assert_eq!(metric.unit(), "s");
+                for point in histogram.data_points() {
+                    only_invalid(point.attributes().collect());
+                }
+                durations += histogram
+                    .data_points()
+                    .map(HistogramDataPoint::count)
+                    .sum::<u64>();
+            }
+            other => panic!("unexpected metric: {other:?}"),
+        }
+    }
+    assert_eq!(attempts, 1, "bi.audit.append.attempts");
+    assert_eq!(durations, 1, "bi.audit.append.duration");
+}
+
+/// `Event::validate` never bounds `occurred_at`'s year, but the stored SQL
+/// contract (0005) requires an exactly-4-digit year. This is the one field
+/// where a Rust-valid `Event` can still be rejected by PostgreSQL with a
+/// real SQLSTATE 22023, reaching it through the normal `append_observed`
+/// path rather than a hand-crafted raw `audit_append` call.
+#[sqlx::test(migrations = false)]
+async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(pool: PgPool) {
+    use chrono::Datelike as _;
+    MIGRATOR.run(&pool).await.unwrap();
+    let mut out_of_range = event("event-year-10000");
+    out_of_range.request_id = "request-year-10000".into();
+    out_of_range.resource_id = "payload-marker-year".into();
+    out_of_range.occurred_at = out_of_range.occurred_at.with_year(10_000).unwrap();
+    assert!(
+        out_of_range.validate().is_ok(),
+        "Rust validation does not bound occurred_at's year"
+    );
+    let (outcome, exports, logs) = observe_append(&pool, &out_of_range).await;
+    assert_eq!(
+        outcome,
+        Err(audit::Error::Contract(IntegrityError::InvalidEvent))
+    );
+    assert_eq!(
+        audit::verify(&pool, None).await.unwrap(),
+        Checkpoint::default()
+    );
+    assert_one_invalid_attempt(&exports);
+    assert!(logs.contains("request-year-10000"));
+    assert!(logs.contains("audit_invalid_event"));
+    assert!(!logs.contains("payload-marker-year"));
+    assert!(!logs.contains("event-year-10000"));
+}
+
+/// PostgreSQL's own message for the real 22023 is literally the safe code,
+/// so the case above cannot tell a leaked SQL message from the redacted one.
+/// Here a fixture function, only in this test's isolated database, raises
+/// 22023 with a sensitive decoy message: the log must keep the `request_id`
+/// and the stable code and never carry the decoy or the payload.
+#[sqlx::test(migrations = false)]
+async fn a_22023_message_from_postgresql_never_reaches_the_logs(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE OR REPLACE FUNCTION bi_meta.audit_append(document TEXT)
+         RETURNS TABLE(sequence BIGINT, hash BYTEA)
+         LANGUAGE plpgsql AS $$ BEGIN
+             RAISE EXCEPTION 'decoy-leak secret@example.test password=hunter2'
+                 USING ERRCODE = '22023';
+         END $$;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut decoy = event("event-decoy");
+    decoy.request_id = "request-decoy".into();
+    decoy.resource_id = "payload-marker-decoy".into();
+    let (outcome, exports, logs) = observe_append(&pool, &decoy).await;
+    assert_eq!(
+        outcome,
+        Err(audit::Error::Contract(IntegrityError::InvalidEvent))
+    );
+    assert_one_invalid_attempt(&exports);
+    assert!(logs.contains("request-decoy"));
+    assert!(logs.contains("audit_invalid_event"));
+    for leaked in [
+        "decoy-leak",
+        "secret@example.test",
+        "hunter2",
+        "password",
+        "22023",
+        "payload-marker-decoy",
+        "event-decoy",
+    ] {
+        assert!(!logs.contains(leaked), "{leaked} leaked into: {logs}");
+    }
+}
+
 #[sqlx::test(migrations = false)]
 async fn external_checkpoint_detects_owner_rewinding_head_and_tail(pool: PgPool) {
     MIGRATOR.run(&pool).await.unwrap();
@@ -500,4 +725,433 @@ async fn audit_write_cost_baseline(pool: PgPool) {
         baseline[49], baseline[94], audited[49], audited[94]
     );
     assert_eq!(audit::verify(&pool, None).await.unwrap().sequence, 110);
+}
+
+// ---- #113: reject ambiguous JSON before storage; separate chain from content ----
+
+/// `canonical` with a duplicate top-level key inserted right after `{`.
+fn duplicate_top_level(canonical: &str, key_spelling: &str, value: &str) -> String {
+    format!(
+        "{{\"{key_spelling}\":{value},{}",
+        &canonical[1..canonical.len()]
+    )
+}
+
+#[sqlx::test(migrations = false)]
+async fn duplicate_keys_anywhere_are_rejected_without_writing(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    let canonical = event("event-1").canonical_json().unwrap();
+    let attempts = vec![
+        // Same value, same spelling.
+        duplicate_top_level(&canonical, "actor_id", "\"actor-1\""),
+        // Different value: the ambiguity is the point, not which one wins.
+        duplicate_top_level(&canonical, "actor_id", "\"actor-2\""),
+        // Same key, decoded through a Unicode escape to the same name.
+        duplicate_top_level(&canonical, "actor\\u005fid", "\"actor-9\""),
+        // Duplicate inside metadata_redacted (nested object).
+        canonical.replacen(
+            "\"metadata_redacted\":{\"query_shape\":null}",
+            "\"metadata_redacted\":{\"query_shape\":null,\"query_shape\":{\"dimensions\":1,\"measures\":1,\"filters\":1,\"limit\":1}}",
+            1,
+        ),
+    ];
+    for attempt in attempts {
+        let error = sqlx::query("SELECT * FROM bi_meta.audit_append($1)")
+            .bind(&attempt)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().unwrap(),
+            "22023",
+            "{attempt}"
+        );
+    }
+    // Duplicate filters inside query_shape itself.
+    let shaped = {
+        let mut query = event("event-2");
+        query.metadata_redacted.query_shape = Some(bi_audit::QueryShape {
+            dimensions: 1,
+            measures: 1,
+            filters: 1,
+            limit: 1,
+        });
+        query.canonical_json().unwrap()
+    };
+    let doubled_filters = shaped.replacen("\"filters\":1,", "\"filters\":1,\"filters\":2,", 1);
+    let error = sqlx::query("SELECT * FROM bi_meta.audit_append($1)")
+        .bind(&doubled_filters)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_database_error().unwrap().code().unwrap(), "22023");
+    // Nothing above ever advanced the head: still genesis, and the next
+    // write gets sequence 1, not something higher.
+    assert_eq!(
+        audit::verify(&pool, None).await.unwrap(),
+        Checkpoint::default()
+    );
+    assert_eq!(append(&pool, "event-ok").await.sequence, 1);
+}
+
+#[sqlx::test(migrations = false)]
+async fn malformed_wrong_shape_and_oversized_json_are_rejected_without_leaking(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    let mut secret_event = event("event-1");
+    secret_event.request_id = "password=secret@example.test".into();
+    let secret_metadata = {
+        let mut value = serde_json::to_value(event("event-2")).unwrap();
+        value["metadata_redacted"]["sql"] = serde_json::json!("SELECT secret@example.test");
+        value.to_string()
+    };
+    let attempts = vec![
+        "{".to_owned(),    // truncated
+        "[]".to_owned(),   // valid JSON, not an object
+        "null".to_owned(), // valid JSON, not an object
+        "{}".to_owned(),   // object, missing every key
+        "a".repeat(8193),  // over the byte limit
+        secret_metadata,
+    ];
+    for attempt in attempts {
+        let error = sqlx::query("SELECT * FROM bi_meta.audit_append($1)")
+            .bind(&attempt)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            !message.contains("secret@example.test") && !message.contains("password"),
+            "{message}"
+        );
+    }
+    assert_eq!(
+        audit::verify(&pool, None).await.unwrap(),
+        Checkpoint::default()
+    );
+}
+
+/// Appends three rows directly, bypassing Rust validation for #2 so its
+/// stored content is not a well-formed `Event`, but its hash is correctly
+/// computed over exactly what is stored — the scenario `Verifier` must tell
+/// apart from a broken link.
+async fn history_with_invalid_content_at_two(pool: &PgPool) -> [Checkpoint; 3] {
+    MIGRATOR.run(pool).await.unwrap();
+    let mut checkpoints = [Checkpoint::default(); 3];
+    let payloads = [
+        event("event-1").canonical_json().unwrap(),
+        format!(" {}", event("event-2").canonical_json().unwrap()), // non-canonical: a leading space
+        event("event-3").canonical_json().unwrap(),
+    ];
+    let mut previous = bi_audit::GENESIS;
+    for (index, payload) in payloads.iter().enumerate() {
+        let sequence = i64::try_from(index).unwrap() + 1;
+        let hash = bi_audit::event_hash(sequence.cast_unsigned(), &previous, payload);
+        sqlx::query(
+            "INSERT INTO bi_meta.audit_events(sequence, payload, previous_hash, hash) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(sequence)
+        .bind(payload)
+        .bind(previous.as_slice())
+        .bind(hash.as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE bi_meta.audit_head SET sequence = $1, hash = $2 WHERE singleton")
+            .bind(sequence)
+            .bind(hash.as_slice())
+            .execute(pool)
+            .await
+            .unwrap();
+        checkpoints[index] = Checkpoint {
+            sequence: sequence.cast_unsigned(),
+            hash,
+        };
+        previous = hash;
+    }
+    checkpoints
+}
+
+#[sqlx::test(migrations = false)]
+async fn report_separates_an_intact_chain_from_invalid_content_within_it(pool: PgPool) {
+    let checkpoints = history_with_invalid_content_at_two(&pool).await;
+    let report = audit::report(&pool, None).await.unwrap();
+    assert!(report.chain_valid);
+    assert_eq!(report.content_valid, Some(false));
+    assert_eq!(report.invalid_content_count, 1);
+    assert_eq!(report.first_invalid_content_sequence, Some(2));
+    assert!(report.integrity_error.is_none());
+    assert_eq!(report.checkpoint, Some(checkpoints[2]));
+    // The strict API, in contrast, must refuse this history outright.
+    assert_eq!(
+        audit::verify(&pool, None).await,
+        Err(audit::Error::Contract(IntegrityError::InvalidEvent))
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_later_hash_break_takes_priority_over_an_earlier_content_defect(pool: PgPool) {
+    let pool_clone = pool.clone();
+    history_with_invalid_content_at_two(&pool_clone).await;
+    // Alter #3's stored bytes without recomputing its hash.
+    sqlx::query("ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE bi_meta.audit_events SET payload = replace(payload, 'event-3', 'tampered') WHERE sequence = 3",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = audit::report(&pool, None).await.unwrap();
+    assert!(!report.chain_valid);
+    assert_eq!(report.integrity_error, Some(IntegrityError::HashMismatch));
+    assert_eq!(report.first_integrity_error_sequence, Some(3));
+    // #2's defect, found before the break, is not erased by it.
+    assert_eq!(report.content_valid, Some(false));
+    assert_eq!(report.invalid_content_count, 1);
+    assert_eq!(report.first_invalid_content_sequence, Some(2));
+    assert_eq!(report.checkpoint, None);
+    assert!(matches!(
+        audit::verify(&pool, None).await,
+        Err(audit::Error::Contract(IntegrityError::HashMismatch))
+    ));
+}
+
+/// Deleting the tail after an earlier content defect must surface as a
+/// cryptographic break (`HeadMismatch`), not be masked by that defect: a
+/// truncated tail is the more serious failure and takes priority, exactly
+/// like a mid-walk hash break already does.
+#[sqlx::test(migrations = false)]
+async fn tail_integrity_failure_precedes_content_failure(pool: PgPool) {
+    history_with_invalid_content_at_two(&pool).await;
+    sqlx::raw_sql(
+        "ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable; \
+         DELETE FROM bi_meta.audit_events WHERE sequence = 3;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = audit::report(&pool, None).await.unwrap();
+    assert_eq!(report.integrity_error, Some(IntegrityError::HeadMismatch));
+    assert_eq!(report.content_valid, Some(false));
+    assert_eq!(report.checkpoint, None);
+    assert_eq!(
+        audit::verify(&pool, None).await,
+        Err(audit::Error::Contract(IntegrityError::HeadMismatch))
+    );
+}
+
+#[sqlx::test(migrations = false)]
+async fn report_scans_past_a_page_boundary_without_losing_the_first_defect(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    // A page is 256 rows; put invalid content on both sides of that boundary.
+    for id in 1..=300 {
+        if id == 100 || id == 300 {
+            let payload = format!(
+                " {}",
+                event(&format!("event-{id}")).canonical_json().unwrap()
+            );
+            let previous = sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT hash FROM bi_meta.audit_head WHERE singleton",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let previous: [u8; 32] = previous.try_into().unwrap();
+            let sequence = i64::from(id);
+            let hash = bi_audit::event_hash(sequence.cast_unsigned(), &previous, &payload);
+            sqlx::query(
+                "INSERT INTO bi_meta.audit_events(sequence, payload, previous_hash, hash) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(sequence)
+            .bind(&payload)
+            .bind(previous.as_slice())
+            .bind(hash.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE bi_meta.audit_head SET sequence = $1, hash = $2 WHERE singleton")
+                .bind(sequence)
+                .bind(hash.as_slice())
+                .execute(&pool)
+                .await
+                .unwrap();
+        } else {
+            append(&pool, &format!("event-{id}")).await;
+        }
+    }
+    let report = audit::report(&pool, None).await.unwrap();
+    assert!(report.chain_valid);
+    assert_eq!(report.content_valid, Some(false));
+    assert_eq!(report.invalid_content_count, 2);
+    assert_eq!(report.first_invalid_content_sequence, Some(100));
+    assert_eq!(report.checkpoint.map(|c| c.sequence), Some(300));
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_real_postgresql_contract_error_is_distinguished_from_unavailable(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    // A fixture function that raises the same SQLSTATE PostgreSQL itself
+    // would, isolated to this test's own ephemeral database: proves the
+    // classification in `From<sqlx::Error>` reacts to the real code, not to
+    // a specific Rust-side message.
+    // `pg_temp` is only visible on the backend connection that created it,
+    // so both statements must run on that same pooled connection, not just
+    // the same pool (which may hand out a different one for each query).
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::raw_sql(
+        "CREATE FUNCTION pg_temp.reject(document TEXT) RETURNS TABLE(sequence BIGINT, hash BYTEA)
+         LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic' USING ERRCODE = '22023'; END $$;",
+    )
+    .execute(&mut *connection)
+    .await
+    .unwrap();
+    let error: sqlx::Error = sqlx::query("SELECT * FROM pg_temp.reject($1)")
+        .bind("irrelevant")
+        .execute(&mut *connection)
+        .await
+        .unwrap_err();
+    drop(connection);
+    assert_eq!(
+        audit::Error::from(error),
+        audit::Error::Contract(IntegrityError::InvalidEvent)
+    );
+    pool.close().await;
+    let closed: sqlx::Error = sqlx::query("SELECT 1").execute(&pool).await.unwrap_err();
+    assert_eq!(audit::Error::from(closed), audit::Error::StoreUnavailable);
+}
+
+/// Runs `bi-server audit-verify --report` against `pool` and returns
+/// `(exit_code, parsed_stdout_or_none, stderr)`.
+async fn run_report_cli(pool: &PgPool) -> (Option<i32>, Option<serde_json::Value>, Vec<u8>) {
+    use sqlx::ConnectOptions as _;
+    let url = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .to_url_lossy()
+        .to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_bi-server"))
+            .args(["audit-verify", "--report"])
+            .env("BI_DATABASE_URL", url)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let report =
+        (!output.stdout.is_empty()).then(|| serde_json::from_slice(&output.stdout).unwrap());
+    (output.status.code(), report, output.stderr)
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_prints_json_and_exit_code_matches_validity(pool: PgPool) {
+    let checkpoints = history_with_invalid_content_at_two(&pool).await;
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(1), "invalid content still exits 1");
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], true);
+    assert_eq!(report["content_valid"], false);
+    assert_eq!(report["invalid_content_count"], "1");
+    assert_eq!(report["first_invalid_content_sequence"], "2");
+    assert_eq!(
+        report["checkpoint"]["sequence"],
+        checkpoints[2].sequence.to_string()
+    );
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_exits_zero_on_a_fully_valid_history(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    let checkpoint = append(&pool, "event-1").await;
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(0));
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], true);
+    assert_eq!(report["content_valid"], true);
+    assert_eq!(report["invalid_content_count"], "0");
+    assert_eq!(
+        report["checkpoint"]["sequence"],
+        checkpoint.sequence.to_string()
+    );
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_reports_a_broken_tail_with_no_prior_content_defect(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    append(&pool, "event-1").await;
+    append(&pool, "event-2").await;
+    sqlx::raw_sql(
+        "ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable; \
+         DELETE FROM bi_meta.audit_events WHERE sequence = 2;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(1));
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], false);
+    // No content defect was ever seen in the remainder that was walked.
+    assert_eq!(report["content_valid"], serde_json::Value::Null);
+    assert_eq!(report["integrity_error"], "audit_head_mismatch");
+    assert_eq!(report["checkpoint"], serde_json::Value::Null);
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_report_mode_reports_both_an_earlier_content_defect_and_a_later_break(pool: PgPool) {
+    history_with_invalid_content_at_two(&pool).await;
+    sqlx::raw_sql(
+        "ALTER TABLE bi_meta.audit_events DISABLE TRIGGER audit_immutable; \
+         UPDATE bi_meta.audit_events SET payload = replace(payload, 'event-3', 'tampered') WHERE sequence = 3;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (code, report, stderr) = run_report_cli(&pool).await;
+    assert_eq!(code, Some(1));
+    let report = report.unwrap();
+    assert_eq!(report["chain_valid"], false);
+    assert_eq!(report["content_valid"], false);
+    assert_eq!(report["invalid_content_count"], "1");
+    assert_eq!(report["first_invalid_content_sequence"], "2");
+    assert_eq!(report["integrity_error"], "audit_hash_mismatch");
+    assert_eq!(report["first_integrity_error_sequence"], "3");
+    assert_eq!(report["checkpoint"], serde_json::Value::Null);
+    assert_eq!(stderr.as_slice(), b"");
+}
+
+#[test]
+fn cli_report_mode_rejects_malformed_checkpoint_arguments_without_touching_storage() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bi-server"))
+        .args(["audit-verify", "--report", "not-a-number", "short"])
+        .env_remove("BI_DATABASE_URL")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.stdout.as_slice(), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "audit_invalid_checkpoint"
+    );
+}
+
+#[test]
+fn cli_report_mode_prints_no_partial_report_when_storage_is_unavailable() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_bi-server"))
+        .args(["audit-verify", "--report"])
+        .env("BI_DATABASE_URL", "postgres://bi:bi@127.0.0.1:1/bi")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout.as_slice(), b"");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap().trim(),
+        "audit_store_unavailable"
+    );
 }

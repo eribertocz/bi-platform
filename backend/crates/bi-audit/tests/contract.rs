@@ -119,20 +119,74 @@ fn framing_prevents_sequence_and_link_substitution() {
 }
 
 #[test]
-fn recomputed_hash_does_not_hide_invalid_or_noncanonical_event() {
+fn a_recomputed_hash_over_invalid_content_advances_the_chain_but_is_counted() {
+    // Cryptographic integrity and content validity are independent: a row
+    // can be exactly what was stored (correct hash) while its content is
+    // not a well-formed Event (written before this contract existed, or by
+    // a path that skipped validation). The chain still advances past it, so
+    // a later cryptographic break is not hidden behind an earlier defect.
     for payload in [
         "{}".to_owned(),
         format!(" {}", event("event-1").canonical_json().unwrap()),
     ] {
+        let mut verifier = Verifier::default();
+        let hash = event_hash(1, &GENESIS, &payload);
+        assert_eq!(verifier.push(1, &payload, &GENESIS, &hash), Ok(()));
+        assert_eq!(verifier.invalid_content_count(), 1);
+        assert_eq!(verifier.first_invalid_content_sequence(), Some(1));
+        assert_eq!(verifier.checkpoint(), Checkpoint { sequence: 1, hash });
         assert_eq!(
-            Verifier::default().push(1, &payload, &GENESIS, &event_hash(1, &GENESIS, &payload)),
-            Err(Error::InvalidEvent)
+            verifier.finish(Checkpoint { sequence: 1, hash }),
+            Ok(Checkpoint { sequence: 1, hash })
         );
     }
     assert_eq!(
         Verifier::default().finish(Checkpoint::default()),
         Ok(Checkpoint::default())
     );
+}
+
+#[test]
+fn a_later_cryptographic_break_is_detected_past_earlier_invalid_content() {
+    let canonical = event("event-1").canonical_json().unwrap();
+    let mut rows = Vec::new();
+    let mut previous = GENESIS;
+    // #1 valid content, #2 invalid content (correct hash), #3 valid content
+    // linked to #2.
+    for payload in [canonical.clone(), "{}".to_owned(), canonical] {
+        let sequence = u64::try_from(rows.len()).unwrap() + 1;
+        let hash = event_hash(sequence, &previous, &payload);
+        rows.push((sequence, payload, previous, hash));
+        previous = hash;
+    }
+    let mut verifier = Verifier::default();
+    for (sequence, payload, previous, hash) in &rows {
+        assert_eq!(verifier.push(*sequence, payload, previous, hash), Ok(()));
+    }
+    assert_eq!(verifier.invalid_content_count(), 1);
+    assert_eq!(verifier.first_invalid_content_sequence(), Some(2));
+    let head = Checkpoint {
+        sequence: 3,
+        hash: previous,
+    };
+    assert_eq!(verifier.finish(head), Ok(head));
+
+    // Now corrupt #3's stored bytes without recomputing its hash: the chain
+    // breaks exactly there, independently of #2's content defect.
+    let mut tampered = rows.clone();
+    tampered[2].1 = "{}".to_owned();
+    let mut verifier = Verifier::default();
+    let mut stopped_at = None;
+    for (sequence, payload, previous, hash) in &tampered {
+        if verifier.push(*sequence, payload, previous, hash).is_err() {
+            stopped_at = Some(*sequence);
+            break;
+        }
+    }
+    assert_eq!(stopped_at, Some(3));
+    // The content defect at #2 was still recorded before the break at #3.
+    assert_eq!(verifier.invalid_content_count(), 1);
+    assert_eq!(verifier.first_invalid_content_sequence(), Some(2));
 }
 
 proptest! {
@@ -165,6 +219,84 @@ proptest! {
         let row = &rows[0];
         prop_assert_eq!(injected.push(row.0, &row.1, &row.2, &row.3), Ok(()));
         prop_assert!(injected.push(row.0, &row.1, &row.2, &row.3).is_err());
+    }
+
+    /// Generalizes `a_later_cryptographic_break_is_detected_past_earlier_invalid_content`:
+    /// any mix of correctly-hashed-but-invalid-content rows, with a later
+    /// break (altered payload without recomputing its hash, or a deleted
+    /// row simulating tail truncation) at any later position. The break
+    /// must always be detected exactly where it is, and every content
+    /// defect strictly before it must still be counted.
+    #[test]
+    fn content_defects_are_counted_until_a_later_break_stops_the_walk(
+        ids in prop::collection::vec("[a-z][a-z0-9]{0,15}", 2..30),
+        invalid_mask in prop::collection::vec(any::<bool>(), 2..30),
+        break_delta in 1_usize..29,
+        delete_instead_of_alter in any::<bool>(),
+    ) {
+        let len = ids.len();
+        let mut previous = GENESIS;
+        let mut rows: Vec<(u64, String, [u8; 32], [u8; 32])> = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            let sequence = u64::try_from(index).unwrap() + 1;
+            let invalid = invalid_mask.get(index).copied().unwrap_or(false);
+            let payload = if invalid {
+                format!(" {}", event(id).canonical_json().unwrap())
+            } else {
+                event(id).canonical_json().unwrap()
+            };
+            let hash = event_hash(sequence, &previous, &payload);
+            rows.push((sequence, payload, previous, hash));
+            previous = hash;
+        }
+        let expected_invalid_count = u64::try_from(
+            (0..len).filter(|&i| invalid_mask.get(i).copied().unwrap_or(false)).count()
+        ).unwrap();
+        let expected_first_invalid = (0..len)
+            .find(|&i| invalid_mask.get(i).copied().unwrap_or(false))
+            .map(|i| u64::try_from(i).unwrap() + 1);
+
+        // Untampered: the whole chain walks, counting every defect.
+        let head = Checkpoint { sequence: u64::try_from(len).unwrap(), hash: previous };
+        let mut intact = Verifier::default();
+        for (sequence, payload, previous, hash) in &rows {
+            prop_assert_eq!(intact.push(*sequence, payload, previous, hash), Ok(()));
+        }
+        prop_assert_eq!(intact.invalid_content_count(), expected_invalid_count);
+        prop_assert_eq!(intact.first_invalid_content_sequence(), expected_first_invalid);
+        prop_assert_eq!(intact.finish(head), Ok(head));
+
+        // Break strictly after at least one row, at a bounded, in-range offset.
+        let break_at = break_delta % len;
+        let mut tampered = rows.clone();
+        if delete_instead_of_alter {
+            tampered.truncate(break_at);
+        } else {
+            tampered[break_at].1 = format!("tampered-{}", tampered[break_at].1);
+        }
+        let expected_count_before_break = u64::try_from(
+            (0..break_at).filter(|&i| invalid_mask.get(i).copied().unwrap_or(false)).count()
+        ).unwrap();
+        let expected_first_before_break = (0..break_at)
+            .find(|&i| invalid_mask.get(i).copied().unwrap_or(false))
+            .map(|i| u64::try_from(i).unwrap() + 1);
+        let mut broken = Verifier::default();
+        let mut stopped_at = None;
+        for (sequence, payload, previous, hash) in &tampered {
+            if broken.push(*sequence, payload, previous, hash).is_err() {
+                stopped_at = Some(*sequence);
+                break;
+            }
+        }
+        prop_assert_eq!(broken.invalid_content_count(), expected_count_before_break);
+        prop_assert_eq!(broken.first_invalid_content_sequence(), expected_first_before_break);
+        if delete_instead_of_alter {
+            // Truncation only shows up as a missing head, not a mid-walk error.
+            prop_assert_eq!(stopped_at, None);
+            prop_assert_eq!(broken.finish(head), Err(Error::HeadMismatch));
+        } else {
+            prop_assert_eq!(stopped_at, Some(u64::try_from(break_at).unwrap() + 1));
+        }
     }
 
     #[test]
