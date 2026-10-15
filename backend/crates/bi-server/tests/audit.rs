@@ -373,18 +373,17 @@ async fn migration_0005_preserves_an_existing_history_written_under_0003(pool: P
     assert_eq!(audit::verify(&pool, None).await.unwrap(), after);
 }
 
-/// `Event::validate` never bounds `occurred_at`'s year, but the stored SQL
-/// contract (0005) requires an exactly-4-digit year. This is the one field
-/// where a Rust-valid `Event` can still be rejected by PostgreSQL with a
-/// real SQLSTATE 22023, reaching it through the normal `append_observed`
-/// path rather than a hand-crafted raw `audit_append` call.
-#[sqlx::test(migrations = false)]
-async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(pool: PgPool) {
-    use chrono::Datelike as _;
+/// Runs one `append_observed` in a rolled-back transaction, capturing the
+/// exported OpenTelemetry metrics and every log line it emits.
+async fn observe_append(
+    pool: &PgPool,
+    event: &Event,
+) -> (
+    Result<Checkpoint, audit::Error>,
+    Vec<opentelemetry_sdk::metrics::data::ResourceMetrics>,
+    String,
+) {
     use opentelemetry::metrics::MeterProvider as _;
-    use opentelemetry_sdk::metrics::data::{
-        AggregatedMetrics, MetricData, ResourceMetrics, ScopeMetrics,
-    };
     use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
@@ -400,14 +399,6 @@ async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(po
             Ok(())
         }
     }
-    MIGRATOR.run(&pool).await.unwrap();
-    let mut out_of_range = event("event-year-10000");
-    out_of_range.request_id = "request-year-10000".into();
-    out_of_range.occurred_at = out_of_range.occurred_at.with_year(10_000).unwrap();
-    assert!(
-        out_of_range.validate().is_ok(),
-        "Rust validation does not bound occurred_at's year"
-    );
     let exporter = InMemoryMetricExporter::default();
     let provider = SdkMeterProvider::builder()
         .with_periodic_exporter(exporter.clone())
@@ -421,10 +412,78 @@ async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(po
         .with_writer(move || output.clone())
         .finish();
     let mut transaction = pool.begin().await.unwrap();
-    let outcome = audit::append_observed(&mut transaction, &out_of_range, &metrics)
+    let outcome = audit::append_observed(&mut transaction, event, &metrics)
         .with_subscriber(subscriber)
         .await;
     transaction.rollback().await.unwrap();
+    provider.force_flush().unwrap();
+    let exports = exporter.get_finished_metrics().unwrap();
+    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    (outcome, exports, logs)
+}
+
+/// Exactly one attempt and one duration sample, both named, both labelled
+/// only `result=invalid`; any other metric or label fails the test.
+fn assert_one_invalid_attempt(exports: &[opentelemetry_sdk::metrics::data::ResourceMetrics]) {
+    use opentelemetry_sdk::metrics::data::{
+        AggregatedMetrics, HistogramDataPoint, MetricData, ResourceMetrics, ScopeMetrics,
+    };
+    let only_invalid = |labels: Vec<&opentelemetry::KeyValue>| {
+        assert_eq!(labels.len(), 1, "labels stay bounded to one");
+        assert_eq!(labels[0].key.as_str(), "result");
+        assert_eq!(labels[0].value.to_string(), "invalid");
+    };
+    let mut attempts = 0_u64;
+    let mut durations = 0_u64;
+    for metric in exports
+        .iter()
+        .flat_map(ResourceMetrics::scope_metrics)
+        .flat_map(ScopeMetrics::metrics)
+    {
+        match metric.data() {
+            AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                assert_eq!(metric.name(), "bi.audit.append.attempts");
+                for point in sum.data_points() {
+                    only_invalid(point.attributes().collect());
+                    attempts += point.value();
+                }
+            }
+            AggregatedMetrics::F64(MetricData::Histogram(histogram)) => {
+                assert_eq!(metric.name(), "bi.audit.append.duration");
+                assert_eq!(metric.unit(), "s");
+                for point in histogram.data_points() {
+                    only_invalid(point.attributes().collect());
+                }
+                durations += histogram
+                    .data_points()
+                    .map(HistogramDataPoint::count)
+                    .sum::<u64>();
+            }
+            other => panic!("unexpected metric: {other:?}"),
+        }
+    }
+    assert_eq!(attempts, 1, "bi.audit.append.attempts");
+    assert_eq!(durations, 1, "bi.audit.append.duration");
+}
+
+/// `Event::validate` never bounds `occurred_at`'s year, but the stored SQL
+/// contract (0005) requires an exactly-4-digit year. This is the one field
+/// where a Rust-valid `Event` can still be rejected by PostgreSQL with a
+/// real SQLSTATE 22023, reaching it through the normal `append_observed`
+/// path rather than a hand-crafted raw `audit_append` call.
+#[sqlx::test(migrations = false)]
+async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(pool: PgPool) {
+    use chrono::Datelike as _;
+    MIGRATOR.run(&pool).await.unwrap();
+    let mut out_of_range = event("event-year-10000");
+    out_of_range.request_id = "request-year-10000".into();
+    out_of_range.resource_id = "payload-marker-year".into();
+    out_of_range.occurred_at = out_of_range.occurred_at.with_year(10_000).unwrap();
+    assert!(
+        out_of_range.validate().is_ok(),
+        "Rust validation does not bound occurred_at's year"
+    );
+    let (outcome, exports, logs) = observe_append(&pool, &out_of_range).await;
     assert_eq!(
         outcome,
         Err(audit::Error::Contract(IntegrityError::InvalidEvent))
@@ -433,36 +492,54 @@ async fn a_real_22023_through_append_observed_is_logged_as_an_invalid_attempt(po
         audit::verify(&pool, None).await.unwrap(),
         Checkpoint::default()
     );
-
-    // The attempt was recorded with result=invalid, not silently dropped.
-    provider.force_flush().unwrap();
-    let exports = exporter.get_finished_metrics().unwrap();
-    let mut invalid_attempts = 0_u64;
-    for metric in exports
-        .iter()
-        .flat_map(ResourceMetrics::scope_metrics)
-        .flat_map(ScopeMetrics::metrics)
-    {
-        if let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() {
-            for point in sum.data_points() {
-                if point
-                    .attributes()
-                    .any(|kv| kv.key.as_str() == "result" && kv.value.to_string() == "invalid")
-                {
-                    invalid_attempts += point.value();
-                }
-            }
-        }
-    }
-    assert_eq!(invalid_attempts, 1);
-
-    // The log carries the real request_id and a stable code, never the raw
-    // SQL error message, error code or rejected payload.
-    let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+    assert_one_invalid_attempt(&exports);
     assert!(logs.contains("request-year-10000"));
     assert!(logs.contains("audit_invalid_event"));
-    assert!(!logs.contains("22023"));
-    assert!(!logs.to_lowercase().contains("postgres"));
+    assert!(!logs.contains("payload-marker-year"));
+    assert!(!logs.contains("event-year-10000"));
+}
+
+/// PostgreSQL's own message for the real 22023 is literally the safe code,
+/// so the case above cannot tell a leaked SQL message from the redacted one.
+/// Here a fixture function, only in this test's isolated database, raises
+/// 22023 with a sensitive decoy message: the log must keep the `request_id`
+/// and the stable code and never carry the decoy or the payload.
+#[sqlx::test(migrations = false)]
+async fn a_22023_message_from_postgresql_never_reaches_the_logs(pool: PgPool) {
+    MIGRATOR.run(&pool).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE OR REPLACE FUNCTION bi_meta.audit_append(document TEXT)
+         RETURNS TABLE(sequence BIGINT, hash BYTEA)
+         LANGUAGE plpgsql AS $$ BEGIN
+             RAISE EXCEPTION 'decoy-leak secret@example.test password=hunter2'
+                 USING ERRCODE = '22023';
+         END $$;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut decoy = event("event-decoy");
+    decoy.request_id = "request-decoy".into();
+    decoy.resource_id = "payload-marker-decoy".into();
+    let (outcome, exports, logs) = observe_append(&pool, &decoy).await;
+    assert_eq!(
+        outcome,
+        Err(audit::Error::Contract(IntegrityError::InvalidEvent))
+    );
+    assert_one_invalid_attempt(&exports);
+    assert!(logs.contains("request-decoy"));
+    assert!(logs.contains("audit_invalid_event"));
+    for leaked in [
+        "decoy-leak",
+        "secret@example.test",
+        "hunter2",
+        "password",
+        "22023",
+        "payload-marker-decoy",
+        "event-decoy",
+    ] {
+        assert!(!logs.contains(leaked), "{leaked} leaked into: {logs}");
+    }
 }
 
 #[sqlx::test(migrations = false)]
