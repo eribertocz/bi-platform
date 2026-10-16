@@ -684,7 +684,7 @@ mod real {
     #[sqlx::test(migrations = false)]
     #[allow(clippy::too_many_lines)] // One administrative setup and two logins.
     async fn limited_runtime_role_completes_a_real_login_atomically(pool: PgPool) {
-        use sqlx::{AssertSqlSafe, ConnectOptions as _};
+        use sqlx::AssertSqlSafe;
         const PASSWORD: &str = "decoy-password-7f3a";
         let database: String = sqlx::query_scalar("SELECT current_database()")
             .fetch_one(&pool)
