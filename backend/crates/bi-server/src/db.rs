@@ -10,6 +10,7 @@ use opentelemetry::metrics::{Counter, Meter};
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::{PgConnectOptions, PgListener, PgPool, PgPoolOptions};
 use tokio::sync::{Notify, watch};
+use tracing::instrument::WithSubscriber as _;
 
 use crate::metadata::{self, Assessment, MetadataMode};
 
@@ -254,7 +255,10 @@ impl Database {
             status,
             disrupted: Notify::new(),
         });
-        tokio::spawn(supervise(pool.clone(), mode, shared.clone(), metrics));
+        // The supervisor logs through the subscriber of whoever started it.
+        tokio::spawn(
+            supervise(pool.clone(), mode, shared.clone(), metrics).with_current_subscriber(),
+        );
         Self { pool, mode, shared }
     }
 

@@ -801,44 +801,17 @@ mod restricted {
         roles.drop().await;
     }
 
-    /// Cases 6 and 7: explicit development migrates and warns with a stable
-    /// code; across ready, invalid and unavailable states no log line carries
-    /// a DSN, password, role name or SQL, and metrics keep closed labels.
+    /// Case 7, metrics: across development, ready, invalid and unavailable
+    /// states the validation counter only ever carries one closed label.
     #[sqlx::test(migrations = false)]
-    #[allow(clippy::too_many_lines)] // Logs and metrics across every state.
-    async fn development_warns_and_logs_and_metrics_never_leak(pool: PgPool) {
+    async fn validation_metrics_keep_closed_labels_in_every_state(pool: PgPool) {
         use opentelemetry::metrics::MeterProvider as _;
         use opentelemetry_sdk::metrics::data::{
             AggregatedMetrics, MetricData, ResourceMetrics, ScopeMetrics,
         };
         use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
-        use std::io::{self, Write};
-        use std::sync::{Arc, Mutex};
 
-        #[derive(Clone)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let bytes = Arc::new(Mutex::new(Vec::new()));
-        let output = Capture(bytes.clone());
-        // The server's own default filter (`telemetry::init`), so this sees
-        // exactly what an operator's log would.
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-            .with_writer(move || output.clone())
-            .finish();
-        // The test runtime is single-threaded, so the supervisor's spawned
-        // task logs through this thread-local default as well.
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let roles = Roles::create(&pool).await;
         let exporter = InMemoryMetricExporter::default();
         let provider = SdkMeterProvider::builder()
             .with_periodic_exporter(exporter.clone())
@@ -846,7 +819,6 @@ mod restricted {
         let metrics = || MetadataMetrics::new(&provider.meter("test"));
         let runtime = |roles: &Roles| db::lazy_pool_with(roles.options(&roles.runtime));
 
-        let roles = Roles::create(&pool).await;
         // Development: migrates itself as the owner, and says so.
         let development = Database::start_observed(
             db::lazy_pool_with(roles.options(&roles.admin)),
@@ -874,38 +846,15 @@ mod restricted {
             metrics(),
         );
         let deadline = Instant::now() + Duration::from_secs(20);
-        while !String::from_utf8_lossy(&bytes.lock().unwrap()).contains("metadata_unavailable") {
+        // Wait for its own first validation, not for an earlier log line.
+        while unavailable.status() != MetadataStatus::Unavailable {
             assert!(
                 Instant::now() < deadline,
-                "unavailable is logged: {:?}\n{}",
-                unavailable.status(),
-                String::from_utf8_lossy(&bytes.lock().unwrap())
+                "the unreachable store is assessed"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         unavailable.pool().close().await;
-
-        let logs = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        for expected in [
-            "metadata_privileged_development",
-            "metadata_ready",
-            "metadata_not_ready",
-            "metadata_unavailable",
-        ] {
-            assert!(logs.contains(expected), "{expected} missing from:\n{logs}");
-        }
-        for secret in [
-            PASSWORD,
-            roles.admin.as_str(),
-            roles.runtime.as_str(),
-            roles.database.as_str(),
-            "postgres://",
-            "pg_catalog",
-            "SELECT",
-            "GRANT",
-        ] {
-            assert!(!logs.contains(secret), "{secret} leaked into:\n{logs}");
-        }
 
         provider.force_flush().unwrap();
         let mut results = BTreeSet::new();
@@ -935,6 +884,103 @@ mod restricted {
                 "unavailable".to_owned()
             ])
         );
+        roles.drop().await;
+    }
+
+    /// Runs the real `bi-server`, with its production log setup (default
+    /// `info` filter, text format), until its output names `expected`, and
+    /// returns everything it printed. A separate process per state, so no
+    /// other test's logging can interfere.
+    async fn server_output(env: Vec<(&'static str, String)>, expected: &'static str) -> String {
+        tokio::task::spawn_blocking(move || {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            let log = tempfile::NamedTempFile::new().unwrap();
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_bi-server"));
+            command
+                .env("BI_BIND_ADDR", format!("127.0.0.1:{port}"))
+                .env("BI_ANALYTICS", "off")
+                .env("BI_LOG_FORMAT", "text")
+                .env_remove("RUST_LOG")
+                .stdout(log.reopen().unwrap())
+                .stderr(log.reopen().unwrap());
+            for (key, value) in env {
+                command.env(key, value);
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + READY;
+            let output = loop {
+                let output = std::fs::read_to_string(log.path()).unwrap_or_default();
+                if output.contains(expected) || Instant::now() > deadline {
+                    break output;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+            child.kill().ok();
+            child.wait().ok();
+            output
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Cases 6 and 7, logs: explicit development warns that its role is
+    /// privileged, and every restricted state is named by its stable code,
+    /// while no line ever carries the password, a role name, a URL or SQL.
+    #[sqlx::test(migrations = false)]
+    async fn operator_logs_name_each_state_without_secrets(pool: PgPool) {
+        let roles = Roles::create(&pool).await;
+        let url = |options: PgConnectOptions| options.to_url_lossy().to_string();
+        let runtime = || url(roles.options(&roles.runtime));
+        let mut logs = server_output(
+            vec![
+                ("BI_METADATA_MODE", "development".to_owned()),
+                (
+                    "BI_DEV_USERS",
+                    r#"[{"id":"analyst","display_name":"Analista"}]"#.to_owned(),
+                ),
+                ("BI_DATABASE_URL", url(roles.options(&roles.admin))),
+            ],
+            "metadata_privileged_development",
+        )
+        .await;
+        roles.grant().await;
+        logs += &server_output(vec![("BI_DATABASE_URL", runtime())], "metadata_ready").await;
+        roles.sql("GRANT {admin} TO {runtime}").await;
+        logs += &server_output(vec![("BI_DATABASE_URL", runtime())], "metadata_not_ready").await;
+        logs += &server_output(
+            vec![(
+                "BI_DATABASE_URL",
+                url(roles.options(&roles.runtime).host("127.0.0.1").port(1)),
+            )],
+            "metadata_unavailable",
+        )
+        .await;
+        for expected in [
+            "metadata_privileged_development",
+            "metadata_ready",
+            "metadata_not_ready",
+            "reason=\"owns_database\"",
+            "metadata_unavailable",
+        ] {
+            assert!(logs.contains(expected), "{expected} missing from:\n{logs}");
+        }
+        // The database name is logged on purpose (where the server connects);
+        // credentials, roles and SQL never are.
+        for secret in [
+            PASSWORD,
+            roles.admin.as_str(),
+            roles.runtime.as_str(),
+            "postgres://",
+            "pg_catalog",
+            "SELECT",
+            "GRANT",
+        ] {
+            assert!(!logs.contains(secret), "{secret} leaked into:\n{logs}");
+        }
         roles.drop().await;
     }
 }
