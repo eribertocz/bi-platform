@@ -254,6 +254,83 @@ mod tests {
     }
 
     #[test]
+    fn metadata_mode_is_restricted_unless_requested_and_rejects_unknown_values() {
+        let mode =
+            |vars: &[(&str, &str)]| Config::from_lookup(lookup(vars)).map(|c| c.metadata_mode);
+        assert_eq!(mode(&[]), Ok(MetadataMode::Restricted));
+        assert_eq!(
+            mode(&[("BI_METADATA_MODE", "restricted")]),
+            Ok(MetadataMode::Restricted)
+        );
+        for value in ["", "dev", "Development", "production", "local"] {
+            assert_eq!(
+                mode(&[("BI_METADATA_MODE", value)]),
+                Err(ConfigError::Invalid {
+                    variable: "BI_METADATA_MODE",
+                    value: value.to_owned()
+                })
+            );
+        }
+    }
+
+    /// Development is accepted only in its one setup, and never inferred:
+    /// the default database URL, a loopback origin, dev users or the absence
+    /// of OIDC never select it on their own.
+    #[test]
+    fn development_metadata_mode_is_refused_outside_its_one_setup() {
+        const USERS: &str = r#"[{"id":"analyst","display_name":"Analista"}]"#;
+        let mode =
+            |vars: &[(&str, &str)]| Config::from_lookup(lookup(vars)).map(|c| c.metadata_mode);
+        let development = [("BI_METADATA_MODE", "development"), ("BI_DEV_USERS", USERS)];
+        assert_eq!(
+            mode(&[("BI_DEV_USERS", USERS)]),
+            Ok(MetadataMode::Restricted),
+            "dev users alone never select development"
+        );
+        for refused in [
+            vec![("BI_METADATA_MODE", "development")],
+            [
+                development.as_slice(),
+                &[("BI_PUBLIC_ORIGIN", "https://bi.example.test")],
+            ]
+            .concat(),
+            [
+                development.as_slice(),
+                &[
+                    ("BI_OIDC_ISSUER", "http://127.0.0.1:18071/realms/bi-test"),
+                    ("BI_OIDC_CLIENT_ID", "bi-platform"),
+                ],
+            ]
+            .concat(),
+        ] {
+            assert_eq!(
+                mode(&refused),
+                Err(ConfigError::MetadataDevelopmentNotAllowed),
+                "{refused:?}"
+            );
+        }
+        let error = ConfigError::MetadataDevelopmentNotAllowed.to_string();
+        assert!(error.contains("BI_METADATA_MODE") && !error.contains("analyst"));
+        // Only a dev-auth build can accept it at all.
+        let accepted = mode(&development);
+        if cfg!(feature = "dev-auth") {
+            assert_eq!(accepted, Ok(MetadataMode::Development));
+            assert_eq!(
+                mode(
+                    &[
+                        development.as_slice(),
+                        &[("BI_PUBLIC_ORIGIN", "http://localhost:8080")]
+                    ]
+                    .concat()
+                ),
+                Ok(MetadataMode::Development)
+            );
+        } else {
+            assert_eq!(accepted, Err(ConfigError::MetadataDevelopmentNotAllowed));
+        }
+    }
+
+    #[test]
     fn reads_analytics_settings() {
         let config = Config::from_lookup(lookup(&[
             ("BI_DEV_FIXTURE_ROWS", "1000"),

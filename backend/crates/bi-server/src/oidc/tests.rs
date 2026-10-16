@@ -677,6 +677,136 @@ mod real {
         (login.authorization_url, cookie)
     }
 
+    /// The restricted mode (#115) against the real provider: the documented
+    /// grants (`admin/runtime-grants.sql`) are enough for a whole login —
+    /// attempt lock, cleanup, count and insert; atomic consumption; session
+    /// and audit event — and a session never exists without its event.
+    #[sqlx::test(migrations = false)]
+    #[allow(clippy::too_many_lines)] // One administrative setup and two logins.
+    async fn limited_runtime_role_completes_a_real_login_atomically(pool: PgPool) {
+        use sqlx::{AssertSqlSafe, ConnectOptions as _};
+        const PASSWORD: &str = "decoy-password-7f3a";
+        let database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            database
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        );
+        let tag: String = database
+            .chars()
+            .rev()
+            .filter(char::is_ascii_alphanumeric)
+            .take(16)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let (owner, runtime) = (format!("o{tag}_owner"), format!("o{tag}_runtime"));
+        let sql = |statement: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::raw_sql(AssertSqlSafe(statement))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        sql(format!(
+            "DROP ROLE IF EXISTS {runtime}; DROP ROLE IF EXISTS {owner}; \
+             CREATE ROLE {owner} LOGIN PASSWORD '{PASSWORD}'; \
+             CREATE ROLE {runtime} LOGIN PASSWORD '{PASSWORD}'; \
+             ALTER DATABASE \"{database}\" OWNER TO {owner};"
+        ))
+        .await;
+        let options = |role: &str| {
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .username(role)
+                .password(PASSWORD)
+        };
+        let administrative = crate::db::lazy_pool_with(options(&owner));
+        crate::db::migrate(&administrative).await.unwrap();
+        sqlx::raw_sql(AssertSqlSafe(
+            include_str!("../../admin/runtime-grants.sql").replace("bi_runtime", &runtime),
+        ))
+        .execute(&administrative)
+        .await
+        .unwrap();
+        administrative.close().await;
+
+        let db = crate::db::Database::start(
+            crate::db::lazy_pool_with(options(&runtime)),
+            crate::metadata::MetadataMode::Restricted,
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_ready())
+                .await
+                .unwrap()
+        );
+        let mut state = AppState::new(db.clone());
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        let app = crate::router(state);
+        let login = |app: Router| async move {
+            let (url, cookie) = begin(&app).await;
+            let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+            let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+            send(&app, "GET", &path, Some(&cookie), None).await
+        };
+        let response = login(app.clone()).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|v| v.starts_with("bi_session="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            send(&app, "GET", "/api/v1/session", Some(&session), None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let count = |table: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(AssertSqlSafe(format!(
+                    "SELECT count(*) FROM bi_meta.{table}"
+                )))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(count("sessions").await, 1);
+        assert_eq!(count("audit_events").await, 1);
+
+        // Without its audit path the role cannot create a session at all.
+        sql(format!(
+            "REVOKE EXECUTE ON FUNCTION bi_meta.audit_append(text) FROM {runtime}"
+        ))
+        .await;
+        let refused = login(app.clone()).await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(count("sessions").await, 1, "no session without its event");
+        assert_eq!(count("audit_events").await, 1);
+        crate::audit::verify(&pool, None).await.unwrap();
+
+        db.pool().close().await;
+        sql(format!(
+            "ALTER DATABASE \"{database}\" OWNER TO CURRENT_USER; \
+             REASSIGN OWNED BY {owner}, {runtime} TO CURRENT_USER; \
+             DROP OWNED BY {owner}, {runtime}; DROP ROLE {runtime}; DROP ROLE {owner};"
+        ))
+        .await;
+    }
+
     #[sqlx::test(migrations = false)]
     #[allow(clippy::too_many_lines)] // Keep the login, reauthentication and logout workflow together.
     async fn real_callback_creates_persistent_session_and_consumes_bound_state(pool: PgPool) {
