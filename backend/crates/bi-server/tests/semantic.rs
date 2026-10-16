@@ -8,6 +8,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use bi_server::metadata::MetadataMode;
 use bi_server::{AppState, analytics::Analytics, db::Database, models::Models};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -114,9 +115,9 @@ struct Harness {
 
 async fn harness(pool: sqlx::PgPool) -> Harness {
     let project = project();
-    let db = Database::start(pool.clone());
+    let db = Database::start(pool.clone(), MetadataMode::Development);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_migrated())
+        tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_ready())
             .await
             .unwrap()
     );

@@ -9,6 +9,7 @@ use bi_fixtures::sales::FixtureSpec;
 use bi_runtime::RuntimeConfig;
 
 use crate::auth::AuthConfig;
+use crate::metadata::MetadataMode;
 
 /// Database used when `BI_DATABASE_URL` is unset: the local development
 /// PostgreSQL from `compose.yaml`. Never a production credential.
@@ -28,6 +29,9 @@ pub struct Config {
     pub database_url: String,
     /// True when `BI_DATABASE_URL` was not set and the development default is used.
     pub database_url_is_default: bool,
+    /// `BI_METADATA_MODE`; restricted unless development is explicitly
+    /// requested in the one setup that allows it.
+    pub metadata_mode: MetadataMode,
     pub log_format: LogFormat,
     /// Optional frontend build directory; unset means API-only development.
     pub static_dir: Option<PathBuf>,
@@ -47,6 +51,7 @@ pub enum ConfigError {
     InvalidBindAddr(String),
     InvalidLogFormat(String),
     InvalidAuthConfig,
+    MetadataDevelopmentNotAllowed,
     Invalid {
         variable: &'static str,
         value: String,
@@ -60,6 +65,9 @@ impl fmt::Display for ConfigError {
             Self::InvalidAuthConfig => write!(
                 f,
                 "invalid authentication configuration: check BI_PUBLIC_ORIGIN, BI_SESSION_TTL_SECONDS, BI_DEV_USERS and BI_OIDC_*"
+            ),
+            Self::MetadataDevelopmentNotAllowed => f.write_str(
+                "BI_METADATA_MODE=development requires a dev-auth build with BI_DEV_USERS, a loopback BI_PUBLIC_ORIGIN and OIDC disabled; otherwise use the default restricted mode",
             ),
             Self::InvalidBindAddr(value) => {
                 write!(
@@ -139,14 +147,27 @@ impl Config {
             }
         };
 
+        let auth = AuthConfig::from_lookup(&lookup)?;
+        let metadata_mode = match lookup("BI_METADATA_MODE") {
+            None => MetadataMode::Restricted,
+            Some(value) => MetadataMode::parse(&value).ok_or(ConfigError::Invalid {
+                variable: "BI_METADATA_MODE",
+                value,
+            })?,
+        };
+        if metadata_mode == MetadataMode::Development && !auth.allows_metadata_development() {
+            return Err(ConfigError::MetadataDevelopmentNotAllowed);
+        }
+
         Ok(Self {
             project_dir,
             bind_addr,
             database_url,
             database_url_is_default,
+            metadata_mode,
             log_format,
             static_dir: lookup("BI_STATIC_DIR").map(PathBuf::from),
-            auth: AuthConfig::from_lookup(&lookup)?,
+            auth,
             analytics,
             dev_fixture: positive("BI_DEV_FIXTURE_ROWS")?
                 .map(|rows| FixtureSpec { seed: 42, rows }),

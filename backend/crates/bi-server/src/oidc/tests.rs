@@ -467,8 +467,9 @@ mod real {
     #[sqlx::test(migrations = false)]
     async fn http_limits_reject_both_routes_without_provider_or_writes(pool: PgPool) {
         use opentelemetry::metrics::MeterProvider as _;
-        let db = crate::db::Database::start(pool.clone());
-        assert!(db.wait_until_migrated().await);
+        let db =
+            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        assert!(db.wait_until_ready().await);
         let mut state = AppState::new(db);
         state.auth.oidc = Some(config(
             "http://127.0.0.1:1/realms/unreachable",
@@ -591,8 +592,9 @@ mod real {
 
     #[sqlx::test(migrations = false)]
     async fn live_attempt_capacity_is_atomic_and_http_returns_503(pool: PgPool) {
-        let db = crate::db::Database::start(pool.clone());
-        assert!(db.wait_until_migrated().await);
+        let db =
+            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        assert!(db.wait_until_ready().await);
         sqlx::query("INSERT INTO bi_meta.oidc_attempts (state_hash, browser_hash, nonce, verifier) SELECT sha256(n::text::bytea), sha256(n::text::bytea), 'nonce', 'verifier' FROM generate_series(1, $1) n")
             .bind(MAX_LIVE_ATTEMPTS - 1).execute(&pool).await.unwrap();
         let (a, b) = tokio::join!(
@@ -678,8 +680,9 @@ mod real {
     #[sqlx::test(migrations = false)]
     #[allow(clippy::too_many_lines)] // Keep the login, reauthentication and logout workflow together.
     async fn real_callback_creates_persistent_session_and_consumes_bound_state(pool: PgPool) {
-        let db = crate::db::Database::start(pool.clone());
-        assert!(db.wait_until_migrated().await);
+        let db =
+            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        assert!(db.wait_until_ready().await);
         let mut state = AppState::new(db.clone());
         state.auth.oidc = Some(config(&issuer(), "bi-platform"));
         let app = crate::router(state.clone());
@@ -927,8 +930,9 @@ mod real {
 
     #[sqlx::test(migrations = false)]
     async fn pkce_failure_and_audit_failure_cannot_create_sessions(pool: PgPool) {
-        let db = crate::db::Database::start(pool.clone());
-        assert!(db.wait_until_migrated().await);
+        let db =
+            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        assert!(db.wait_until_ready().await);
         let mut state = AppState::new(db);
         state.auth.oidc = Some(config(&issuer(), "bi-platform"));
         let app = crate::router(state);

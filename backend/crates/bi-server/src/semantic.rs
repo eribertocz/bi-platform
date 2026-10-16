@@ -133,7 +133,7 @@ pub struct SemanticDeniedUse {
         (status = 404, description = "El modelo no existe en el proyecto", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Consulta mal formada, modelo con errores o consulta incorrecta", body = SemanticRejection, content_type = "application/problem+json"),
         (status = 429, description = "Demasiadas compilaciones simultáneas", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "Políticas no válidas, motor o auditoría no disponibles", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Políticas no válidas, motor o auditoría no disponibles, o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "Tiempo agotado", body = Problem, content_type = "application/problem+json")
     )
 )]

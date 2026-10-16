@@ -99,6 +99,18 @@ impl AuthConfig {
         cfg!(feature = "dev-auth") && !self.users.is_empty()
     }
 
+    /// The only setup where `BI_METADATA_MODE=development` is accepted:
+    /// synthetic dev login compiled in and configured, a loopback public
+    /// origin and no federated login. Never inferred from the database.
+    pub(crate) fn allows_metadata_development(&self) -> bool {
+        self.development_enabled()
+            && self.oidc.is_none()
+            && self
+                .origin
+                .parse::<Uri>()
+                .is_ok_and(|uri| matches!(uri.host(), Some("localhost" | "127.0.0.1" | "[::1]")))
+    }
+
     pub(crate) fn cookie(&self, token: &str, max_age: u32) -> String {
         // The separate short-lived OIDC binding cookie handles the cross-site callback.
         // Origin validation remains mandatory: SameSite alone is not CSRF protection.
@@ -197,10 +209,54 @@ pub(crate) async fn enforce_session(
         path,
         "/api/v1/oidc/config" | "/api/v1/oidc/start" | "/api/v1/oidc/callback"
     );
-    if !development_route && !oidc_route {
+    // Only configuration answers, and OIDC routes while OIDC is disabled,
+    // touch no metadata state.
+    let uses_metadata = !matches!(path, "/api/v1/dev/users" | "/api/v1/oidc/config")
+        && (!oidc_route || state.auth.oidc.is_some());
+    let session = if !development_route && !oidc_route {
         let Some(hash) = token_hash(request.headers()) else {
             return problem(StatusCode::UNAUTHORIZED, "session_required", request_id);
         };
+        Some(hash)
+    } else {
+        None
+    };
+    if !matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        // Fail closed for missing/null/duplicate/foreign Origin. Never trust Host,
+        // X-Forwarded-* or Referer to widen the configured origin; no CORS enabled.
+        let mut origins = request.headers().get_all(header::ORIGIN).iter();
+        let origin_ok = origins
+            .next()
+            .is_some_and(|origin| origin == state.auth.origin.as_str())
+            && origins.next().is_none();
+        let site_ok = request
+            .headers()
+            .get("sec-fetch-site")
+            .is_none_or(|site| site == "same-origin");
+        if !origin_ok || !site_ok {
+            let mut rejection = Problem::new(
+                StatusCode::FORBIDDEN,
+                "origin_forbidden",
+                Some(format!("Abre la aplicación desde {}.", state.auth.origin)),
+                request_id.header_value().to_str().unwrap_or("unavailable"),
+            );
+            rejection.public_origin = Some(state.auth.origin.clone());
+            return rejection.into_response();
+        }
+    }
+    // One admission point for every handler that reads or writes metadata:
+    // the prepared state decides before any work, without querying PostgreSQL.
+    if uses_metadata && !state.db.admits() {
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "metadata_not_ready",
+            request_id,
+        );
+    }
+    if let Some(hash) = session {
         let row = sqlx::query(
             "SELECT user_id, display_name, federated_identity::text AS federated_identity, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at \
              FROM bi_meta.sessions WHERE token_hash = $1 AND expires_at > clock_timestamp() AND revoked_at IS NULL AND data_scope = 'synthetic'",
@@ -235,36 +291,6 @@ pub(crate) async fn enforce_session(
             }
         }
     }
-    if !matches!(
-        *request.method(),
-        Method::GET | Method::HEAD | Method::OPTIONS
-    ) {
-        // Fail closed for missing/null/duplicate/foreign Origin. Never trust Host,
-        // X-Forwarded-* or Referer to widen the configured origin; no CORS enabled.
-        let mut origins = request.headers().get_all(header::ORIGIN).iter();
-        let origin_ok = origins
-            .next()
-            .is_some_and(|origin| origin == state.auth.origin.as_str())
-            && origins.next().is_none();
-        let site_ok = request
-            .headers()
-            .get("sec-fetch-site")
-            .is_none_or(|site| site == "same-origin");
-        if !origin_ok || !site_ok {
-            let id = request
-                .extensions()
-                .get::<RequestId>()
-                .expect("request id exists");
-            let mut rejection = Problem::new(
-                StatusCode::FORBIDDEN,
-                "origin_forbidden",
-                Some(format!("Abre la aplicación desde {}.", state.auth.origin)),
-                id.header_value().to_str().unwrap_or("unavailable"),
-            );
-            rejection.public_origin = Some(state.auth.origin.clone());
-            return rejection.into_response();
-        }
-    }
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -277,7 +303,7 @@ pub(crate) async fn enforce_session(
     security(("sessionCookie" = [])),
     responses((status = 200, description = "Sesión verificada por el servidor", body = Session),
         (status = 401, description = "Sin sesión válida", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "PostgreSQL no disponible", body = Problem, content_type = "application/problem+json")))]
+        (status = 503, description = "PostgreSQL no disponible, o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json")))]
 pub(crate) async fn current(Extension(principal): Extension<Principal>) -> Json<Session> {
     Json(principal.session)
 }
@@ -287,7 +313,7 @@ pub(crate) async fn current(Extension(principal): Extension<Principal>) -> Json<
     responses((status = 204, description = "Sesión revocada y cookie eliminada"),
         (status = 401, description = "Sin sesión válida", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Origin ausente o distinto al configurado", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "PostgreSQL no disponible", body = Problem, content_type = "application/problem+json")))]
+        (status = 503, description = "PostgreSQL no disponible, o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json")))]
 pub(crate) async fn logout(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -338,7 +364,7 @@ pub(crate) async fn dev_users(State(state): State<AppState>) -> Json<Vec<User>> 
         (status = 401, description = "Usuario no configurado", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Origin ausente o distinto al configurado", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "Login de desarrollo deshabilitado", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "No se pudo crear la sesión", body = Problem, content_type = "application/problem+json")))]
+        (status = 503, description = "No se pudo crear la sesión, o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json")))]
 pub(crate) async fn dev_login(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,

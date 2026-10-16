@@ -10,6 +10,7 @@ use bi_fixtures::{
     sales::{self, FixtureSpec},
 };
 use bi_runtime::{Bootstrap, LakeConfig, RuntimeConfig, fixtures};
+use bi_server::metadata::MetadataMode;
 use bi_server::{
     AppState,
     analytics::Analytics,
@@ -85,7 +86,10 @@ async fn query_latency() {
     let (analytics, oracle) = tokio::task::spawn_blocking(move || lake(data_path))
         .await
         .unwrap();
-    let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
+    let db = Database::start(
+        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        MetadataMode::Development,
+    );
     let sdk = std::env::var("BI_BENCH_METRICS").is_ok_and(|mode| mode == "sdk");
     let provider = sdk.then(|| {
         opentelemetry_sdk::metrics::SdkMeterProvider::builder()

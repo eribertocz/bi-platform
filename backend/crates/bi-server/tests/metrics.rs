@@ -11,6 +11,7 @@ use axum::{
     routing::post,
 };
 use bi_runtime::{Bootstrap, Runtime, RuntimeConfig};
+use bi_server::metadata::MetadataMode;
 use bi_server::{
     AppState,
     analytics::Analytics,
@@ -37,7 +38,10 @@ fn install_tls_provider() {
 }
 
 fn app(analytics: Analytics, metrics: QueryMetrics, timeout: Duration) -> Router {
-    let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
+    let db = Database::start(
+        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        MetadataMode::Development,
+    );
     Router::new()
         .route("/api/v1/queries", post(query::run))
         .with_state(AppState {
@@ -243,7 +247,10 @@ fn count(points: &[Point], name: &str, label: Option<(&str, &str)>) -> u64 {
 #[tokio::test]
 async fn oidc_denial_exports_a_closed_outcome_without_private_labels() {
     let capture = Capture::new(Analytics::disabled(), Duration::from_secs(5));
-    let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
+    let db = Database::start(
+        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        MetadataMode::Development,
+    );
     let app = bi_server::router(AppState {
         metrics: QueryMetrics::new(&capture.provider.meter("test"), &Analytics::disabled()),
         ..AppState::new(db)

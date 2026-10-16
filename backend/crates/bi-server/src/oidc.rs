@@ -508,7 +508,7 @@ pub(crate) struct NoParameters {}
         (status = 403, description = "Origin inválido", body = Problem),
         (status = 404, description = "OIDC deshabilitado", body = Problem),
         (status = 429, description = "Admisión OIDC limitada", body = Problem),
-        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible", body = Problem)))]
+        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible, o metadatos no listos (`metadata_not_ready`)", body = Problem)))]
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,
@@ -652,7 +652,7 @@ pub(crate) struct Callback {
         (status = 401, description = "Intento o token inválido", body = Problem),
         (status = 404, description = "OIDC deshabilitado", body = Problem),
         (status = 429, description = "Admisión OIDC limitada", body = Problem),
-        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible", body = Problem)))]
+        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible, o metadatos no listos (`metadata_not_ready`)", body = Problem)))]
 pub(crate) async fn callback(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,

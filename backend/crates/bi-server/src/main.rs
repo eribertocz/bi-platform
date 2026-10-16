@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 
 const USAGE: &str =
     "usage: bi-server            run the API server (configured by BI_* environment variables)
+       bi-server migrate         apply metadata migrations with the administrative BI_DATABASE_URL, then exit
        bi-server openapi [PATH]  write the OpenAPI document to PATH or stdout
        bi-server audit-verify [SEQUENCE HASH]  verify audit history (BI_DATABASE_URL; read-only)
        bi-server audit-verify --report [SEQUENCE HASH]  bounded JSON report instead of strict pass/fail";
@@ -25,6 +26,7 @@ fn main() -> ExitCode {
         .as_slice()
     {
         [] => run(),
+        ["migrate"] => migrate_metadata(),
         ["audit-verify"] => verify_audit(None),
         ["audit-verify", "--report"] => report_audit(None),
         ["audit-verify", sequence, hash] => {
@@ -101,6 +103,35 @@ fn audit_pool() -> Result<sqlx::PgPool, ExitCode> {
         eprintln!("audit_invalid_database_url");
         ExitCode::from(2)
     })
+}
+
+/// `migrate`: the administrative step the restricted server never performs.
+/// Finite and side-effect free beyond the migrations: no HTTP, analytical
+/// runtime, OIDC or exporters, and the URL is never printed or kept.
+#[tokio::main]
+async fn migrate_metadata() -> ExitCode {
+    let Ok(url) = std::env::var("BI_DATABASE_URL") else {
+        eprintln!("metadata_database_url_required");
+        return ExitCode::from(2);
+    };
+    let Ok(pool) = db::lazy_pool(&url) else {
+        eprintln!("metadata_invalid_database_url");
+        return ExitCode::from(2);
+    };
+    let migrated = db::migrate(&pool).await;
+    pool.close().await;
+    if migrated.is_err() {
+        eprintln!("metadata_migration_failed");
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "migrations": db::MIGRATOR.iter().count().to_string(),
+        })
+    );
+    ExitCode::SUCCESS
 }
 
 #[tokio::main]
@@ -208,9 +239,9 @@ async fn run() -> ExitCode {
         port = options.get_port(),
         database = options.get_database().unwrap_or_default(),
         development_default = config.database_url_is_default,
+        mode = ?config.metadata_mode,
         "metadata database"
     );
-    let db = Database::start(db::lazy_pool_with(options));
 
     let listener = match TcpListener::bind(config.bind_addr).await {
         Ok(listener) => listener,
@@ -226,6 +257,18 @@ async fn run() -> ExitCode {
         None => Analytics::disabled(),
     };
     let (metrics, metrics_provider) = metrics::from_env(analytics.clone()).await;
+    let metadata_metrics =
+        metrics_provider
+            .as_ref()
+            .map_or_else(db::MetadataMetrics::default, |provider| {
+                use opentelemetry::metrics::MeterProvider as _;
+                db::MetadataMetrics::new(&provider.meter("bi-server"))
+            });
+    let db = Database::start_observed(
+        db::lazy_pool_with(options),
+        config.metadata_mode,
+        metadata_metrics,
+    );
     let mut models = bi_server::models::Models::new(config.project_dir);
     if let Some(provider) = &metrics_provider {
         use opentelemetry::metrics::MeterProvider as _;

@@ -9,6 +9,7 @@ use axum::http::{Request, StatusCode};
 use axum::routing::post as post_route;
 use bi_server::analytics::Analytics;
 use bi_server::db::{self, Database};
+use bi_server::metadata::MetadataMode;
 use bi_server::{AppState, query};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -18,7 +19,10 @@ use tower_http::request_id::{MakeRequestUuid, SetRequestIdLayer};
 /// The query handler alone. Session enforcement for `/api/v1/**` belongs to
 /// the full router: see `protection` below and `auth.rs`.
 fn app(analytics: Analytics, query_timeout: Duration) -> Router {
-    let db = Database::start(db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap());
+    let db = Database::start(
+        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        MetadataMode::Development,
+    );
     Router::new()
         .route("/api/v1/queries", post_route(query::run))
         .with_state(AppState {
@@ -401,8 +405,8 @@ mod protection {
 
     #[sqlx::test(migrations = false)]
     async fn queries_require_a_session_and_the_configured_origin(pool: PgPool) {
-        let db = Database::start(pool);
-        assert!(db.wait_until_migrated().await);
+        let db = Database::start(pool, MetadataMode::Development);
+        assert!(db.wait_until_ready().await);
         let auth = AuthConfig::from_lookup(&|key| match key {
             "BI_DEV_USERS" => Some(r#"[{"id":"analyst","display_name":"Analista"}]"#.to_owned()),
             _ => None,
