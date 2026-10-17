@@ -1,0 +1,300 @@
+[
+  {
+    "case": "open",
+    "user": "lector",
+    "status": 200,
+    "answer": {
+      "decision": {
+        "reason": "permitted",
+        "masked": [],
+        "roles": [
+          "viewer"
+        ]
+      },
+      "plan": {
+        "explanation": "dc57e0dc8266 ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.region]\n9818aac89b52 AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- dc57e0dc8266\ne044b832f6b6 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/importe] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/importe] <- 9818aac89b52\n7239548829f2 ProjectSemanticOutput [r, m] <- e044b832f6b6\nblock query = 7239548829f2\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/importe DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/importe DECIMAL(18,2) sin unidad\n",
+        "obligations": 2
+      },
+      "receipt": {
+        "id": "receipt:4cf5c898daafd757b319327dbdf36bea16b1e3ed1f69b42b565c6830c64f60f8",
+        "query": "sef-sha256-v1:2f851a6e1cc4c2211c16110eb7cf4325fc1e7fde2fb5e8b8bfe709604cfacca2",
+        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
+        "plan": "sef-sha256-v1:59dd6d91df24d59f9bc07c9a57b2667e9f2b7a52387b5729b3f8b3e0aa2ef406",
+        "decision": "sef-authz-sha256:4af149dfd2e3a72922b0ec482aee196d08dba35c4204b7eb2ff67cee395c6baf",
+        "policies": "sef-authz-sha256:c264e27a8795afa543bab42e0e6c074d937309edd21b5b686c780875a8cb3372",
+        "context": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  {
+    "case": "masked",
+    "user": "lector",
+    "status": 200,
+    "answer": {
+      "decision": {
+        "reason": "permitted",
+        "masked": [
+          "c"
+        ],
+        "roles": [
+          "viewer"
+        ]
+      },
+      "plan": {
+        "explanation": "dc57e0dc8266 ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.region]\n9818aac89b52 AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- dc57e0dc8266\n29f2cd153fe0 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/margen] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/margen] <- 9818aac89b52\ne6686fdb1370 ProjectSemanticOutput [r, c] <- 29f2cd153fe0\nblock query = e6686fdb1370\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/margen DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/margen DECIMAL(18,2) sin unidad\n",
+        "obligations": 2
+      },
+      "receipt": {
+        "id": "receipt:85be2675177f835142b71bafe460c0c0eef8cf6cb4a7a7e334cb9708066e4a86",
+        "query": "sef-sha256-v1:1bdc38d5f31b4fe53181ae5ea2f14a5bf2ef190e73c27b39eb50811eada1daf2",
+        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
+        "plan": "sef-sha256-v1:965420316fe47437b60f6a980f24be89ce38559d959ad8954845c2f18f841521",
+        "decision": "sef-authz-sha256:a772985cd32d064fa803e3b519d3b1608aeb097d890314f0165d7003ee601ff4",
+        "policies": "sef-authz-sha256:c264e27a8795afa543bab42e0e6c074d937309edd21b5b686c780875a8cb3372",
+        "context": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  {
+    "case": "hidden",
+    "user": "lector",
+    "status": 404,
+    "answer": {
+      "type": "about:blank",
+      "title": "Not Found",
+      "status": 404,
+      "detail": "No se puede explicar la consulta solicitada.",
+      "code": "model_not_found"
+    }
+  },
+  {
+    "case": "refused masked use",
+    "user": "lector",
+    "status": 403,
+    "answer": {
+      "type": "about:blank",
+      "title": "Forbidden",
+      "status": 403,
+      "detail": "Tus roles en este proyecto no permiten ese uso de la consulta.",
+      "code": "semantic_access_denied",
+      "denied": {
+        "kind": "metric",
+        "name": "margen",
+        "usage": "filter"
+      },
+      "reason": "no_permit"
+    }
+  },
+  {
+    "case": "restricted masked",
+    "user": "analista",
+    "status": 200,
+    "answer": {
+      "decision": {
+        "reason": "permitted",
+        "masked": [
+          "m"
+        ],
+        "roles": [
+          "analyst"
+        ]
+      },
+      "plan": {
+        "explanation": "12dc9a5c812f ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.quantity]\n050bc43325ea AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/coste] at [] for [project-file-76656e7461732e79616d6c/metric/coste] <- 12dc9a5c812f\n2ee61efc449a ProjectSemanticOutput [m] <- 050bc43325ea\nblock query = 2ee61efc449a\ncontract project-file-76656e7461732e79616d6c/measure/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/coste INT32 sin unidad\n",
+        "obligations": 1
+      },
+      "receipt": {
+        "id": "receipt:7a83e44818b2be07f444949a15917672d1debaf63e0f499b1d64b51bea5c6975",
+        "query": "sef-sha256-v1:87e4bc3fa9ba0d2c900d1df57240e125a90dc77781d5a68e0a61000afcf1d73d",
+        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
+        "plan": "sef-sha256-v1:550f44ca3d01b2bf564bb977a3e97b3ada5067e6bf58148906c1fc9640425216",
+        "decision": "sef-authz-sha256:13b83a7fe88bbcc5a65917e72f4a627b68b469b82d0c9f14e46ccad3f9ee1a82",
+        "policies": "sef-authz-sha256:c264e27a8795afa543bab42e0e6c074d937309edd21b5b686c780875a8cb3372",
+        "context": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  {
+    "case": "unknown, no inspection",
+    "user": "analista",
+    "status": 404,
+    "answer": {
+      "type": "about:blank",
+      "title": "Not Found",
+      "status": 404,
+      "detail": "No se puede explicar la consulta solicitada.",
+      "code": "model_not_found"
+    }
+  },
+  {
+    "case": "unknown, inspector",
+    "user": "modelador",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "La consulta no corresponde al modelo.",
+      "code": "query_invalid",
+      "diagnostics": [
+        {
+          "code": "unknown_metric",
+          "phase": "binding",
+          "message": "El modelo no tiene la métrica \"inexistente\".",
+          "path": "/query/selections/0"
+        }
+      ]
+    }
+  },
+  {
+    "case": "absent, inspector",
+    "user": "modelador",
+    "status": 404,
+    "answer": {
+      "type": "about:blank",
+      "title": "Not Found",
+      "status": 404,
+      "detail": "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
+      "code": "model_not_found"
+    }
+  },
+  {
+    "case": "binding, inspector",
+    "user": "modelador",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "La consulta no corresponde al modelo.",
+      "code": "query_invalid",
+      "diagnostics": [
+        {
+          "code": "invalid_filter_target",
+          "phase": "binding",
+          "message": "Un filtro antes de agregar se aplica a dimensiones; las métricas se filtran después (post_aggregate_filter).",
+          "path": "/query/filter/target"
+        }
+      ]
+    }
+  },
+  {
+    "case": "all metrics",
+    "user": "modelador",
+    "status": 200,
+    "answer": {
+      "decision": {
+        "reason": "permitted",
+        "masked": [],
+        "roles": [
+          "modeler"
+        ]
+      },
+      "plan": {
+        "explanation": "93bc9d32cd4b ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.quantity, project-file-76656e7461732e79616d6c/field/sales.region]\nf810fbeb041a AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- 93bc9d32cd4b\n72f41104573a AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/coste, project-file-76656e7461732e79616d6c/measure/importe, project-file-76656e7461732e79616d6c/measure/margen] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/coste, project-file-76656e7461732e79616d6c/metric/importe, project-file-76656e7461732e79616d6c/metric/margen] <- f810fbeb041a\ne316db8b4d0c ProjectSemanticOutput [r, a, b, c] <- 72f41104573a\nblock query = e316db8b4d0c\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/importe DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/margen DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/importe DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/margen DECIMAL(18,2) sin unidad\n",
+        "obligations": 5
+      },
+      "receipt": {
+        "id": "receipt:936267e41edefcaa0213527280c667df10c40c60a9420cd557e0dfc2f75e3825",
+        "query": "sef-sha256-v1:142373c995845de029e09c5b41a2ce10a129ae8854859d8990e3b0fc384a0f37",
+        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
+        "plan": "sef-sha256-v1:acbe1326d15341e9fbdc59d3bb5882646cadf2d602f97c1c172eeadfebf2562e",
+        "decision": "sef-authz-sha256:791715149936623e4e491d49418f1f98d4fa01414831ed2749d5b2f14c82873d",
+        "policies": "sef-authz-sha256:c264e27a8795afa543bab42e0e6c074d937309edd21b5b686c780875a8cb3372",
+        "context": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  {
+    "case": "no role",
+    "user": "sinrol",
+    "status": 404,
+    "answer": {
+      "type": "about:blank",
+      "title": "Not Found",
+      "status": 404,
+      "detail": "No se puede explicar la consulta solicitada.",
+      "code": "model_not_found"
+    }
+  },
+  {
+    "case": "over the bounds",
+    "user": "lector",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "Una consulta tiene entre 1 y 64 selecciones.",
+      "code": "invalid_request",
+      "diagnostics": []
+    }
+  },
+  {
+    "case": "invalid model, inspector",
+    "user": "modelador",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "El modelo tiene errores. Quien lo mantiene los ve en la pantalla Modelos.",
+      "code": "model_invalid",
+      "diagnostics": [
+        {
+          "code": "syntax",
+          "phase": "model",
+          "message": "El modelo tiene un error en su definición."
+        }
+      ]
+    }
+  },
+  {
+    "case": "incorrect query",
+    "user": "lector",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "La consulta no tiene un resultado correcto con este modelo.",
+      "code": "query_incorrect",
+      "diagnostics": [
+        {
+          "code": "ILLEGAL_REAGGREGATION",
+          "phase": "correctness",
+          "message": "La consulta no tiene un resultado correcto con este modelo."
+        }
+      ]
+    }
+  },
+  {
+    "case": "plan reads a restricted dataset",
+    "user": "lector",
+    "status": 403,
+    "answer": {
+      "type": "about:blank",
+      "title": "Forbidden",
+      "status": 403,
+      "detail": "La consulta lee datos que tus roles en este proyecto no permiten usar.",
+      "code": "semantic_access_denied",
+      "denied": {
+        "kind": "dataset",
+        "usage": "lineage"
+      },
+      "reason": "no_permit"
+    }
+  },
+  {
+    "case": "invalid policies",
+    "user": "lector",
+    "status": 503,
+    "answer": {
+      "type": "about:blank",
+      "title": "Service Unavailable",
+      "status": 503,
+      "detail": "Las políticas o los miembros del proyecto no son válidos: nadie puede consultar hasta corregirlos.",
+      "code": "policies_invalid"
+    }
+  }
+]

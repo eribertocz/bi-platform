@@ -1106,3 +1106,163 @@ async fn a_hidden_homonym_never_changes_a_visible_query(pool: sqlx::PgPool) {
     );
     h.db.close().await;
 }
+
+/// A golden case that first rewrites one project file: name, user, the
+/// file and its new contents, and the request.
+type Staged = (
+    &'static str,
+    &'static str,
+    Option<(&'static str, String)>,
+    Value,
+);
+
+/// The explain contract for a fixed set of requests, recorded on the base
+/// commit before the shared preparation (#135): answers and fingerprints
+/// must stay byte for byte, the correlation aside. Regenerate only on
+/// purpose, with `BI_GOLDEN_UPDATE=1`.
+#[sqlx::test(migrations = false)]
+async fn the_explain_contract_is_preserved(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let having = |name: &str| {
+        let mut body = query(&json!([metric("m", name)]));
+        body["query"]["having"] = json!({ "op": "compare",
+            "target": { "kind": "metric", "selection": "m" }, "comparison": ">",
+            "value": { "type": "number", "value": "1" } });
+        body
+    };
+    let mut row_filter = query(&json!([region(), metric("m", "importe")]));
+    row_filter["query"]["filter"] = json!({
+        "op": "compare",
+        "target": { "kind": "metric", "selection": "m" },
+        "comparison": ">",
+        "value": { "type": "number", "value": "1" }
+    });
+    let cases: Vec<(&str, &str, Value)> = vec![
+        (
+            "open",
+            "lector",
+            query(&json!([region(), metric("m", "importe")])),
+        ),
+        (
+            "masked",
+            "lector",
+            query(&json!([region(), metric("c", "margen")])),
+        ),
+        ("hidden", "lector", asked("metrics/ventas.yaml", "coste")),
+        ("refused masked use", "lector", having("margen")),
+        (
+            "restricted masked",
+            "analista",
+            asked("metrics/ventas.yaml", "coste"),
+        ),
+        (
+            "unknown, no inspection",
+            "analista",
+            asked("metrics/ventas.yaml", "inexistente"),
+        ),
+        (
+            "unknown, inspector",
+            "modelador",
+            asked("metrics/ventas.yaml", "inexistente"),
+        ),
+        (
+            "absent, inspector",
+            "modelador",
+            asked("metrics/no_existe.yaml", "importe"),
+        ),
+        ("binding, inspector", "modelador", row_filter),
+        (
+            "all metrics",
+            "modelador",
+            query(&json!([
+                region(),
+                metric("a", "importe"),
+                metric("b", "margen"),
+                metric("c", "coste")
+            ])),
+        ),
+        ("no role", "sinrol", asked("metrics/ventas.yaml", "importe")),
+    ];
+    let mut recorded = Vec::new();
+    for (case, user, body) in cases {
+        let cookie = h.login(user).await;
+        let (status, answer) = h.explain(Some(&cookie), &body).await;
+        recorded.push(json!({
+            "case": case,
+            "user": user,
+            "status": status.as_u16(),
+            "answer": without_correlation(answer),
+        }));
+    }
+    // Cases that need another project state, applied in this order.
+    let semi_additive = MODEL
+        .replace(
+            "  - name: importe\n",
+            "  - name: importe\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\":1,\"aggregation\":{\"class\":\"semi_additive\",\"axes\":[{\"dimension\":\"region\",\"behavior\":\"forbidden\"}]}}'\n",
+        )
+        .replace(
+            "        dimension: {}",
+            "        dimension: {}\n        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\":1,\"dimension\":\"region\"}'",
+        );
+    let restricted_dataset = MODEL.replace(
+        "  - name: sales\n",
+        "  - name: sales\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n",
+    );
+    let over_bounds = query(&json!(
+        (0..65)
+            .map(|n| metric(&format!("m{n}"), "importe"))
+            .collect::<Vec<_>>()
+    ));
+    let staged: Vec<Staged> = vec![
+        ("over the bounds", "lector", None, over_bounds),
+        (
+            "invalid model, inspector",
+            "modelador",
+            Some(("metrics/oculto.yaml", "version: [\n".to_owned())),
+            asked("metrics/oculto.yaml", "importe"),
+        ),
+        (
+            "incorrect query",
+            "lector",
+            Some(("metrics/ventas.yaml", semi_additive)),
+            query(&json!([metric("m", "importe")])),
+        ),
+        (
+            "plan reads a restricted dataset",
+            "lector",
+            Some(("metrics/ventas.yaml", restricted_dataset)),
+            query(&json!([metric("m", "importe")])),
+        ),
+        (
+            "invalid policies",
+            "lector",
+            Some((
+                "policies/rota.cedar",
+                "permit (principal, action, resource".to_owned(),
+            )),
+            asked("metrics/ventas.yaml", "importe"),
+        ),
+    ];
+    for (case, user, change, body) in staged {
+        if let Some((file, contents)) = change {
+            h.write(file, &contents);
+        }
+        let cookie = h.login(user).await;
+        let (status, answer) = h.explain(Some(&cookie), &body).await;
+        recorded.push(json!({
+            "case": case,
+            "user": user,
+            "status": status.as_u16(),
+            "answer": without_correlation(answer),
+        }));
+    }
+    let recorded = serde_json::to_string_pretty(&Value::from(recorded)).unwrap() + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/explain.json");
+    if std::env::var("BI_GOLDEN_UPDATE").is_ok_and(|v| v == "1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &recorded).unwrap();
+    }
+    let golden = std::fs::read_to_string(&path).expect("tests/golden/explain.json");
+    assert_eq!(recorded, golden.replace("\r\n", "\n"));
+    h.db.close().await;
+}

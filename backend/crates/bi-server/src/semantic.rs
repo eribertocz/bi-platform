@@ -9,6 +9,7 @@
 //! or the base roles. An unreadable or invalid policy set closes the path.
 
 pub mod access;
+pub mod prepare;
 pub mod request;
 
 use std::collections::BTreeMap;
@@ -19,7 +20,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use sef_authz::{Constraint, QueryDecision, ResourceKind, authorize_query};
+use sef_authz::{Constraint, QueryDecision, ResourceKind};
 use sef_correctness::SemanticContext;
 use sef_model_ir::identity::StableId;
 use sef_model_ir::model::ModelDefinition;
@@ -30,11 +31,11 @@ use sha2::{Digest, Sha256};
 use tower_http::request_id::RequestId;
 use utoipa::ToSchema;
 
-use self::access::{Access, AccessError, Resources};
+use self::access::Access;
 use self::request::ExplainRequest;
 use crate::AppState;
 use crate::auth::Principal;
-use crate::models::{self, ModelDiagnostic, ProjectFile};
+use crate::models::{self, ModelDiagnostic};
 use crate::problem::Problem;
 
 /// The answer: what was decided, the certified plan and its receipt.
@@ -205,6 +206,7 @@ pub async fn explain(
 }
 
 /// What an explanation needs from the audit, decided before writing it.
+#[derive(Clone)]
 struct Audit {
     allowed: bool,
     valid: bool,
@@ -215,7 +217,7 @@ struct Audit {
 
 enum Outcome {
     Explained {
-        explanation: SemanticExplanation,
+        explanation: Box<SemanticExplanation>,
         audit: Audit,
     },
     Denied {
@@ -342,388 +344,50 @@ fn problem_headers(mut response: Response) -> Response {
 }
 
 async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -> Outcome {
-    // Bounds first: nothing is read for a request over them.
-    let unbound = match request.query.unbound() {
-        Ok(unbound) => unbound,
-        Err(message) => return Outcome::Refused(message),
-    };
-    let (dimensions, metrics, filters) = request.query.shape();
-    let limit = request
-        .query
-        .limit
-        .map_or(0, |limit| u32::try_from(limit).unwrap_or(u32::MAX));
-    let shape = (dimensions, metrics, filters, limit);
-    let Some(directory) = state.models.directory.clone() else {
-        return Outcome::Failed(
-            StatusCode::NOT_FOUND,
-            "model_not_found",
-            "No hay un proyecto configurado.",
-        );
-    };
-    let Some(file) = request.model.strip_prefix("metrics/").map(str::to_owned) else {
-        return Outcome::Failed(
-            StatusCode::NOT_FOUND,
-            "model_not_found",
-            "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
-        );
-    };
-    let Ok(permit) = state.models.admission.clone().try_acquire_owned() else {
-        return Outcome::Failed(
-            StatusCode::TOO_MANY_REQUESTS,
-            "models_busy",
-            "Ya hay dos compilaciones en curso. Reintenta en unos segundos.",
-        );
-    };
-    let Loaded {
-        project,
-        access,
-        disclosure,
-        session,
-        permit,
-    } = match load(directory, Session::of(principal), permit).await {
-        Ok(loaded) => loaded,
-        Err((status, code, message)) => return Outcome::Failed(status, code, message),
-    };
-    // An engine that is down answers before the file is looked up, the same
-    // whether it exists or not.
-    let Some(runtime) = state.analytics.runtime() else {
-        return Outcome::Failed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "analytics_unavailable",
-            "El motor analítico no está listo. Reintenta en unos segundos.",
-        );
-    };
-    let Some(file) = project
-        .ok()
-        .and_then(|files| files.into_iter().find(|f| f.name == file))
-    else {
-        if !disclosure.inspects() {
-            return Outcome::Undisclosed { audit: None };
-        }
-        return disclosure.inspected(Outcome::Failed(
-            StatusCode::NOT_FOUND,
-            "model_not_found",
-            "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
-        ));
-    };
-    let span = tracing::Span::current();
-    let work = runtime.run(move |conn| {
-        let _permit = permit;
-        let _entered = span.enter();
-        Ok(explain_file(
-            file,
-            conn,
-            &access,
-            &session,
-            &unbound,
-            shape,
-            &disclosure,
-        ))
-    });
-    match tokio::time::timeout(state.query_timeout, work).await {
-        Err(_) => Outcome::Failed(
-            StatusCode::GATEWAY_TIMEOUT,
-            "explain_timeout",
-            "La explicación superó el tiempo máximo. Simplifica la consulta y reintenta.",
-        ),
-        Ok(Err(_)) => Outcome::Failed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "analytics_unavailable",
-            "No se pudo consultar el catálogo analítico. Reintenta.",
-        ),
-        Ok(Ok(outcome)) => outcome,
+    // Rendered where it was prepared: within the admission permit and the
+    // query deadline, off the async executor.
+    let session = prepare::Session::of(principal);
+    match prepare::prepare_with(state, session, &request, |prepared| explained(&prepared)).await {
+        Ok(outcome) => outcome,
+        Err(prepare::Refusal(outcome)) => *outcome,
     }
 }
 
-/// What one request reads from the project, on a single access snapshot.
-struct Loaded {
-    project: Result<Vec<ProjectFile>, ModelDiagnostic>,
-    access: Access,
-    disclosure: Disclosure,
-    session: Session,
-    permit: tokio::sync::OwnedSemaphorePermit,
-}
-
-/// Reads the access configuration, decides on it whether this session
-/// inspects the catalog, and reads the project, off the executor. An
-/// unusable configuration closes the path before anything says whether a
-/// file exists.
-async fn load(
-    directory: std::path::PathBuf,
-    session: Session,
-    permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<Loaded, (StatusCode, &'static str, &'static str)> {
-    let span = tracing::Span::current();
-    let read = tokio::task::spawn_blocking(move || {
-        let _entered = span.enter();
-        let access = access::load(&directory);
-        // On the same snapshot; it only sets how much a failure may say,
-        // never what the query may use.
-        let inspection = access.as_ref().ok().and_then(|access| {
-            let principal = access::principal(&access.members, &session.user, &session.groups);
-            match models::catalog::decide_for(&access.snapshot, &principal) {
-                models::catalog::Verdict::Allowed { fingerprint } => Some(fingerprint),
-                _ => None,
-            }
-        });
-        let project = models::read_project(&directory);
-        (project, access, inspection, session, permit)
-    })
-    .await;
-    let Ok((project, access, inspection, session, permit)) = read else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "models_unavailable",
-            "No se pudo leer el proyecto.",
-        ));
-    };
-    let access = match access {
-        Ok(access) => access,
-        Err(error) => {
-            if let AccessError::Invalid(problems) = &error {
-                tracing::warn!(problems = problems.len(), "project policies are invalid");
-            }
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "policies_invalid",
-                "Las políticas o los miembros del proyecto no son válidos: nadie puede consultar \
-                 hasta corregirlos.",
-            ));
-        }
-    };
-    Ok(Loaded {
-        project,
-        access,
-        disclosure: Disclosure { inspection },
-        session,
-        permit,
-    })
-}
-
-/// What the path knows of who asks, copied from the verified session.
-struct Session {
-    user: String,
-    groups: Vec<String>,
-    attributes: BTreeMap<String, serde_json::Value>,
-}
-
-impl Session {
-    fn of(principal: &Principal) -> Self {
-        let identity = principal.federated_identity.as_ref();
-        Self {
-            user: principal.session.user.id.clone(),
-            groups: principal.verified_groups().to_vec(),
-            attributes: identity.map(|i| i.attributes.clone()).unwrap_or_default(),
-        }
-    }
-}
-
-/// How much a failure may say to this session.
-struct Disclosure {
-    /// The fingerprint of an allowed `view` on the project's catalog
-    /// (#124): what Modelos already shows. Releasing anything of the
-    /// catalog under it is recorded like the Modelos route records it.
-    inspection: Option<String>,
-}
-
-impl Disclosure {
-    const fn inspects(&self) -> bool {
-        self.inspection.is_some()
-    }
-
-    /// `outcome`, released under inspection: recorded before it leaves.
-    fn inspected(&self, outcome: Outcome) -> Outcome {
-        match &self.inspection {
-            Some(fingerprint) => Outcome::Inspected {
-                outcome: Box::new(outcome),
-                fingerprint: fingerprint.clone(),
-            },
-            None => outcome,
-        }
-    }
-}
-
-fn explain_file(
-    file: ProjectFile,
-    conn: &bi_runtime::duckdb::Connection,
-    access: &Access,
-    session: &Session,
-    unbound: &sef_query_ir::unbound::UnboundQuerySet,
-    shape: (u32, u32, u32, u32),
-    disclosure: &Disclosure,
-) -> Outcome {
-    let compiled = match models::compile(file, conn) {
-        Ok(compiled) => compiled,
-        Err(_) if !disclosure.inspects() => return Outcome::Undisclosed { audit: None },
-        Err(rejected) => {
-            return disclosure.inspected(Outcome::Invalid {
-                code: "model_invalid",
-                message: "El modelo tiene errores. Quien lo mantiene los ve en la pantalla \
-                          Modelos."
-                    .to_owned(),
-                diagnostics: rejected
-                    .diagnostics
-                    .into_iter()
-                    .map(model_diagnostic)
-                    .collect(),
-                audit: None,
-            });
-        }
-    };
-    let model = &compiled.document.semantic;
-    let definition = model.definition();
-    let resources = Resources::of(definition);
-    let principal = access::principal(&access.members, &session.user, &session.groups);
-    // Without inspection, names resolve among what this session may see
-    // first: a hidden object never makes a visible name ambiguous. When only
-    // hidden objects answer a name, the request is still decided (and its
-    // denial recorded), but answered like a name the model does not have.
-    let bound = if disclosure.inspects() {
-        sef_query_ir::bind(unbound, definition)
-    } else {
-        let visible = |id: &StableId| {
-            resources
-                .get(id)
-                .is_some_and(|resource| shown(access, &principal, resource))
-        };
-        sef_query_ir::bind_visible(unbound, definition, &visible)
-            .or_else(|_| sef_query_ir::bind(unbound, definition))
-    };
-    let bound = match bound {
-        Ok(bound) => bound,
-        // Any binding failure would tell what the model declares.
-        Err(_) if !disclosure.inspects() => return Outcome::Undisclosed { audit: None },
-        Err(errors) => {
-            return disclosure.inspected(Outcome::Invalid {
-                code: "query_invalid",
-                message: "La consulta no corresponde al modelo.".to_owned(),
-                diagnostics: errors.into_iter().map(binding_diagnostic).collect(),
-                audit: None,
-            });
-        }
-    };
-    let decided = Decided {
-        resources: &resources,
-        principal: &principal,
-    };
-    decide(model, &bound, access, session, shape, disclosure, &decided)
-}
-
-/// Who asks and what the model's resources are, computed once per request.
-struct Decided<'a> {
-    resources: &'a Resources,
-    principal: &'a sef_authz::Principal,
-}
-
-/// Authorizes, validates and plans a bound query.
-fn decide(
-    model: &sef_model_ir::model::CompiledSemanticModel,
-    bound: &sef_query_ir::query::SemanticQuerySet,
-    access: &Access,
-    session: &Session,
-    shape: (u32, u32, u32, u32),
-    disclosure: &Disclosure,
-    decided: &Decided<'_>,
-) -> Outcome {
-    let definition = model.definition();
-    let Some(block) = bound.blocks.first() else {
+/// Explain, as one consumer of the preparation: the decision, the certified
+/// plan and the receipt, all read from what was prepared.
+fn explained(prepared: &prepare::Prepared) -> Outcome {
+    let decision = prepared.decision();
+    let Some(block) = prepared.query().blocks.first() else {
         return Outcome::Refused("La consulta no tiene bloques.".to_owned());
     };
-    let (resources, principal) = (decided.resources, decided.principal);
-    let roles: Vec<String> = principal.roles.iter().cloned().collect();
-    let context = sef_authz::Context::new();
-    let mut uses = access::requested(resources, definition, block);
-    let model_hash = model.content_hash().to_string();
-    let audit = |decision: &QueryDecision, valid: bool| Audit {
-        allowed: decision.allowed,
-        valid,
-        model: model_hash.clone(),
-        decision: decision.fingerprint.to_string(),
-        shape,
-    };
-    // First what the query asks for, before validating anything.
-    let asked = authorize_query(&access.snapshot, principal, &uses.list, &context);
-    if !asked.allowed {
-        let audit = audit(&asked, true);
-        // Named only when everything the request refers to is visible to
-        // it: the first refused use never decides for the others.
-        if !disclosure.inspects()
-            && (asked.denied.is_none() || !request_is_disclosable(access, principal, &uses))
-        {
-            return Outcome::Undisclosed { audit: Some(audit) };
-        }
-        return denied(&asked, definition, &uses, audit);
-    }
-    let slots = context_slots(definition, &session.attributes);
-    let validated = match sef_correctness::validate(model, bound, &slots) {
-        Ok(validated) => validated,
-        Err(diagnostics) => {
-            return Outcome::Invalid {
-                code: "query_incorrect",
-                message: "La consulta no tiene un resultado correcto con este modelo.".to_owned(),
-                diagnostics: diagnostics
-                    .into_iter()
-                    .map(|d| semantic_diagnostic(d, definition, &uses))
-                    .collect(),
-                audit: Some(audit(&asked, false)),
-            };
-        }
-    };
-    let planned = match sef_planner::plan(model, &validated) {
-        Ok(planned) => planned,
-        Err(diagnostics) => {
-            return Outcome::Invalid {
-                code: "query_unplannable",
-                message: "El planificador no puede garantizar el resultado de esta consulta."
-                    .to_owned(),
-                diagnostics: diagnostics
-                    .into_iter()
-                    .map(|d| semantic_diagnostic(d, definition, &uses))
-                    .collect(),
-                audit: Some(audit(&asked, false)),
-            };
-        }
-    };
-    // Then everything the plan reads, on the same snapshot.
-    access::read_by_plan(&mut uses, resources, definition, &planned.plan);
-    let decision = authorize_query(&access.snapshot, principal, &uses.list, &context);
-    if !decision.allowed {
-        return denied(&decision, definition, &uses, audit(&decision, true));
-    }
-    let (Ok(query), Ok(plan)) = (bound.fingerprint(), planned.plan.fingerprint()) else {
-        return Outcome::Failed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "explain_unavailable",
-            "No se pudo calcular la huella de la consulta.",
-        );
-    };
     let receipt = receipt(
-        query.to_string(),
-        model_hash.clone(),
-        plan.to_string(),
+        prepared.query_fingerprint().to_owned(),
+        prepared.model().content_hash().to_string(),
+        prepared.plan_fingerprint().to_owned(),
         decision.fingerprint.to_string(),
-        access.snapshot.version().to_owned(),
-        &slots,
+        prepared.policies().to_owned(),
+        prepared.context(),
     );
-    let obligations = validated
+    let obligations = prepared
+        .validated()
         .blocks
         .iter()
         .map(|block| block.obligations.len())
         .sum::<usize>();
     Outcome::Explained {
-        explanation: SemanticExplanation {
+        explanation: Box::new(SemanticExplanation {
             decision: ExplainDecision {
                 reason: decision.reason.code().to_owned(),
-                masked: masked(&decision, block),
-                roles,
+                masked: masked(decision, block),
+                roles: prepared.roles().to_vec(),
             },
             plan: ExplainPlan {
-                explanation: sef_planner::explain(model, &planned.plan),
+                explanation: sef_planner::explain(prepared.model(), prepared.plan()),
                 obligations: u32::try_from(obligations).unwrap_or(u32::MAX),
             },
             receipt,
-        },
-        audit: audit(&decision, true),
+        }),
+        audit: prepared.audit().clone(),
     }
 }
 
