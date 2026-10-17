@@ -19,11 +19,16 @@ use sef_model_ir::types::ValueType;
 use sef_ossie::catalog::Catalog;
 use sef_ossie::diagnostic::{Code, Diagnostic, Severity};
 use serde::Serialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::request_id::RequestId;
 use utoipa::ToSchema;
 
-use crate::{AppState, problem::Problem};
+use self::catalog::{Event, Verdict};
+use crate::{AppState, auth::Principal, problem::Problem};
+
+mod catalog;
+#[cfg(test)]
+mod tests;
 
 pub const MAX_FILES: usize = 100;
 pub const MAX_PROJECT_BYTES: usize = 32 * 1024 * 1024;
@@ -37,6 +42,7 @@ pub struct Models {
     pub(crate) admission: Arc<Semaphore>,
     duration: Option<Histogram<f64>>,
     requests: Option<Counter<u64>>,
+    work: Option<Counter<u64>>,
 }
 
 impl Default for Models {
@@ -53,6 +59,7 @@ impl Models {
             admission: Arc::new(Semaphore::new(2)),
             duration: None,
             requests: None,
+            work: None,
         }
     }
 
@@ -71,7 +78,21 @@ impl Models {
                 .with_description("Model listing requests")
                 .build(),
         );
+        self.work = Some(
+            meter
+                .u64_counter("bi_models_catalog_work")
+                .with_description("Project reads and compilations started by model listing")
+                .build(),
+        );
         self
+    }
+
+    /// Counts catalog work by step (`read`, `compile`); a refused request
+    /// starts none.
+    fn started(&self, step: &'static str) {
+        if let Some(work) = &self.work {
+            work.add(1, &[opentelemetry::KeyValue::new("step", step)]);
+        }
     }
 }
 
@@ -290,27 +311,37 @@ fn semantic_message(message: &str) -> String {
     format!("{explanation} ({code})")
 }
 
-/// Authorization: action `models.read`, resource the configured project's
-/// `metrics` metadata. The synthetic G2 deployment requires a valid session;
-/// resource policies follow in the G2 security work (ADR 0010 and #64 scope).
+/// Authorization: Cedar `view` on `Model::"project:catalog"`, decided with
+/// the project's policies and members before `metrics/` is read (#124);
+/// every decision is audited before the answer leaves.
 #[utoipa::path(get, path = "/api/v1/models", tag = "models", operation_id = "listModels",
     summary = "Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real.",
+    description = "Requiere `view` sobre `Model::\"project:catalog\"`: inspección del catálogo completo del proyecto, incluidos archivos inválidos y metadatos confidenciales o restringidos. No concede consultar, visualizar ni extraer datos. La decisión se toma antes de leer `metrics/` y se audita antes de responder.",
     security(("sessionCookie" = [])),
     responses(
         (status = 200, description = "Estado del proyecto y resultados por archivo; sin configuración, lista vacía. Directorio inaccesible o límites globales: project_status unavailable y diagnóstico; nunca resultados parciales.", body = ModelsResponse),
         (status = 401, description = "Sin sesión válida", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Sin permiso para revisar el catálogo del proyecto (`models_forbidden`); sin nada del catálogo", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Demasiadas cargas simultáneas", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "Motor no disponible, lectura fallida o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
-        (status = 504, description = "Tiempo de compilación agotado", body = Problem, content_type = "application/problem+json")
+        (status = 503, description = "Motor no disponible, lectura fallida, políticas o miembros ilegibles o inválidos (`policies_invalid`), auditoría no disponible (`audit_unavailable`) o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
+        (status = 504, description = "Tiempo agotado al revisar los permisos o al compilar", body = Problem, content_type = "application/problem+json")
     )
 )]
-pub async fn list(State(state): State<AppState>, id: Option<Extension<RequestId>>) -> Response {
+pub async fn list(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    id: Option<Extension<RequestId>>,
+) -> Response {
     let started = Instant::now();
     let request_id = id
         .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
         .unwrap_or_default();
-    let result = listing(&state).await;
-    let outcome = if result.is_ok() { "ok" } else { "error" };
+    let (decision, result) = inspect(&state, &principal, &request_id).await;
+    let outcome = match &result {
+        Ok(_) => "ok",
+        Err((status, ..)) if *status == StatusCode::FORBIDDEN => "forbidden",
+        Err(_) => "error",
+    };
     let attributes = [opentelemetry::KeyValue::new("outcome", outcome)];
     if let Some(duration) = &state.models.duration {
         duration.record(started.elapsed().as_secs_f64(), &attributes);
@@ -321,6 +352,7 @@ pub async fn list(State(state): State<AppState>, id: Option<Extension<RequestId>
     tracing::info!(
         request_id,
         outcome,
+        decision,
         elapsed_ms = started.elapsed().as_millis(),
         "project models loaded"
     );
@@ -332,42 +364,145 @@ pub async fn list(State(state): State<AppState>, id: Option<Extension<RequestId>
     }
 }
 
-type Failure = (StatusCode, &'static str, &'static str);
+pub(crate) type Failure = (StatusCode, &'static str, &'static str);
 
-async fn listing(state: &AppState) -> Result<ModelsResponse, Failure> {
+const BUSY: Failure = (
+    StatusCode::TOO_MANY_REQUESTS,
+    "models_busy",
+    "Ya hay dos cargas en curso. Reintenta en unos segundos.",
+);
+
+const UNREADABLE: Failure = (
+    StatusCode::SERVICE_UNAVAILABLE,
+    "models_unavailable",
+    "No se pudo leer el proyecto.",
+);
+
+const DECISION_TIMEOUT: Failure = (
+    StatusCode::GATEWAY_TIMEOUT,
+    "models_timeout",
+    "La revisión de permisos superó el tiempo máximo. Reintenta.",
+);
+
+const FORBIDDEN: Failure = (
+    StatusCode::FORBIDDEN,
+    "models_forbidden",
+    "No tienes permiso para revisar las definiciones y los errores de este proyecto. Solicita \
+     acceso a quien lo administra.",
+);
+
+const POLICIES_INVALID: Failure = (
+    StatusCode::SERVICE_UNAVAILABLE,
+    "policies_invalid",
+    "Las políticas o los miembros del proyecto no son válidos: nadie puede revisar los modelos \
+     hasta corregirlos.",
+);
+
+/// The listing for `principal`: decided, answered and recorded, in that
+/// order, plus the decision for the log (`none` when there was nothing to
+/// decide on).
+async fn inspect(
+    state: &AppState,
+    principal: &Principal,
+    request_id: &str,
+) -> (&'static str, Result<ModelsResponse, Failure>) {
     let Some(directory) = state.models.directory.clone() else {
-        return Ok(ModelsResponse {
+        // No project, no catalog to decide on: nothing is read, and the
+        // audit gets no invented decision.
+        let empty = ModelsResponse {
             project_status: ProjectStatus::NotConfigured,
             models: vec![],
             diagnostics: vec![],
-        });
+        };
+        return ("none", Ok(empty));
     };
-    let permit = state
-        .models
-        .admission
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                "models_busy",
-                "Ya hay dos cargas en curso. Reintenta en unos segundos.",
-            )
-        })?;
+    let Ok(permit) = state.models.admission.clone().try_acquire_owned() else {
+        return ("none", Err(BUSY));
+    };
+    // A refusal binds the permit only to release it before the audit.
+    let (decision, event, result) = match decide(state, principal, directory, permit).await {
+        Ok((Verdict::Allowed { fingerprint }, directory, permit)) => {
+            let result = answer(state, directory, permit).await;
+            let event = Event::answered(fingerprint, result.is_ok());
+            ("permitted", event, result)
+        }
+        Ok((
+            Verdict::Denied {
+                fingerprint,
+                reason,
+            },
+            _,
+            _permit,
+        )) => (reason, Event::denied(fingerprint), Err(FORBIDDEN)),
+        Ok((Verdict::Unavailable, _, _permit)) => {
+            ("unavailable", Event::undecided(), Err(POLICIES_INVALID))
+        }
+        Err(failure) => ("unavailable", Event::undecided(), Err(failure)),
+    };
+    let recorded = event
+        .record(
+            &state.db,
+            &principal.session.user.id,
+            request_id,
+            state.query_timeout,
+        )
+        .await;
+    // Nothing of the catalog leaves without its event.
+    let audited = recorded.map_err(|code| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            "No se pudo registrar la auditoría. Reintenta.",
+        )
+    });
+    (decision, audited.and(result))
+}
+
+/// Decides on the project's access, read off the executor within
+/// `query_timeout`. The permit travels with the read, also past the
+/// deadline, and comes back with the verdict.
+async fn decide(
+    state: &AppState,
+    principal: &Principal,
+    directory: PathBuf,
+    permit: OwnedSemaphorePermit,
+) -> Result<(Verdict, PathBuf, OwnedSemaphorePermit), Failure> {
+    let user = principal.session.user.id.clone();
+    // Groups of the verified identity only; they grant what members.yaml says.
+    let groups = principal
+        .federated_identity
+        .as_ref()
+        .map(|identity| identity.groups.clone())
+        .unwrap_or_default();
+    let span = tracing::Span::current();
+    let read = tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
+        let verdict = catalog::decide(&directory, &user, &groups);
+        (verdict, directory, permit)
+    });
+    match tokio::time::timeout(state.query_timeout, read).await {
+        Ok(Ok(decided)) => Ok(decided),
+        Ok(Err(_)) => Err(UNREADABLE),
+        Err(_) => Err(DECISION_TIMEOUT),
+    }
+}
+
+/// The listing itself, for a session already allowed: reads `metrics/` and
+/// compiles each file, holding `permit` until the native work ends.
+pub(crate) async fn answer(
+    state: &AppState,
+    directory: PathBuf,
+    permit: OwnedSemaphorePermit,
+) -> Result<ModelsResponse, Failure> {
     // The permit travels with native work, including when the HTTP future drops.
+    state.models.started("read");
     let span = tracing::Span::current();
     let loaded = tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
         (read_project(&directory), permit)
     })
     .await
-    .map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "models_unavailable",
-            "No se pudo leer el proyecto.",
-        )
-    })?;
+    .map_err(|_| UNREADABLE)?;
     let (files, permit) = loaded;
     let files = match files {
         Ok(files) => files,
@@ -391,6 +526,7 @@ async fn listing(state: &AppState) -> Result<ModelsResponse, Failure> {
         "analytics_unavailable",
         "El motor analítico no está listo. Reintenta en unos segundos.",
     ))?;
+    state.models.started("compile");
     let span = tracing::Span::current();
     let compiled = tokio::time::timeout(
         state.query_timeout,
@@ -895,60 +1031,5 @@ fn type_label(value: &ValueType) -> String {
             timezone_semantics: sef_model_ir::time::TimestampSemantics::Instant,
         } => "TIMESTAMPTZ (instante)".into(),
         _ => "Tipo sin representación pública definida".into(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use proptest::prelude::*;
-
-    #[test]
-    fn public_types_never_show_internal_rust_metadata() {
-        assert_eq!(type_label(&ValueType::Time), "TIME");
-        let opaque = ValueType::OpaqueExtension {
-            namespace: "private_namespace".into(),
-            type_name: "internal_type".into(),
-        };
-        assert_eq!(
-            type_label(&opaque),
-            "Tipo sin representación pública definida"
-        );
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(48))]
-        #[test]
-        fn nofollow_rejects_links_for_arbitrary_filenames(name in "[a-zA-Z0-9_-]{1,40}") {
-            let root = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
-            std::fs::write(outside.path().join("secret"), "never expose this").unwrap();
-            std::fs::create_dir(root.path().join("metrics")).unwrap();
-            let filename = format!("{name}.yaml");
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("metrics").join(&filename)).unwrap();
-            #[cfg(windows)]
-            {
-                let output = std::process::Command::new("cmd").args(["/c", "mklink", "/J"])
-                    .arg(root.path().join("metrics").join(&filename)).arg(outside.path()).output().unwrap();
-                prop_assert!(output.status.success());
-            }
-            let loaded = read_project(root.path()).unwrap();
-            prop_assert_eq!(loaded.len(), 1);
-            prop_assert_eq!(loaded[0].text.as_ref().unwrap_err().code.as_str(), "unsafe_file");
-        }
-    }
-
-    #[test]
-    fn directory_entries_budget_includes_ignored_extensions() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir(root.path().join("metrics")).unwrap();
-        for i in 0..=MAX_DIRECTORY_ENTRIES {
-            std::fs::write(root.path().join(format!("metrics/{i}.txt")), "").unwrap();
-        }
-        assert_eq!(
-            read_project(root.path()).err().unwrap().code,
-            "too_many_entries"
-        );
     }
 }

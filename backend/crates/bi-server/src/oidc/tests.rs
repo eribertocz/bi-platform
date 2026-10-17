@@ -665,6 +665,101 @@ mod real {
         db.close().await;
     }
 
+    /// A verified provider group grants only what `members.yaml` maps it to
+    /// (#124): mapped, the project catalog opens; unmapped, or with roles
+    /// the client sends itself, it stays closed.
+    #[sqlx::test(migrations = false)]
+    async fn only_a_mapped_provider_group_inspects_the_catalog(pool: PgPool) {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("metrics")).unwrap();
+        std::fs::create_dir(project.path().join("policies")).unwrap();
+        let members = project.path().join("policies/members.yaml");
+        std::fs::write(&members, "version: 1\ngroups:\n  analysts: [modeler]\n").unwrap();
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
+        assert!(db.wait_until_ready().await);
+        let mut state = AppState::new(db.clone());
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        state.models = crate::models::Models::new(Some(project.path().to_owned()));
+        let app = crate::router(state);
+        let (url, cookie) = begin(&app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        let response = send(&app, "GET", &path, Some(&cookie), None).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let session = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|v| v.starts_with("bi_session="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let list = |uri: &str, claimed: Option<(&'static str, &'static str)>| {
+            let mut request = Request::get(uri).header(header::COOKIE, &session);
+            if let Some((name, value)) = claimed {
+                request = request.header(name, value);
+            }
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                (status, body)
+            }
+        };
+        let (status, body) = list("/api/v1/models", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["project_status"], "ready");
+        std::fs::write(
+            &members,
+            "version: 1\ngroups:\n  catalog_authors: [modeler]\n",
+        )
+        .unwrap();
+        for (uri, claimed) in [
+            ("/api/v1/models", None),
+            ("/api/v1/models", Some(("x-roles", "modeler"))),
+            (
+                "/api/v1/models",
+                Some(("x-forwarded-groups", "catalog_authors")),
+            ),
+            ("/api/v1/models?groups=catalog_authors&role=admin", None),
+        ] {
+            let (status, body) = list(uri, claimed).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} {claimed:?}");
+            assert_eq!(body["code"], "models_forbidden");
+        }
+        let recorded: Vec<(String, String)> = sqlx::query_as(
+            "SELECT (payload::jsonb)->>'action', (payload::jsonb)->>'result'
+             FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'resource_id' = 'project:catalog' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let denial = ("denial".to_owned(), "denied".to_owned());
+        assert_eq!(
+            recorded,
+            vec![
+                ("query".to_owned(), "success".to_owned()),
+                denial.clone(),
+                denial.clone(),
+                denial.clone(),
+                denial,
+            ]
+        );
+        db.close().await;
+    }
+
     async fn begin(app: &Router) -> (String, String) {
         let response = send(
             app,

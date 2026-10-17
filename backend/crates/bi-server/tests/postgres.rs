@@ -1125,6 +1125,70 @@ mod restricted {
         roles.drop().await;
     }
 
+    /// The restricted server decides the project catalog (#124) and records
+    /// each decision through the limited role's append function alone; that
+    /// role still cannot read the chain it writes to.
+    #[sqlx::test(migrations = false)]
+    async fn the_restricted_server_records_catalog_decisions(pool: PgPool) {
+        let roles = Roles::create(&pool).await;
+        roles.migrate().await;
+        roles.grant().await;
+        let db = roles.runtime(MetadataMode::Restricted);
+        ready(&db).await;
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("metrics")).unwrap();
+        std::fs::create_dir(project.path().join("policies")).unwrap();
+        let members = project.path().join("policies/members.yaml");
+        std::fs::write(&members, "version: 1\nusers:\n  analyst: [modeler]\n").unwrap();
+        let auth = AuthConfig::from_lookup(&|key| match key {
+            "BI_PUBLIC_ORIGIN" => Some(ORIGIN.to_owned()),
+            "BI_DEV_USERS" => Some(r#"[{"id":"analyst","display_name":"Analista"}]"#.to_owned()),
+            _ => None,
+        })
+        .unwrap();
+        let app = router(AppState {
+            auth,
+            models: bi_server::models::Models::new(Some(project.path().to_owned())),
+            ..AppState::new(db.clone())
+        });
+        let (status, _, cookie) = send(&app, "POST", "/api/v1/dev/login", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = cookie.unwrap();
+        let (status, body, _) = send(&app, "GET", "/api/v1/models", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"project_status\":\"ready\""), "{body}");
+        std::fs::write(&members, "version: 1\nusers:\n  analyst: [viewer]\n").unwrap();
+        let (status, body, _) = send(&app, "GET", "/api/v1/models", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("\"models_forbidden\""), "{body}");
+        let recorded: Vec<(String, String, bool)> = sqlx::query_as(
+            "SELECT (payload::jsonb)->>'action', (payload::jsonb)->>'result',
+                    (payload::jsonb)->>'policy_decision_id' IS NOT NULL
+             FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'resource_id' = 'project:catalog' ORDER BY sequence",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            recorded,
+            vec![
+                ("query".to_owned(), "success".to_owned(), true),
+                ("denial".to_owned(), "denied".to_owned(), true),
+            ]
+        );
+        let runtime = PgPool::connect_lazy_with(roles.options(&roles.runtime));
+        assert!(
+            sqlx::query("SELECT count(*) FROM bi_meta.audit_events")
+                .execute(&runtime)
+                .await
+                .is_err()
+        );
+        runtime.close().await;
+        db.close().await;
+        roles.drop().await;
+    }
+
     /// The pool replaces one lost work connection while the sentinel stays
     /// connected: the new connection validates itself before serving, so a
     /// dangerous privilege that appeared meanwhile stops admission before
