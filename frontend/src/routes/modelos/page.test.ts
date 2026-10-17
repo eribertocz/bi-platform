@@ -138,3 +138,78 @@ it('ignores obsolete responses and removes stale metadata while refreshing', asy
   rendered.unmount();
   expect(pending[2]!.signal.aborted).toBe(true);
 });
+const DENIED =
+  'No tienes permiso para revisar las definiciones y los errores de este proyecto. Solicita acceso a quien lo administra.';
+const problem = (status: number, code: string, detail: string) =>
+  Response.json(
+    { type: 'about:blank', title: 'Problem', status, code, detail, request_id: 'req-1' },
+    { status, headers: { 'content-type': 'application/problem+json' } },
+  );
+/** Text of the catalog that a refused session must not keep. */
+const catalog = [
+  'Ventas',
+  'DECIMAL(38,2)',
+  'metrics/ventas.yaml',
+  'metrics/error.yaml',
+  'Fecha comercial',
+];
+function assertNoCatalog() {
+  for (const text of catalog) expect(document.body.textContent).not.toContain(text);
+}
+it('a denial clears the catalog and explains it; restored access loads it again', async () => {
+  const answers = [
+    Response.json(data),
+    problem(403, 'models_forbidden', DENIED),
+    Response.json(data),
+  ];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => answers.shift()!),
+  );
+  render(Page);
+  await fireEvent.click(await screen.findByRole('button', { name: 'Ventas' }));
+  expect(screen.getByText('DECIMAL(38,2)')).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', { name: 'Actualizar modelos' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('No tienes acceso a los modelos de este proyecto');
+  expect(alert.textContent).toContain(DENIED);
+  assertNoCatalog();
+  expect(screen.queryByRole('list', { name: 'Modelos del proyecto' })).toBeNull();
+  await fireEvent.click(screen.getByRole('button', { name: 'Comprobar el acceso de nuevo' }));
+  await screen.findByRole('button', { name: 'Ventas' });
+  // The file open before the denial is not reopened by itself.
+  expect(screen.queryByRole('region')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+it('a temporary failure is not presented as a lack of permission', async () => {
+  const unavailable = 'El motor analítico no está listo. Reintenta en unos segundos.';
+  const answers = [problem(503, 'analytics_unavailable', unavailable), Response.json(data)];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => answers.shift()!),
+  );
+  render(Page);
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('Los modelos no están disponibles en este momento');
+  expect(alert.textContent).toContain(unavailable);
+  expect(alert.textContent).not.toContain('No tienes acceso');
+  await fireEvent.click(screen.getByRole('button', { name: 'Reintentar' }));
+  await screen.findByRole('button', { name: 'Ventas' });
+});
+it('an answer older than a denial never brings the catalog back', async () => {
+  const pending: { finish: (r: Response) => void }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn<typeof fetch>(() => new Promise((finish) => pending.push({ finish }))),
+  );
+  render(Page);
+  await waitFor(() => expect(pending).toHaveLength(1));
+  await fireEvent.click(screen.getByRole('button', { name: 'Actualizar modelos' }));
+  await waitFor(() => expect(pending).toHaveLength(2));
+  pending[1]!.finish(problem(403, 'models_forbidden', DENIED));
+  await screen.findByRole('alert');
+  pending[0]!.finish(Response.json(data));
+  await new Promise((settle) => setTimeout(settle, 0));
+  expect(screen.getByRole('alert').textContent).toContain(DENIED);
+  assertNoCatalog();
+});

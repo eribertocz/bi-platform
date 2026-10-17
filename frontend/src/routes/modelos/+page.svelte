@@ -12,9 +12,11 @@
   type Annotation = components['schemas']['ModelAnnotation'];
   let attempt = $state(0);
   let selected = $state<string | null>(null);
+  // Each load starts empty: nothing of an earlier answer survives a new one.
   let view = $state<
     | { kind: 'loading' }
     | { kind: 'ready'; data: ModelsResponse }
+    | { kind: 'forbidden'; message: string }
     | { kind: 'error'; message: string }
   >({ kind: 'loading' });
   const active = $derived(
@@ -31,7 +33,14 @@
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         if (error instanceof ModelsError && error.status === 401) {
+          selected = null;
           void goto(resolve('/login'));
+          return;
+        }
+        if (error instanceof ModelsError && error.status === 403) {
+          // Without access nothing of the catalog is kept, not even which file was open.
+          selected = null;
+          view = { kind: 'forbidden', message: error.message };
           return;
         }
         view = {
@@ -84,8 +93,13 @@
 <button class="mb-5" onclick={() => attempt++}>Actualizar modelos</button>
 <div aria-busy={view.kind === 'loading'}>
   {#if view.kind === 'loading'}<p role="status">Cargando modelos…</p>
+  {:else if view.kind === 'forbidden'}<div class="panel" role="alert">
+      <h2>No tienes acceso a los modelos de este proyecto</h2>
+      <p>{view.message}</p>
+      <button class="mt-4" onclick={() => attempt++}>Comprobar el acceso de nuevo</button>
+    </div>
   {:else if view.kind === 'error'}<div class="panel" role="alert">
-      <h2>No se pudo cargar los modelos</h2>
+      <h2>Los modelos no están disponibles en este momento</h2>
       <p>{view.message}</p>
       <button class="mt-4" onclick={() => attempt++}>Reintentar</button>
     </div>
