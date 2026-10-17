@@ -10,7 +10,7 @@
 1. Leyes fundamentales      docs/producto/leyes-bi.md (13 leyes; prioridad 1, 2, 3 y 5)
 2. Anti-patrones            fundamentos-propietario.md, «Documento 2»
 3. Seguridad                ADR 0010 y 0012; AGENTS.md
-4. ADR vigentes             docs/decisiones/ (0001-0014)
+4. ADR vigentes             docs/decisiones/ (0001-0015)
 5. Principios de producto    AGENTS.md («facilidad, velocidad, modernidad...»)
 6. Resto de documentos       docs/arquitectura/, docs/semantica/, docs/referentes/...
 ```
@@ -25,7 +25,7 @@
 |---|---|---|
 | **13 leyes fundamentales** | [`docs/producto/leyes-bi.md`](docs/producto/leyes-bi.md) | Propietario |
 | **Anti-patrones y principios de diseño** | [`docs/producto/propuestas/fundamentos-propietario.md`](docs/producto/propuestas/fundamentos-propietario.md), «Documento 2» | Propietario (adoptado como objetivo, decisión 9 abajo) |
-| **14 ADR** (0001–0014) | [`docs/decisiones/README.md`](docs/decisiones/README.md) | Propietario (producto) o rutinaria (técnica) |
+| **15 ADR** (0001–0015) | [`docs/decisiones/README.md`](docs/decisiones/README.md) | Propietario (producto) o rutinaria (técnica) |
 | **10 decisiones de producto aprobadas el 2026-10-12** (ELT, Estudio, bibliotecas, fundamentos, orden de prioridad...) | [`docs/producto/propuestas/version-comun.md`](docs/producto/propuestas/version-comun.md), apartado 5 | Propietario |
 | **Blueprint del propietario** (visión original) | [`docs/producto/BLUEPRINT_2026-10-11.md`](docs/producto/BLUEPRINT_2026-10-11.md) | — (ADR manda donde contradiga) |
 | **Base histórica de arquitectura** (no se modifica) | [`docs/arquitectura/`](docs/arquitectura/INDICE_17_MODULOS.md), huellas en `INVENTARIO.md` | — (ADR la sustituye donde aplica) |
@@ -64,6 +64,14 @@ Se actualiza `AGENTS.md` para reflejar esta decisión y se sustituye la prohibic
 - Un número de versión no cierra un gate ni permite iniciar el siguiente; si falta evidencia de release, el corte sigue en alpha o beta.
 - No autoriza tags ni releases: el propietario aprueba publicar cada candidato concreto y Claude ejecuta tag y release por instrucción registrada de Codex.
 - No cambia capacidades, orden de gates ni criterios de aceptación.
+
+## Decisión: navegador, contenedores y ubicación de los datos (2026-10-13)
+
+**Aprobada por el propietario** ([conformidad en #117](https://github.com/eribertocz/bi-platform/issues/117#issuecomment-6159822059)). Está en [ADR 0015](docs/decisiones/0015-navegador-contenedores-y-ubicacion-de-datos.md): el navegador es la experiencia de autores y viewers, y los contenedores oficiales versionados la distribución principal, en equipos de la empresa o en la nube que ella elija; dónde corre el servidor, quién entra y dónde están los datos son tres elecciones independientes; publicar comparte una revisión dentro de la instancia, sin copiar datos ni ceder los permisos del autor.
+
+- Es dirección y límites: las funciones se especifican y prueban en G3, G4 y G6, y ninguna está implementada todavía.
+- No promete un servicio operado por nosotros, un gateway propio ni latencia cero.
+- Conserva ADR 0003, 0004 y 0009; prevalece sobre las menciones de M08 a PostgreSQL como formato exclusivo de dashboards (tabla «Menciones obsoletas» de `docs/decisiones/README.md`).
 
 ## Decisión: documentación limpia antes del corte (2026-10-13)
 
