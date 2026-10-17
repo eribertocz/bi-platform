@@ -118,7 +118,11 @@ async fn stack(
     query_timeout: Duration,
 ) -> Stack {
     let db = Database::start(&pool.connect_options(), MetadataMode::Development);
-    assert!(tokio::time::timeout(READY, db.wait_until_ready()).await.unwrap());
+    assert!(
+        tokio::time::timeout(READY, db.wait_until_ready())
+            .await
+            .unwrap()
+    );
     let auth = AuthConfig::from_lookup(&|key| match key {
         "BI_PUBLIC_ORIGIN" => Some(origin.to_owned()),
         "BI_DEV_USERS" => Some(r#"[{"id":"analyst","display_name":"Analista"}]"#.to_owned()),
@@ -244,7 +248,11 @@ impl Stack {
 
     /// No query was compiled or executed: the refusal did no analytical work.
     fn assert_no_analytical_work(&self) {
-        for name in ["bi_semantic_compile_duration", "bi_query_wait", "bi_query_execute"] {
+        for name in [
+            "bi_semantic_compile_duration",
+            "bi_query_wait",
+            "bi_query_execute",
+        ] {
             assert_eq!(self.counted(name, &[]), 0, "{name}");
         }
     }
@@ -270,7 +278,11 @@ fn assert_closed(answer: &Answer) {
     assert_eq!(answer.headers["cache-control"], "no-store");
     assert_eq!(answer.body["code"], "legacy_query_disabled");
     assert_eq!(answer.body["detail"], CLOSED);
-    assert!(answer.body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        answer.body["request_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
 }
 
 fn assert_denial_event(event: &Value) {
@@ -347,7 +359,12 @@ async fn the_local_synthetic_demo_answers_exactly_and_audits_nothing(pool: PgPoo
             .iter()
             .find(|g| g.region.as_deref() == region)
             .unwrap();
-        json!([region, group.row_count, group.quantity_sum, group.amount_sum])
+        json!([
+            region,
+            group.row_count,
+            group.quantity_sum,
+            group.amount_sum
+        ])
     };
     let filtered = stack
         .query(
@@ -384,7 +401,7 @@ async fn the_local_synthetic_demo_answers_exactly_and_audits_nothing(pool: PgPoo
     assert_eq!(outside.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(outside.body["code"], "invalid_query");
 
-    assert!(denials(&pool).await.is_empty());
+    assert_eq!(denials(&pool).await.len(), 0);
     assert_eq!(stack.counted("bi_legacy_query_denied", &[]), 0);
     stack.db.close().await;
 }
@@ -402,7 +419,12 @@ async fn an_admitted_query_past_its_deadline_is_cancelled(pool: PgPool) {
     let answer = stack
         .query(r#"{"dataset":"sales","dimensions":["region"],"measures":["amount_sum"]}"#)
         .await;
-    assert_eq!(answer.status, StatusCode::GATEWAY_TIMEOUT, "{}", answer.text);
+    assert_eq!(
+        answer.status,
+        StatusCode::GATEWAY_TIMEOUT,
+        "{}",
+        answer.text
+    );
     assert_eq!(answer.body["code"], "query_timeout");
     stack.db.close().await;
 }
@@ -413,7 +435,7 @@ async fn until_its_runtime_is_ready_the_demo_is_unavailable(pool: PgPool) {
     let answer = stack.query(QUERY).await;
     assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(answer.body["code"], "analytics_unavailable");
-    assert!(denials(&pool).await.is_empty());
+    assert_eq!(denials(&pool).await.len(), 0);
     stack.assert_no_analytical_work();
     stack.db.close().await;
 }
@@ -531,7 +553,10 @@ async fn a_lake_whose_fixture_rows_changed_is_not_vouched_for(pool: PgPool) {
     let stack = stack(&pool, second, ORIGIN, Duration::from_secs(10)).await;
     assert_closed(&stack.query(QUERY).await);
     assert_eq!(
-        stack.counted("bi_legacy_query_denied", &[("reason", "unverified_runtime")]),
+        stack.counted(
+            "bi_legacy_query_denied",
+            &[("reason", "unverified_runtime")]
+        ),
         1
     );
     stack.assert_no_analytical_work();
@@ -585,7 +610,7 @@ async fn session_origin_and_metadata_checks_come_first(pool: PgPool) {
     let unready = stack.query("{not json").await;
     assert_eq!(unready.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(unready.body["code"], "metadata_not_ready");
-    assert!(denials(&pool).await.is_empty());
+    assert_eq!(denials(&pool).await.len(), 0);
     assert_eq!(stack.counted("bi_legacy_query_denied", &[]), 0);
     stack.assert_no_analytical_work();
 }
@@ -603,7 +628,12 @@ async fn a_held_audit_head_ends_the_refusal_within_its_deadline(pool: PgPool) {
     let started = Instant::now();
     let answer = stack.query(QUERY).await;
     let elapsed = started.elapsed();
-    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "{}", answer.text);
+    assert_eq!(
+        answer.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        answer.text
+    );
     assert_eq!(answer.body["code"], "audit_unavailable");
     assert!(
         elapsed < deadline + Duration::from_secs(2),
@@ -623,7 +653,10 @@ async fn a_held_audit_head_ends_the_refusal_within_its_deadline(pool: PgPool) {
         if waiting == 0 {
             break;
         }
-        assert!(Instant::now() < waiting_until, "{waiting} backends still wait");
+        assert!(
+            Instant::now() < waiting_until,
+            "{waiting} backends still wait"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(
@@ -635,7 +668,7 @@ async fn a_held_audit_head_ends_the_refusal_within_its_deadline(pool: PgPool) {
     );
     stack.assert_no_analytical_work();
     holder.commit().await.unwrap();
-    assert!(denials(&pool).await.is_empty(), "no event without commit");
+    assert_eq!(denials(&pool).await.len(), 0, "no event without commit");
 
     assert_closed(&stack.query(QUERY).await);
     let events = denials(&pool).await;
