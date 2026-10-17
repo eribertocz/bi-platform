@@ -1096,6 +1096,35 @@ mod restricted {
         roles.drop().await;
     }
 
+    /// The restricted server keeps the G1 query route closed, even for a
+    /// synthetic dev session, and records the refusal through the limited
+    /// role's append function alone (#118).
+    #[sqlx::test(migrations = false)]
+    async fn the_restricted_server_closes_the_legacy_query_route_and_records_it(pool: PgPool) {
+        let roles = Roles::create(&pool).await;
+        roles.migrate().await;
+        roles.grant().await;
+        let db = roles.runtime(MetadataMode::Restricted);
+        ready(&db).await;
+        let app = app(db.clone());
+        let (status, _, cookie) = send(&app, "POST", "/api/v1/dev/login", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body, _) = send(&app, "POST", "/api/v1/queries", Some(&cookie.unwrap())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("\"legacy_query_disabled\""), "{body}");
+        let denied: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'resource_id' = 'legacy_queries'
+               AND (payload::jsonb)->>'action' = 'denial'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(denied, 1);
+        db.close().await;
+        roles.drop().await;
+    }
+
     /// The pool replaces one lost work connection while the sentinel stays
     /// connected: the new connection validates itself before serving, so a
     /// dangerous privilege that appeared meanwhile stops admission before

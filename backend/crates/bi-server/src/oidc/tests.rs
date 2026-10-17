@@ -795,6 +795,29 @@ mod real {
         assert_eq!(count("sessions").await, 1);
         assert_eq!(count("audit_events").await, 1);
 
+        // A corporate session cannot use the G1 query route (#118): refused
+        // before its body is read, and the refusal is audited.
+        let legacy = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/queries")
+                    .header(header::COOKIE, &session)
+                    .header(header::ORIGIN, "http://127.0.0.1:8080")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"dataset":"sales","measures":["row_count"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy.status(), StatusCode::FORBIDDEN);
+        let problem: serde_json::Value =
+            serde_json::from_slice(&legacy.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(problem["code"], "legacy_query_disabled");
+        assert_eq!(count("audit_events").await, 2);
+
         // Without its audit path the role cannot create a session at all.
         sql(format!(
             "REVOKE EXECUTE ON FUNCTION bi_meta.audit_append(text) FROM {runtime}"
@@ -803,7 +826,7 @@ mod real {
         let refused = login(app.clone()).await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(count("sessions").await, 1, "no session without its event");
-        assert_eq!(count("audit_events").await, 1);
+        assert_eq!(count("audit_events").await, 2);
         crate::audit::verify(&pool, None).await.unwrap();
 
         db.close().await;
