@@ -16,6 +16,10 @@
   let view = $state<
     { kind: 'loading' } | { kind: 'ready'; data: ExploreData } | { kind: 'error'; error: Error }
   >({ kind: 'loading' });
+  // Outside local synthetic development the server closes this route (#118):
+  // retrying cannot succeed, so only the explanation is offered.
+  const retryable = (error: Error) =>
+    !(error instanceof QueryError && error.problem.code === 'legacy_query_disabled');
   $effect(() => {
     const selected: string | null | undefined = region === 'all' ? undefined : JSON.parse(region);
     void attempt;
@@ -74,7 +78,8 @@
           HTTP {view.error.problem.status} · Código: {view.error.problem.code}
         </p>
         <p>Solicitud: {view.error.problem.request_id}</p>{/if}
-      <button class="mt-4" onclick={() => attempt++}>Reintentar</button>
+      {#if retryable(view.error)}<button class="mt-4" onclick={() => attempt++}>Reintentar</button
+        >{/if}
     </div>
   {:else}
     <dl class="kpis mb-6">

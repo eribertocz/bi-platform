@@ -31,12 +31,14 @@ it('preserves exact strings and forwards cancellation and cookies', async () => 
 it.each([
   [401, 'session_required'],
   [403, 'origin_forbidden'],
+  [403, 'legacy_query_disabled'],
   [422, 'invalid_query'],
   [422, 'result_too_large'],
   [422, 'query_memory_limit'],
   [429, 'too_many_queries'],
   [500, 'query_failed'],
   [503, 'analytics_unavailable'],
+  [503, 'audit_unavailable'],
   [504, 'query_timeout'],
 ] as const)(
   'keeps Problem including code and request_id for HTTP %s (%s)',
