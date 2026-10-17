@@ -467,10 +467,12 @@ mod real {
     #[sqlx::test(migrations = false)]
     async fn http_limits_reject_both_routes_without_provider_or_writes(pool: PgPool) {
         use opentelemetry::metrics::MeterProvider as _;
-        let db =
-            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
         assert!(db.wait_until_ready().await);
-        let mut state = AppState::new(db);
+        let mut state = AppState::new(db.clone());
         state.auth.oidc = Some(config(
             "http://127.0.0.1:1/realms/unreachable",
             "bi-platform",
@@ -588,18 +590,21 @@ mod real {
             .await
             .unwrap();
         assert_eq!(audited, 1);
+        db.close().await;
     }
 
     #[sqlx::test(migrations = false)]
     async fn live_attempt_capacity_is_atomic_and_http_returns_503(pool: PgPool) {
-        let db =
-            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
         assert!(db.wait_until_ready().await);
         sqlx::query("INSERT INTO bi_meta.oidc_attempts (state_hash, browser_hash, nonce, verifier) SELECT sha256(n::text::bytea), sha256(n::text::bytea), 'nonce', 'verifier' FROM generate_series(1, $1) n")
             .bind(MAX_LIVE_ATTEMPTS - 1).execute(&pool).await.unwrap();
         let (a, b) = tokio::join!(
             save_attempt(
-                pool.clone(),
+                pool.begin().await.unwrap(),
                 vec![1; 32],
                 vec![1; 32],
                 "nonce".into(),
@@ -607,7 +612,7 @@ mod real {
                 None
             ),
             save_attempt(
-                pool.clone(),
+                pool.begin().await.unwrap(),
                 vec![2; 32],
                 vec![2; 32],
                 "nonce".into(),
@@ -616,7 +621,7 @@ mod real {
             )
         );
         assert_ne!(a.unwrap(), b.unwrap(), "only one concurrent insert fits");
-        let mut state = AppState::new(db);
+        let mut state = AppState::new(db.clone());
         state.auth.oidc = Some(config(&issuer(), "bi-platform"));
         let app = crate::router(state);
         let response = send(
@@ -642,7 +647,7 @@ mod real {
         .unwrap();
         assert!(
             save_attempt(
-                pool.clone(),
+                pool.begin().await.unwrap(),
                 vec![3; 32],
                 vec![3; 32],
                 "nonce".into(),
@@ -657,6 +662,7 @@ mod real {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        db.close().await;
     }
 
     async fn begin(app: &Router) -> (String, String) {
@@ -726,8 +732,10 @@ mod real {
                 .username(role)
                 .password(PASSWORD)
         };
-        let administrative = crate::db::lazy_pool_with(options(&owner));
-        crate::db::migrate(&administrative).await.unwrap();
+        crate::db::migrate(&options(&owner), crate::db::MIGRATION_TIMEOUT)
+            .await
+            .unwrap();
+        let administrative = PgPool::connect_lazy_with(options(&owner));
         sqlx::raw_sql(AssertSqlSafe(
             include_str!("../../admin/runtime-grants.sql").replace("bi_runtime", &runtime),
         ))
@@ -737,7 +745,7 @@ mod real {
         administrative.close().await;
 
         let db = crate::db::Database::start(
-            crate::db::lazy_pool_with(options(&runtime)),
+            &options(&runtime),
             crate::metadata::MetadataMode::Restricted,
         );
         assert!(
@@ -798,7 +806,7 @@ mod real {
         assert_eq!(count("audit_events").await, 1);
         crate::audit::verify(&pool, None).await.unwrap();
 
-        db.pool().close().await;
+        db.close().await;
         sql(format!(
             "ALTER DATABASE \"{database}\" OWNER TO CURRENT_USER; \
              REASSIGN OWNED BY {owner}, {runtime} TO CURRENT_USER; \
@@ -810,8 +818,10 @@ mod real {
     #[sqlx::test(migrations = false)]
     #[allow(clippy::too_many_lines)] // Keep the login, reauthentication and logout workflow together.
     async fn real_callback_creates_persistent_session_and_consumes_bound_state(pool: PgPool) {
-        let db =
-            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
         assert!(db.wait_until_ready().await);
         let mut state = AppState::new(db.clone());
         state.auth.oidc = Some(config(&issuer(), "bi-platform"));
@@ -1056,14 +1066,17 @@ mod real {
             send(&app, "GET", &path, Some(&cookie), None).await.status(),
             StatusCode::UNAUTHORIZED
         );
+        db.close().await;
     }
 
     #[sqlx::test(migrations = false)]
     async fn pkce_failure_and_audit_failure_cannot_create_sessions(pool: PgPool) {
-        let db =
-            crate::db::Database::start(pool.clone(), crate::metadata::MetadataMode::Development);
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
         assert!(db.wait_until_ready().await);
-        let mut state = AppState::new(db);
+        let mut state = AppState::new(db.clone());
         state.auth.oidc = Some(config(&issuer(), "bi-platform"));
         let app = crate::router(state);
         let (url, cookie) = begin(&app).await;
@@ -1099,5 +1112,6 @@ mod real {
             .await
             .unwrap();
         assert_eq!(sessions, 0);
+        db.close().await;
     }
 }

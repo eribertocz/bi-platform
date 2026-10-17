@@ -257,38 +257,11 @@ pub(crate) async fn enforce_session(
         );
     }
     if let Some(hash) = session {
-        let row = sqlx::query(
-            "SELECT user_id, display_name, federated_identity::text AS federated_identity, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at \
-             FROM bi_meta.sessions WHERE token_hash = $1 AND expires_at > clock_timestamp() AND revoked_at IS NULL AND data_scope = 'synthetic'",
-        ).bind(&hash).fetch_optional(state.db.pool()).await;
-        match row {
-            Ok(Some(row)) => {
-                let identity: Option<String> = row.get("federated_identity");
-                let Ok(identity) = identity.map(|json| serde_json::from_str(&json)).transpose()
-                else {
-                    return problem(StatusCode::UNAUTHORIZED, "session_required", request_id);
-                };
-                request.extensions_mut().insert(Principal {
-                    session: Session {
-                        user: User {
-                            id: row.get("user_id"),
-                            display_name: row.get("display_name"),
-                        },
-                        data_scope: DataScope::Synthetic,
-                        expires_at: row.get("expires_at"),
-                    },
-                    federated_identity: identity,
-                    token_hash: hash,
-                });
+        match principal(&state, hash).await {
+            Ok(principal) => {
+                request.extensions_mut().insert(principal);
             }
-            Ok(None) => return problem(StatusCode::UNAUTHORIZED, "session_required", request_id),
-            Err(_) => {
-                return problem(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "session_store_unavailable",
-                    request_id,
-                );
-            }
+            Err((status, code)) => return problem(status, code, request_id),
         }
     }
     let mut response = next.run(request).await;
@@ -297,6 +270,46 @@ pub(crate) async fn enforce_session(
         "no-store".parse().expect("static header"),
     );
     response
+}
+
+/// The live session behind `hash`, or the status and problem code to answer instead.
+async fn principal(
+    state: &AppState,
+    hash: Vec<u8>,
+) -> Result<Principal, (StatusCode, &'static str)> {
+    const UNAVAILABLE: &str = "session_store_unavailable";
+    let mut connection = state.db.acquire().await.map_err(|error| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error.problem_code(UNAVAILABLE),
+        )
+    })?;
+    let row = sqlx::query(
+        "SELECT user_id, display_name, federated_identity::text AS federated_identity, to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at \
+         FROM bi_meta.sessions WHERE token_hash = $1 AND expires_at > clock_timestamp() AND revoked_at IS NULL AND data_scope = 'synthetic'",
+    ).bind(&hash).fetch_optional(&mut *connection).await;
+    match row {
+        Ok(Some(row)) => {
+            let identity: Option<String> = row.get("federated_identity");
+            let Ok(identity) = identity.map(|json| serde_json::from_str(&json)).transpose() else {
+                return Err((StatusCode::UNAUTHORIZED, "session_required"));
+            };
+            Ok(Principal {
+                session: Session {
+                    user: User {
+                        id: row.get("user_id"),
+                        display_name: row.get("display_name"),
+                    },
+                    data_scope: DataScope::Synthetic,
+                    expires_at: row.get("expires_at"),
+                },
+                federated_identity: identity,
+                token_hash: hash,
+            })
+        }
+        Ok(None) => Err((StatusCode::UNAUTHORIZED, "session_required")),
+        Err(_) => Err((StatusCode::SERVICE_UNAVAILABLE, UNAVAILABLE)),
+    }
 }
 
 #[utoipa::path(get, path = "/api/v1/session", tag = "session", operation_id = "getSession",
@@ -319,11 +332,21 @@ pub(crate) async fn logout(
     Extension(principal): Extension<Principal>,
     Extension(id): Extension<RequestId>,
 ) -> Response {
+    let mut connection = match state.db.acquire().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.problem_code("session_store_unavailable"),
+                &id,
+            );
+        }
+    };
     if sqlx::query(
         "UPDATE bi_meta.sessions SET revoked_at = clock_timestamp() WHERE token_hash = $1",
     )
     .bind(principal.token_hash)
-    .execute(state.db.pool())
+    .execute(&mut *connection)
     .await
     .is_err()
     {
@@ -391,12 +414,15 @@ pub(crate) async fn dev_login(
                 &id,
             );
         };
-        let Ok(mut transaction) = state.db.pool().begin().await else {
-            return problem(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "session_store_unavailable",
-                &id,
-            );
+        let mut transaction = match state.db.begin().await {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                return problem(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.problem_code("session_store_unavailable"),
+                    &id,
+                );
+            }
         };
         if let Some(previous) = token_hash(&headers)
             && sqlx::query(

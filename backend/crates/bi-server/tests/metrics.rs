@@ -15,7 +15,7 @@ use bi_server::metadata::MetadataMode;
 use bi_server::{
     AppState,
     analytics::Analytics,
-    db::{self, Database},
+    db::Database,
     metrics::{self, QueryMetrics},
     query,
 };
@@ -39,7 +39,7 @@ fn install_tls_provider() {
 
 fn app(analytics: Analytics, metrics: QueryMetrics, timeout: Duration) -> Router {
     let db = Database::start(
-        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
     Router::new()
@@ -248,7 +248,7 @@ fn count(points: &[Point], name: &str, label: Option<(&str, &str)>) -> u64 {
 async fn oidc_denial_exports_a_closed_outcome_without_private_labels() {
     let capture = Capture::new(Analytics::disabled(), Duration::from_secs(5));
     let db = Database::start(
-        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
     let app = bi_server::router(AppState {

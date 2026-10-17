@@ -84,6 +84,8 @@ de esta versión y que el rol con el que se conecta tenga los permisos mínimos
 y nada más. Hasta comprobarlo, y de nuevo tras perder la conexión, `/health/ready`
 responde 503 (checks `migrations` y `metadata_security`) y toda operación de
 `/api/v1` responde 503 `metadata_not_ready`; `/health/live` sigue respondiendo.
+Cada conexión nueva que abre el servidor se comprueba también antes de usarse:
+si una falla, se detiene la admisión hasta volver a comprobar.
 
 Secuencia administrativa (en cada instalación y antes de desplegar una versión nueva):
 
@@ -92,7 +94,9 @@ Secuencia administrativa (en cada instalación y antes de desplegar una versión
    miembro del rol dueño de los metadatos. Su contraseña nunca va al repositorio.
 2. Con la credencial del dueño: `BI_DATABASE_URL=<url del dueño> bi-server migrate`.
    Termina con código 0, 1 si falla la base o una migración y 2 si falta o es
-   inválida la configuración; nunca imprime la URL.
+   inválida la configuración; nunca imprime la URL. Dura como mucho 5 minutos,
+   también si espera un bloqueo: al agotarlos, código 1 con
+   `metadata_migration_timed_out`, sin dejar nada esperando en PostgreSQL.
 3. También como dueño, aplica los permisos documentados (idempotente; vuelve a
    aplicarlos tras una versión con tablas nuevas):
    `psql "<url del dueño>" -v ON_ERROR_STOP=1 -f backend/crates/bi-server/admin/runtime-grants.sql`

@@ -17,8 +17,8 @@ use sqlx::PgPool;
 
 const MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn migrated_database(pool: PgPool) -> Database {
-    let db = Database::start(pool, MetadataMode::Development);
+async fn migrated_database(pool: &PgPool) -> Database {
+    let db = Database::start(&pool.connect_options(), MetadataMode::Development);
     let migrated = tokio::time::timeout(MIGRATION_TIMEOUT, db.wait_until_ready())
         .await
         .expect("migrations finish in time");
@@ -39,8 +39,8 @@ fn health(status: HealthStatus, postgres: HealthStatus, migrations: HealthStatus
 
 #[sqlx::test(migrations = false)]
 async fn ready_after_migrations_are_applied(pool: PgPool) {
-    let db = migrated_database(pool.clone()).await;
-    let (status, body) = get_health(&router(AppState::new(db)), "/health/ready").await;
+    let db = migrated_database(&pool).await;
+    let (status, body) = get_health(&router(AppState::new(db.clone())), "/health/ready").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
@@ -60,22 +60,24 @@ async fn ready_after_migrations_are_applied(pool: PgPool) {
     .await
     .unwrap();
     assert!(schema_exists);
+    db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
 async fn migrations_are_idempotent_across_restarts(pool: PgPool) {
-    migrated_database(pool.clone()).await;
+    migrated_database(&pool).await.close().await;
     // A restarted API finds every migration applied and becomes ready.
-    let db = migrated_database(pool).await;
-    let (status, _) = get_health(&router(AppState::new(db)), "/health/ready").await;
+    let db = migrated_database(&pool).await;
+    let (status, _) = get_health(&router(AppState::new(db.clone())), "/health/ready").await;
     assert_eq!(status, StatusCode::OK);
+    db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
 async fn ready_turns_unavailable_when_database_is_lost(pool: PgPool) {
-    let db = migrated_database(pool.clone()).await;
-    let app = router(AppState::new(db));
-    pool.close().await;
+    let db = migrated_database(&pool).await;
+    let app = router(AppState::new(db.clone()));
+    db.close().await;
 
     let (status, body) = get_health(&app, "/health/ready").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -200,14 +202,14 @@ mod restricted {
 
         /// The administrative step, as the owner: what `bi-server migrate` runs.
         async fn migrate(&self) {
-            let owner = db::lazy_pool_with(self.options(&self.admin));
-            db::migrate(&owner).await.unwrap();
-            owner.close().await;
+            db::migrate(&self.options(&self.admin), db::MIGRATION_TIMEOUT)
+                .await
+                .unwrap();
         }
 
         /// The documented procedure, verbatim, run by the owner.
         async fn grant(&self) {
-            let owner = db::lazy_pool_with(self.options(&self.admin));
+            let owner = PgPool::connect_lazy_with(self.options(&self.admin));
             sqlx::raw_sql(AssertSqlSafe(GRANTS.replace("bi_runtime", &self.runtime)))
                 .execute(&owner)
                 .await
@@ -216,7 +218,7 @@ mod restricted {
         }
 
         fn runtime(&self, mode: MetadataMode) -> Database {
-            Database::start(db::lazy_pool_with(self.options(&self.runtime)), mode)
+            Database::start(&self.options(&self.runtime), mode)
         }
 
         async fn drop(self) {
@@ -445,7 +447,7 @@ mod restricted {
         }
         assert_eq!(audit::verify(&pool, None).await.unwrap(), checkpoint);
         assert_eq!(history(&pool).await, snapshots[0]);
-        db.pool().close().await;
+        db.close().await;
         roles.drop().await;
     }
 
@@ -521,14 +523,14 @@ mod restricted {
                 "{grant}: {body}"
             );
             assert_eq!(sessions(&pool).await, 0, "{grant}");
-            db.pool().close().await;
+            db.close().await;
             roles.sql(&revoke).await;
             // Ownership round trips rewrite ACLs: restore the documented grants.
             roles.grant().await;
         }
         let db = roles.runtime(MetadataMode::Restricted);
         ready(&db).await;
-        db.pool().close().await;
+        db.close().await;
         roles.drop().await;
     }
 
@@ -577,7 +579,7 @@ mod restricted {
             assert!(assessment.forbidden.is_empty(), "{revoke}");
             assert_eq!(assessment.reason(), Some(expected.to_string()), "{revoke}");
             assert!(!db.admits(), "{revoke}");
-            db.pool().close().await;
+            db.close().await;
         }
         roles.drop().await;
     }
@@ -596,7 +598,7 @@ mod restricted {
         ] {
             // The connection's current_user is the limited role from the start.
             let options = login.options([("role", roles.runtime.as_str())]);
-            let db = Database::start(db::lazy_pool_with(options), MetadataMode::Restricted);
+            let db = Database::start(&options, MetadataMode::Restricted);
             let assessment = assessed(&db).await;
             assert!(!assessment.admits(), "{label}");
             assert!(
@@ -605,7 +607,7 @@ mod restricted {
                 "{label}: {:?}",
                 assessment.forbidden
             );
-            db.pool().close().await;
+            db.close().await;
         }
         roles.drop().await;
     }
@@ -628,7 +630,7 @@ mod restricted {
         roles.migrate().await;
         roles.grant().await;
         ready(&db).await;
-        db.pool().close().await;
+        db.close().await;
 
         let latest = db::MIGRATOR.iter().map(|m| m.version).max().unwrap();
         let saved = history(&pool).await;
@@ -657,7 +659,7 @@ mod restricted {
             let db = roles.runtime(MetadataMode::Restricted);
             assert_eq!(assessed(&db).await.schema, Err(expected), "{tamper}");
             assert!(!db.admits(), "{tamper}");
-            db.pool().close().await;
+            db.close().await;
             assert_eq!(history(&pool).await, tampered, "no repair attempt: {tamper}");
             roles.sql("DELETE FROM public._sqlx_migrations").await;
             for (version, success, checksum) in &saved {
@@ -675,7 +677,7 @@ mod restricted {
         }
         let db = roles.runtime(MetadataMode::Restricted);
         ready(&db).await;
-        db.pool().close().await;
+        db.close().await;
         roles.drop().await;
     }
 
@@ -742,7 +744,7 @@ mod restricted {
             .options(&roles.runtime)
             .host("127.0.0.1")
             .port(proxy.port);
-        let db = Database::start(db::lazy_pool_with(through_proxy), MetadataMode::Restricted);
+        let db = Database::start(&through_proxy, MetadataMode::Restricted);
         ready(&db).await;
         let app = app(db.clone());
         let (_, _, cookie) = send(&app, "POST", "/api/v1/dev/login", None).await;
@@ -796,7 +798,7 @@ mod restricted {
             send(&app, "GET", "/api/v1/session", Some(&cookie)).await.0,
             StatusCode::OK
         );
-        db.pool().close().await;
+        db.close().await;
         proxy.cut().await;
         roles.drop().await;
     }
@@ -817,31 +819,32 @@ mod restricted {
             .with_periodic_exporter(exporter.clone())
             .build();
         let metrics = || MetadataMetrics::new(&provider.meter("test"));
-        let runtime = |roles: &Roles| db::lazy_pool_with(roles.options(&roles.runtime));
+        let runtime = |roles: &Roles| roles.options(&roles.runtime);
 
         // Development: migrates itself as the owner, and says so.
         let development = Database::start_observed(
-            db::lazy_pool_with(roles.options(&roles.admin)),
+            &roles.options(&roles.admin),
             MetadataMode::Development,
             metrics(),
         );
         ready(&development).await;
         assert!(!assessed(&development).await.secure());
-        development.pool().close().await;
+        development.close().await;
         roles.grant().await;
         // Restricted, ready.
-        let secure = Database::start_observed(runtime(&roles), MetadataMode::Restricted, metrics());
+        let secure =
+            Database::start_observed(&runtime(&roles), MetadataMode::Restricted, metrics());
         ready(&secure).await;
-        secure.pool().close().await;
+        secure.close().await;
         // Restricted, invalid.
         roles.sql("GRANT {admin} TO {runtime}").await;
         let invalid =
-            Database::start_observed(runtime(&roles), MetadataMode::Restricted, metrics());
+            Database::start_observed(&runtime(&roles), MetadataMode::Restricted, metrics());
         assert!(!assessed(&invalid).await.admits());
-        invalid.pool().close().await;
+        invalid.close().await;
         // Restricted, unavailable: nothing listens on port 1.
         let unavailable = Database::start_observed(
-            db::lazy_pool_with(roles.options(&roles.runtime).host("127.0.0.1").port(1)),
+            &roles.options(&roles.runtime).host("127.0.0.1").port(1),
             MetadataMode::Restricted,
             metrics(),
         );
@@ -854,7 +857,7 @@ mod restricted {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        unavailable.pool().close().await;
+        unavailable.close().await;
 
         provider.force_flush().unwrap();
         let mut results = BTreeSet::new();
@@ -921,7 +924,7 @@ mod restricted {
             .with_periodic_exporter(exporter.clone())
             .build();
         let db = Database::start_observed(
-            db::lazy_pool_with(roles.options(&roles.runtime)),
+            &roles.options(&roles.runtime),
             MetadataMode::Restricted,
             MetadataMetrics::new(&provider.meter("test")),
         );
@@ -982,7 +985,7 @@ mod restricted {
             percentile(&mut hot, 0.95),
             after - before,
         );
-        db.pool().close().await;
+        db.close().await;
         roles.drop().await;
     }
 
@@ -1079,6 +1082,173 @@ mod restricted {
             "GRANT",
         ] {
             assert!(!logs.contains(secret), "{secret} leaked into:\n{logs}");
+        }
+        roles.drop().await;
+    }
+
+    /// The pool replaces one lost work connection while the sentinel stays
+    /// connected: the new connection validates itself before serving, so a
+    /// dangerous privilege that appeared meanwhile stops admission before
+    /// any write, and work resumes once the role is corrected (#125).
+    #[sqlx::test(migrations = false)]
+    async fn a_replaced_work_connection_revalidates_before_serving(pool: PgPool) {
+        let roles = Roles::create(&pool).await;
+        roles.migrate().await;
+        roles.grant().await;
+        let db = roles.runtime(MetadataMode::Restricted);
+        ready(&db).await;
+        let app = app(db.clone());
+        let mut connection = db.acquire().await.unwrap();
+        let lost: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        roles
+            .sql("GRANT SELECT ON bi_meta.audit_events TO {runtime}")
+            .await;
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(lost)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(terminated);
+        drop(connection);
+        let deadline = Instant::now() + READY;
+        loop {
+            let alive: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1")
+                    .bind(lost)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if alive == 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "backend {lost} still alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            db.admits(),
+            "the sentinel is alive: nothing else noticed the loss"
+        );
+
+        let (status, body, cookie) = send(&app, "POST", "/api/v1/dev/login", None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("\"metadata_not_ready\""), "{body}");
+        assert!(cookie.is_none());
+        assert_eq!(sessions(&pool).await, 0, "refused before writing");
+        assert!(!db.admits());
+        assert!(
+            matches!(db.acquire().await, Err(db::AcquireError::NotAdmitted)),
+            "no connection is handed out while the role is unsafe"
+        );
+        let deadline = Instant::now() + READY;
+        loop {
+            if let MetadataStatus::Assessed(assessment) = db.status() {
+                assert!(!assessment.admits());
+                assert!(
+                    assessment
+                        .forbidden
+                        .contains(&Forbidden::AccessesAuditStorage)
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no verdict in time: {:?}",
+                db.status()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        roles
+            .sql("REVOKE SELECT ON bi_meta.audit_events FROM {runtime}")
+            .await;
+        ready(&db).await;
+        let (status, body, cookie) = send(&app, "POST", "/api/v1/dev/login", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(cookie.is_some());
+        assert_eq!(sessions(&pool).await, 1);
+        db.close().await;
+        roles.drop().await;
+    }
+
+    /// `bi-server migrate` ends within its bound while another session holds
+    /// the history table, leaves no backend waiting on the server and no
+    /// history change, and completes once the lock is released (#125).
+    #[sqlx::test(migrations = false)]
+    async fn migration_is_bounded_by_a_held_lock_and_leaves_nothing_behind(pool: PgPool) {
+        let roles = Roles::create(&pool).await;
+        roles.migrate().await;
+        let before = history(&pool).await;
+        let mut locked = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE public._sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locked)
+            .await
+            .unwrap();
+        let limit = Duration::from_secs(2);
+        let started = Instant::now();
+        let outcome = db::migrate(&roles.options(&roles.admin), limit).await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, Err(db::MigrationError::TimedOut)),
+            "{outcome:?}"
+        );
+        assert!(
+            elapsed >= limit && elapsed < limit + Duration::from_secs(3),
+            "{elapsed:?}"
+        );
+        let deadline = Instant::now() + READY;
+        loop {
+            let left: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE usename = $1")
+                    .bind(&roles.admin)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if left == 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{left} migration backends left");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        locked.commit().await.unwrap();
+        assert_eq!(history(&pool).await, before);
+        db::migrate(&roles.options(&roles.admin), limit)
+            .await
+            .unwrap();
+        assert_eq!(history(&pool).await, before, "idempotent once released");
+        roles.drop().await;
+    }
+
+    /// A validation slowed by a lock on the history table logs no SQL with
+    /// the production filter (#125).
+    #[sqlx::test(migrations = false)]
+    async fn a_slow_validation_logs_no_sql(pool: PgPool) {
+        let roles = Roles::create(&pool).await;
+        roles.migrate().await;
+        roles.grant().await;
+        let mut locked = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE public._sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *locked)
+            .await
+            .unwrap();
+        let url = roles.options(&roles.runtime).to_url_lossy().to_string();
+        let output = server_output(vec![("BI_DATABASE_URL", url)], "metadata_ready");
+        // Longer than the one-second slow-statement threshold of SQLx.
+        let release = async move {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            locked.commit().await.unwrap();
+        };
+        let (logs, ()) = tokio::join!(output, release);
+        assert!(logs.contains("metadata_ready"), "{logs}");
+        for sql in [
+            "SELECT",
+            "_sqlx_migrations",
+            "db.statement",
+            "slow statement",
+        ] {
+            assert!(!logs.contains(sql), "{sql} leaked into:\n{logs}");
         }
         roles.drop().await;
     }

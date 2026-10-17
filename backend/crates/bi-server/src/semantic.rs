@@ -177,11 +177,11 @@ pub async fn explain(
         elapsed_ms = started.elapsed().as_millis(),
         "semantic query explained"
     );
-    if audited.is_err() {
+    if let Err(code) = audited {
         // Nothing is answered without its audit event.
         return Problem::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "audit_unavailable",
+            code,
             Some("No se pudo registrar la auditoría. Reintenta.".to_owned()),
             &request_id,
         )
@@ -820,8 +820,11 @@ async fn record(
     principal: &Principal,
     id: Option<&RequestId>,
     audit: &Audit,
-) -> Result<(), ()> {
-    let event_id = crate::auth::random_token().await?;
+) -> Result<(), &'static str> {
+    const UNAVAILABLE: &str = "audit_unavailable";
+    let event_id = crate::auth::random_token()
+        .await
+        .map_err(|()| UNAVAILABLE)?;
     let raw = id
         .and_then(|id| id.header_value().to_str().ok())
         .unwrap_or_default();
@@ -870,9 +873,13 @@ async fn record(
         },
         schema_version: bi_audit::SCHEMA_VERSION,
     };
-    let mut tx = state.db.pool().begin().await.map_err(|_| ())?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| error.problem_code(UNAVAILABLE))?;
     crate::audit::append(&mut tx, &event)
         .await
-        .map_err(|_| ())?;
-    tx.commit().await.map_err(|_| ())
+        .map_err(|_| UNAVAILABLE)?;
+    tx.commit().await.map_err(|_| UNAVAILABLE)
 }

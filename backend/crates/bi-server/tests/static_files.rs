@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use bi_server::db::{self, Database};
+use bi_server::db::Database;
 use bi_server::metadata::MetadataMode;
 use bi_server::{AppState, router_with_static};
 use http_body_util::BodyExt;
@@ -22,7 +22,7 @@ fn fixture() -> (TempDir, Router) {
         std::fs::write(path, contents).unwrap();
     }
     let db = Database::start(
-        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
     let app = router_with_static(AppState::new(db), Some(directory.path().to_owned()));
@@ -207,7 +207,7 @@ async fn health_stays_json_with_frontend_enabled() {
 async fn missing_build_does_not_synthesize_a_shell() {
     let (directory, _app) = fixture();
     let db = Database::start(
-        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
     let app = router_with_static(AppState::new(db), Some(directory.path().join("missing")));

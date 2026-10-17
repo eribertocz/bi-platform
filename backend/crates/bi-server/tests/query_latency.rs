@@ -11,12 +11,7 @@ use bi_fixtures::{
 };
 use bi_runtime::{Bootstrap, LakeConfig, RuntimeConfig, fixtures};
 use bi_server::metadata::MetadataMode;
-use bi_server::{
-    AppState,
-    analytics::Analytics,
-    db::{self, Database},
-    query,
-};
+use bi_server::{AppState, analytics::Analytics, db::Database, query};
 use http_body_util::BodyExt;
 use serde_json::json;
 use sysinfo::{ProcessesToUpdate, System};
@@ -87,7 +82,7 @@ async fn query_latency() {
         .await
         .unwrap();
     let db = Database::start(
-        db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+        &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
     let sdk = std::env::var("BI_BENCH_METRICS").is_ok_and(|mode| mode == "sdk");

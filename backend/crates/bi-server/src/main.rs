@@ -106,22 +106,21 @@ fn audit_pool() -> Result<sqlx::PgPool, ExitCode> {
 }
 
 /// `migrate`: the administrative step the restricted server never performs.
-/// Finite and side-effect free beyond the migrations: no HTTP, analytical
-/// runtime, OIDC or exporters, and the URL is never printed or kept.
+/// Finite (at most [`db::MIGRATION_TIMEOUT`], lock waits included) and
+/// side-effect free beyond the migrations: no HTTP, analytical runtime, OIDC
+/// or exporters, and the URL is never printed or kept.
 #[tokio::main]
 async fn migrate_metadata() -> ExitCode {
     let Ok(url) = std::env::var("BI_DATABASE_URL") else {
         eprintln!("metadata_database_url_required");
         return ExitCode::from(2);
     };
-    let Ok(pool) = db::lazy_pool(&url) else {
+    let Ok(options) = url.parse::<PgConnectOptions>() else {
         eprintln!("metadata_invalid_database_url");
         return ExitCode::from(2);
     };
-    let migrated = db::migrate(&pool).await;
-    pool.close().await;
-    if migrated.is_err() {
-        eprintln!("metadata_migration_failed");
+    if let Err(error) = db::migrate(&options, db::MIGRATION_TIMEOUT).await {
+        eprintln!("{}", migration_failure_code(&error));
         return ExitCode::FAILURE;
     }
     println!(
@@ -132,6 +131,14 @@ async fn migrate_metadata() -> ExitCode {
         })
     );
     ExitCode::SUCCESS
+}
+
+/// The stable code `migrate` prints for each failure; never the database error.
+fn migration_failure_code(error: &db::MigrationError) -> &'static str {
+    match error {
+        db::MigrationError::TimedOut => "metadata_migration_timed_out",
+        db::MigrationError::Failed(_) => "metadata_migration_failed",
+    }
 }
 
 #[tokio::main]
@@ -264,11 +271,7 @@ async fn run() -> ExitCode {
                 use opentelemetry::metrics::MeterProvider as _;
                 db::MetadataMetrics::new(&provider.meter("bi-server"))
             });
-    let db = Database::start_observed(
-        db::lazy_pool_with(options),
-        config.metadata_mode,
-        metadata_metrics,
-    );
+    let db = Database::start_observed(&options, config.metadata_mode, metadata_metrics);
     let mut models = bi_server::models::Models::new(config.project_dir);
     if let Some(provider) = &metrics_provider {
         use opentelemetry::metrics::MeterProvider as _;
@@ -284,7 +287,7 @@ async fn run() -> ExitCode {
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
-    db.pool().close().await;
+    db.close().await;
     if let Some(provider) = metrics_provider {
         tokio::task::spawn_blocking(move || {
             if provider.shutdown().is_err() {
@@ -323,6 +326,20 @@ mod tests {
         ] {
             assert!(super::parse_checkpoint(sequence, &hash).is_none());
         }
+    }
+
+    #[test]
+    fn migration_failures_print_only_their_stable_codes() {
+        use bi_server::db::MigrationError;
+        assert_eq!(
+            super::migration_failure_code(&MigrationError::TimedOut),
+            "metadata_migration_timed_out"
+        );
+        let failed = MigrationError::Failed(sqlx::migrate::MigrateError::VersionMissing(7));
+        assert_eq!(
+            super::migration_failure_code(&failed),
+            "metadata_migration_failed"
+        );
     }
 
     #[test]
