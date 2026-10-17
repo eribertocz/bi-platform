@@ -20,6 +20,7 @@ const LOCKDOWN: &str = "
     SET lock_configuration = true;";
 
 /// Records which fixture each lake table holds, so loading is idempotent.
+const FIXTURES: &str = "bi_fixtures";
 const FIXTURES_TABLE: &str = "lake.main.bi_fixtures";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,20 +142,21 @@ impl Bootstrap {
         if !is_identifier(table) {
             return Err(RuntimeError::Lake(format!("invalid table name {table:?}")));
         }
-        self.conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {FIXTURES_TABLE} (name VARCHAR, fingerprint VARCHAR)"
-        ))?;
-        let current: Option<String> = self
-            .conn
-            .prepare(&format!(
-                "SELECT fingerprint FROM {FIXTURES_TABLE} WHERE name = ?"
-            ))?
-            .query_row([table], |row| row.get(0))
-            .map(Some)
-            .or_else(|error| match error {
-                duckdb::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
+        // Read only: nothing is created in the lake unless a fixture is written.
+        let current: Option<String> = if self.table_exists(FIXTURES)? {
+            self.conn
+                .prepare(&format!(
+                    "SELECT fingerprint FROM {FIXTURES_TABLE} WHERE name = ?"
+                ))?
+                .query_row([table], |row| row.get(0))
+                .map(Some)
+                .or_else(|error| match error {
+                    duckdb::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?
+        } else {
+            None
+        };
         let replaceable = match current.as_deref() {
             Some(marked) if marked == fingerprint => {
                 if self.table_matches_parquet(table, parquet)? {
@@ -180,6 +182,9 @@ impl Bootstrap {
 
         self.conn.execute_batch("BEGIN TRANSACTION")?;
         let result = (|| -> Result<(), duckdb::Error> {
+            self.conn.execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {FIXTURES_TABLE} (name VARCHAR, fingerprint VARCHAR)"
+            ))?;
             self.conn.execute_batch(&format!(
                 "CREATE OR REPLACE TABLE {LAKE}.main.{table} AS SELECT * FROM read_parquet({})",
                 sql_string(&parquet.to_string_lossy())

@@ -275,6 +275,18 @@ async fn a_table_without_a_fixture_marker_is_left_untouched() {
     );
     let runtime = bootstrap.finish().unwrap();
     assert_eq!(row_count(&runtime).await, 1, "someone else's rows survive");
+    let tables: Vec<String> = runtime
+        .run(|conn| {
+            conn.prepare(
+                "SELECT table_name FROM information_schema.tables
+                 WHERE table_catalog = 'lake' ORDER BY table_name",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect()
+        })
+        .await
+        .unwrap();
+    assert_eq!(tables, ["sales"], "nothing added to the lake either");
 }
 
 #[tokio::test(flavor = "multi_thread")]
