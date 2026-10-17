@@ -1153,7 +1153,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Un uso no permitido para los roles de la sesión */
+      /** @description Un uso no permitido. Sin permiso de inspección del catálogo, solo si todo lo que la consulta nombra (y lo que unen los roles que escribe) es visible para la sesión con `view` o `view_masked`; si no, responde el 404. Lo que el plan lee por linaje se deniega sin nombre */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1162,7 +1162,7 @@ export interface operations {
           'application/problem+json': components['schemas']['SemanticDenial'];
         };
       };
-      /** @description El modelo no existe en el proyecto */
+      /** @description `model_not_found`: el modelo no existe en el proyecto, o la consulta no se puede explicar a esta sesión. Sin permiso de inspección del catálogo (`view` sobre `Model::"project:catalog"`), un archivo del proyecto ausente o inválido, cualquier fallo al enlazar la consulta con el modelo (nombres desconocidos o ambiguos incluidos) y un miembro o un rol hacia datos que la sesión no puede ver responden igual, con el detalle fijo «No se puede explicar la consulta solicitada.»: no confirma qué existe */
       404: {
         headers: {
           [name: string]: unknown;
@@ -1171,7 +1171,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Consulta mal formada, modelo con errores o consulta incorrecta */
+      /** @description Petición con formato inválido; consulta incorrecta sobre miembros visibles; con permiso de inspección del catálogo, también modelo con errores y fallos al enlazar la consulta */
       422: {
         headers: {
           [name: string]: unknown;

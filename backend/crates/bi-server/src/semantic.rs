@@ -129,9 +129,9 @@ pub struct SemanticDeniedUse {
     responses(
         (status = 200, description = "Decisión, plan certificado y recibo", body = SemanticExplanation),
         (status = 401, description = "Sin sesión", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Un uso no permitido para los roles de la sesión", body = SemanticDenial, content_type = "application/problem+json"),
-        (status = 404, description = "El modelo no existe en el proyecto", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Consulta mal formada, modelo con errores o consulta incorrecta", body = SemanticRejection, content_type = "application/problem+json"),
+        (status = 403, description = "Un uso no permitido. Sin permiso de inspección del catálogo, solo si todo lo que la consulta nombra (y lo que unen los roles que escribe) es visible para la sesión con `view` o `view_masked`; si no, responde el 404. Lo que el plan lee por linaje se deniega sin nombre", body = SemanticDenial, content_type = "application/problem+json"),
+        (status = 404, description = "`model_not_found`: el modelo no existe en el proyecto, o la consulta no se puede explicar a esta sesión. Sin permiso de inspección del catálogo (`view` sobre `Model::\"project:catalog\"`), un archivo del proyecto ausente o inválido, cualquier fallo al enlazar la consulta con el modelo (nombres desconocidos o ambiguos incluidos) y un miembro o un rol hacia datos que la sesión no puede ver responden igual, con el detalle fijo «No se puede explicar la consulta solicitada.»: no confirma qué existe", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Petición con formato inválido; consulta incorrecta sobre miembros visibles; con permiso de inspección del catálogo, también modelo con errores y fallos al enlazar la consulta", body = SemanticRejection, content_type = "application/problem+json"),
         (status = 429, description = "Demasiadas compilaciones simultáneas", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "Políticas no válidas, motor o auditoría no disponibles, o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "Tiempo agotado", body = Problem, content_type = "application/problem+json")
@@ -159,7 +159,8 @@ pub async fn explain(
         | Outcome::Denied { audit, .. }
         | Outcome::Invalid {
             audit: Some(audit), ..
-        } => {
+        }
+        | Outcome::Undisclosed { audit: Some(audit) } => {
             record(
                 &state,
                 &principal,
@@ -169,6 +170,19 @@ pub async fn explain(
             .await
         }
         _ => Ok(()),
+    };
+    let audited = match (&outcome, audited) {
+        (Outcome::Inspected { fingerprint, .. }, Ok(())) => {
+            models::catalog::Event::answered(fingerprint.clone(), true)
+                .record(
+                    &state.db,
+                    &principal.session.user.id,
+                    &request_id,
+                    state.query_timeout,
+                )
+                .await
+        }
+        (_, audited) => audited,
     };
     let label = outcome.label();
     tracing::info!(
@@ -216,7 +230,23 @@ enum Outcome {
     },
     Refused(String),
     Failed(StatusCode, &'static str, &'static str),
+    /// A failure that would tell a session without inspection of the
+    /// catalog what the project holds (#156): one answer for all of them,
+    /// with the audit of the decision when one was taken.
+    Undisclosed {
+        audit: Option<Audit>,
+    },
+    /// Something of the catalog released under inspection: its decision is
+    /// recorded first, and nothing leaves without that event.
+    Inspected {
+        outcome: Box<Outcome>,
+        fingerprint: String,
+    },
 }
+
+/// The only detail a session without inspection gets for a failure that
+/// depends on the catalog.
+const UNDISCLOSED: &str = "No se puede explicar la consulta solicitada.";
 
 impl Outcome {
     const fn label(&self) -> &'static str {
@@ -225,6 +255,8 @@ impl Outcome {
             Self::Denied { .. } => "denied",
             Self::Invalid { .. } | Self::Refused(_) => "invalid",
             Self::Failed(..) => "failed",
+            Self::Undisclosed { .. } => "undisclosed",
+            Self::Inspected { outcome, .. } => outcome.label(),
         }
     }
 
@@ -284,6 +316,14 @@ impl Outcome {
             Self::Failed(status, code, message) => {
                 Problem::new(status, code, Some(message.to_owned()), request_id).into_response()
             }
+            Self::Inspected { outcome, .. } => outcome.into_response(request_id),
+            Self::Undisclosed { .. } => Problem::new(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                Some(UNDISCLOSED.to_owned()),
+                request_id,
+            )
+            .into_response(),
         }
     }
 }
@@ -334,45 +374,18 @@ async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -
             "Ya hay dos compilaciones en curso. Reintenta en unos segundos.",
         );
     };
-    let span = tracing::Span::current();
-    let read = tokio::task::spawn_blocking(move || {
-        let _entered = span.enter();
-        let project = models::read_project(&directory);
-        let access = access::load(&directory);
-        (project, access, permit)
-    })
-    .await;
-    let Ok((project, access, permit)) = read else {
-        return Outcome::Failed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "models_unavailable",
-            "No se pudo leer el proyecto.",
-        );
+    let Loaded {
+        project,
+        access,
+        disclosure,
+        session,
+        permit,
+    } = match load(directory, Session::of(principal), permit).await {
+        Ok(loaded) => loaded,
+        Err((status, code, message)) => return Outcome::Failed(status, code, message),
     };
-    let Some(file) = project
-        .ok()
-        .and_then(|files| files.into_iter().find(|f| f.name == file))
-    else {
-        return Outcome::Failed(
-            StatusCode::NOT_FOUND,
-            "model_not_found",
-            "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
-        );
-    };
-    let access = match access {
-        Ok(access) => access,
-        Err(error) => {
-            if let AccessError::Invalid(problems) = &error {
-                tracing::warn!(problems = problems.len(), "project policies are invalid");
-            }
-            return Outcome::Failed(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "policies_invalid",
-                "Las políticas o los miembros del proyecto no son válidos: nadie puede consultar \
-                 hasta corregirlos.",
-            );
-        }
-    };
+    // An engine that is down answers before the file is looked up, the same
+    // whether it exists or not.
     let Some(runtime) = state.analytics.runtime() else {
         return Outcome::Failed(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -380,12 +393,32 @@ async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -
             "El motor analítico no está listo. Reintenta en unos segundos.",
         );
     };
-    let session = Session::of(principal);
+    let Some(file) = project
+        .ok()
+        .and_then(|files| files.into_iter().find(|f| f.name == file))
+    else {
+        if !disclosure.inspects() {
+            return Outcome::Undisclosed { audit: None };
+        }
+        return disclosure.inspected(Outcome::Failed(
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
+        ));
+    };
     let span = tracing::Span::current();
     let work = runtime.run(move |conn| {
         let _permit = permit;
         let _entered = span.enter();
-        Ok(explain_file(file, conn, &access, &session, &unbound, shape))
+        Ok(explain_file(
+            file,
+            conn,
+            &access,
+            &session,
+            &unbound,
+            shape,
+            &disclosure,
+        ))
     });
     match tokio::time::timeout(state.query_timeout, work).await {
         Err(_) => Outcome::Failed(
@@ -400,6 +433,71 @@ async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -
         ),
         Ok(Ok(outcome)) => outcome,
     }
+}
+
+/// What one request reads from the project, on a single access snapshot.
+struct Loaded {
+    project: Result<Vec<ProjectFile>, ModelDiagnostic>,
+    access: Access,
+    disclosure: Disclosure,
+    session: Session,
+    permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Reads the access configuration, decides on it whether this session
+/// inspects the catalog, and reads the project, off the executor. An
+/// unusable configuration closes the path before anything says whether a
+/// file exists.
+async fn load(
+    directory: std::path::PathBuf,
+    session: Session,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<Loaded, (StatusCode, &'static str, &'static str)> {
+    let span = tracing::Span::current();
+    let read = tokio::task::spawn_blocking(move || {
+        let _entered = span.enter();
+        let access = access::load(&directory);
+        // On the same snapshot; it only sets how much a failure may say,
+        // never what the query may use.
+        let inspection = access.as_ref().ok().and_then(|access| {
+            let principal = access::principal(&access.members, &session.user, &session.groups);
+            match models::catalog::decide_for(&access.snapshot, &principal) {
+                models::catalog::Verdict::Allowed { fingerprint } => Some(fingerprint),
+                _ => None,
+            }
+        });
+        let project = models::read_project(&directory);
+        (project, access, inspection, session, permit)
+    })
+    .await;
+    let Ok((project, access, inspection, session, permit)) = read else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "models_unavailable",
+            "No se pudo leer el proyecto.",
+        ));
+    };
+    let access = match access {
+        Ok(access) => access,
+        Err(error) => {
+            if let AccessError::Invalid(problems) = &error {
+                tracing::warn!(problems = problems.len(), "project policies are invalid");
+            }
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "policies_invalid",
+                "Las políticas o los miembros del proyecto no son válidos: nadie puede consultar \
+                 hasta corregirlos.",
+            ));
+        }
+    };
+    Ok(Loaded {
+        project,
+        access,
+        disclosure: Disclosure { inspection },
+        session,
+        permit,
+    })
 }
 
 /// What the path knows of who asks, copied from the verified session.
@@ -420,6 +518,31 @@ impl Session {
     }
 }
 
+/// How much a failure may say to this session.
+struct Disclosure {
+    /// The fingerprint of an allowed `view` on the project's catalog
+    /// (#124): what Modelos already shows. Releasing anything of the
+    /// catalog under it is recorded like the Modelos route records it.
+    inspection: Option<String>,
+}
+
+impl Disclosure {
+    const fn inspects(&self) -> bool {
+        self.inspection.is_some()
+    }
+
+    /// `outcome`, released under inspection: recorded before it leaves.
+    fn inspected(&self, outcome: Outcome) -> Outcome {
+        match &self.inspection {
+            Some(fingerprint) => Outcome::Inspected {
+                outcome: Box::new(outcome),
+                fingerprint: fingerprint.clone(),
+            },
+            None => outcome,
+        }
+    }
+}
+
 fn explain_file(
     file: ProjectFile,
     conn: &bi_runtime::duckdb::Connection,
@@ -427,11 +550,13 @@ fn explain_file(
     session: &Session,
     unbound: &sef_query_ir::unbound::UnboundQuerySet,
     shape: (u32, u32, u32, u32),
+    disclosure: &Disclosure,
 ) -> Outcome {
     let compiled = match models::compile(file, conn) {
         Ok(compiled) => compiled,
+        Err(_) if !disclosure.inspects() => return Outcome::Undisclosed { audit: None },
         Err(rejected) => {
-            return Outcome::Invalid {
+            return disclosure.inspected(Outcome::Invalid {
                 code: "model_invalid",
                 message: "El modelo tiene errores. Quien lo mantiene los ve en la pantalla \
                           Modelos."
@@ -442,23 +567,52 @@ fn explain_file(
                     .map(model_diagnostic)
                     .collect(),
                 audit: None,
-            };
+            });
         }
     };
     let model = &compiled.document.semantic;
     let definition = model.definition();
-    let bound = match sef_query_ir::bind(unbound, definition) {
+    let resources = Resources::of(definition);
+    let principal = access::principal(&access.members, &session.user, &session.groups);
+    // Without inspection, names resolve among what this session may see
+    // first: a hidden object never makes a visible name ambiguous. When only
+    // hidden objects answer a name, the request is still decided (and its
+    // denial recorded), but answered like a name the model does not have.
+    let bound = if disclosure.inspects() {
+        sef_query_ir::bind(unbound, definition)
+    } else {
+        let visible = |id: &StableId| {
+            resources
+                .get(id)
+                .is_some_and(|resource| shown(access, &principal, resource))
+        };
+        sef_query_ir::bind_visible(unbound, definition, &visible)
+            .or_else(|_| sef_query_ir::bind(unbound, definition))
+    };
+    let bound = match bound {
         Ok(bound) => bound,
+        // Any binding failure would tell what the model declares.
+        Err(_) if !disclosure.inspects() => return Outcome::Undisclosed { audit: None },
         Err(errors) => {
-            return Outcome::Invalid {
+            return disclosure.inspected(Outcome::Invalid {
                 code: "query_invalid",
                 message: "La consulta no corresponde al modelo.".to_owned(),
                 diagnostics: errors.into_iter().map(binding_diagnostic).collect(),
                 audit: None,
-            };
+            });
         }
     };
-    decide(model, &bound, access, session, shape)
+    let decided = Decided {
+        resources: &resources,
+        principal: &principal,
+    };
+    decide(model, &bound, access, session, shape, disclosure, &decided)
+}
+
+/// Who asks and what the model's resources are, computed once per request.
+struct Decided<'a> {
+    resources: &'a Resources,
+    principal: &'a sef_authz::Principal,
 }
 
 /// Authorizes, validates and plans a bound query.
@@ -468,16 +622,17 @@ fn decide(
     access: &Access,
     session: &Session,
     shape: (u32, u32, u32, u32),
+    disclosure: &Disclosure,
+    decided: &Decided<'_>,
 ) -> Outcome {
     let definition = model.definition();
     let Some(block) = bound.blocks.first() else {
         return Outcome::Refused("La consulta no tiene bloques.".to_owned());
     };
-    let resources = Resources::of(definition);
-    let principal = access::principal(&access.members, &session.user, &session.groups);
+    let (resources, principal) = (decided.resources, decided.principal);
     let roles: Vec<String> = principal.roles.iter().cloned().collect();
     let context = sef_authz::Context::new();
-    let mut uses = access::requested(&resources, definition, block);
+    let mut uses = access::requested(resources, definition, block);
     let model_hash = model.content_hash().to_string();
     let audit = |decision: &QueryDecision, valid: bool| Audit {
         allowed: decision.allowed,
@@ -487,9 +642,17 @@ fn decide(
         shape,
     };
     // First what the query asks for, before validating anything.
-    let asked = authorize_query(&access.snapshot, &principal, &uses.list, &context);
+    let asked = authorize_query(&access.snapshot, principal, &uses.list, &context);
     if !asked.allowed {
-        return denied(&asked, definition, &uses, audit(&asked, true));
+        let audit = audit(&asked, true);
+        // Named only when everything the request refers to is visible to
+        // it: the first refused use never decides for the others.
+        if !disclosure.inspects()
+            && (asked.denied.is_none() || !request_is_disclosable(access, principal, &uses))
+        {
+            return Outcome::Undisclosed { audit: Some(audit) };
+        }
+        return denied(&asked, definition, &uses, audit);
     }
     let slots = context_slots(definition, &session.attributes);
     let validated = match sef_correctness::validate(model, bound, &slots) {
@@ -522,8 +685,8 @@ fn decide(
         }
     };
     // Then everything the plan reads, on the same snapshot.
-    access::read_by_plan(&mut uses, &resources, definition, &planned.plan);
-    let decision = authorize_query(&access.snapshot, &principal, &uses.list, &context);
+    access::read_by_plan(&mut uses, resources, definition, &planned.plan);
+    let decision = authorize_query(&access.snapshot, principal, &uses.list, &context);
     if !decision.allowed {
         return denied(&decision, definition, &uses, audit(&decision, true));
     }
@@ -562,6 +725,42 @@ fn decide(
         },
         audit: audit(&decision, true),
     }
+}
+
+/// Whether everything the request itself refers to may be shown to this
+/// session: each object it named, and each dataset a relationship role it
+/// wrote joins. Shown means an effective `view`, or `view_masked` after a
+/// plain refusal, on the same snapshot, as `sef_authz::authorize_query`
+/// decides projection. Writing a name proves nothing, and neither does a
+/// `forbid`, an evaluation error or an invalid request.
+fn request_is_disclosable(
+    access: &Access,
+    principal: &sef_authz::Principal,
+    uses: &access::Uses,
+) -> bool {
+    // Before planning, a join use comes only from a role the request wrote.
+    uses.list
+        .iter()
+        .filter(|used| uses.is_named(&used.resource.id) || used.usage == sef_authz::Usage::Join)
+        .all(|used| shown(access, principal, &used.resource))
+}
+
+/// Whether `resource` may be shown to this session on this snapshot: an
+/// effective `view`, or `view_masked` after a plain refusal, as
+/// `sef_authz::authorize_query` decides projection.
+fn shown(
+    access: &Access,
+    principal: &sef_authz::Principal,
+    resource: &sef_authz::Resource,
+) -> bool {
+    use sef_authz::{Action, Reason};
+    let context = sef_authz::Context::new();
+    let decide =
+        |action| sef_authz::authorize(&access.snapshot, principal, action, resource, &context);
+    let view = decide(Action::View);
+    view.allowed
+        || (matches!(view.reason, Reason::NoPermit | Reason::Forbidden)
+            && decide(Action::ViewMasked).allowed)
 }
 
 /// A denial names the object only when the request named it: what a

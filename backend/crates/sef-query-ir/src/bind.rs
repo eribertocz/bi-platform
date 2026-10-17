@@ -35,8 +35,24 @@ pub fn bind(
     query: &UnboundQuerySet,
     model: &ModelDefinition,
 ) -> Result<SemanticQuerySet, Vec<QueryError>> {
+    bind_visible(query, model, &|_| true)
+}
+
+/// Binds a request seeing only the metrics and dimensions `visible` admits:
+/// names resolve among them alone, so an object the caller may not see
+/// never makes a name ambiguous nor answers for it. The caller decides
+/// visibility; binding stays free of any permission model.
+///
+/// # Errors
+/// Every binding problem found, each with its JSON pointer.
+pub fn bind_visible(
+    query: &UnboundQuerySet,
+    model: &ModelDefinition,
+    visible: &dyn Fn(&StableId) -> bool,
+) -> Result<SemanticQuerySet, Vec<QueryError>> {
     let mut binder = Binder {
         model,
+        visible,
         errors: Vec::new(),
         roles: model
             .relationships
@@ -76,6 +92,7 @@ pub fn bind(
 
 struct Binder<'m> {
     model: &'m ModelDefinition,
+    visible: &'m dyn Fn(&StableId) -> bool,
     errors: Vec<QueryError>,
     roles: BTreeSet<&'m str>,
 }
@@ -312,8 +329,13 @@ impl Binder<'_> {
     }
 
     fn metric(&mut self, name: &str, path: &str) -> Option<StableId> {
+        let visible = self.visible;
         let found = resolve(
-            self.model.metrics.iter().map(|metric| &metric.metadata),
+            self.model
+                .metrics
+                .iter()
+                .map(|metric| &metric.metadata)
+                .filter(|metadata| visible(metadata.id())),
             name,
         );
         self.one(found, name, path, Code::UnknownMetric, "la métrica")
@@ -324,11 +346,13 @@ impl Binder<'_> {
         dimension: &UnboundDimension,
         path: &str,
     ) -> Option<QualifiedDimensionRef> {
+        let visible = self.visible;
         let found = resolve(
             self.model
                 .dimensions
                 .iter()
-                .map(|candidate| &candidate.metadata),
+                .map(|candidate| &candidate.metadata)
+                .filter(|metadata| visible(metadata.id())),
             &dimension.name,
         );
         let id = self.one(
