@@ -19,6 +19,7 @@ Cada registro contiene: contexto, decisión, alternativas descartadas, consecuen
 | [0011](0011-motor-semantico-como-producto.md) | El motor semántico como producto: dentro de bi-platform, como biblioteca y como servicio independiente; Apache-2.0 para toda bi-platform | Aprobada 2026-10-11 | Amplía 0006 y 0008 |
 | [0012](0012-motor-de-permisos-cedar.md) | Motor de permisos: Cedar dentro del motor semántico (RBAC + ABAC, CLS en tres niveles; RLS sigue en CSMIR) | Aprobada 2026-10-12 | Concreta 0010 §A |
 | [0013](0013-presupuesto-memoria-consulta.md) | Presupuesto independiente de memoria por consulta activa | Aprobada 2026-10-13 | Pool de conexiones G1; concreta M13 §13 y §19 |
+| [0014](0014-versiones-por-gate.md) | Versiones tentativas por gate: alpha en G2/G3, beta del alcance BI inicial desde G4 y objetivo de candidato a producción tras G6, siempre condicionados a evidencia | Aprobada 2026-10-13 | Correspondencia de versiones de «Milestones de release propuestos» de `ROADMAP_GLOBAL.md` |
 
 Plantilla: copiar un registro existente y numerar con el siguiente número libre.
 
