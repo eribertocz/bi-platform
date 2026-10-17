@@ -75,6 +75,7 @@ version: 1
 users:
   lector: [viewer]
   analista: [analyst]
+  modelador: [modeler]
 ";
 
 fn project() -> tempfile::TempDir {
@@ -112,6 +113,7 @@ struct Harness {
     pool: sqlx::PgPool,
     project: tempfile::TempDir,
     db: Database,
+    auth: bi_server::auth::AuthConfig,
 }
 
 async fn harness(pool: sqlx::PgPool) -> Harness {
@@ -125,14 +127,14 @@ async fn harness(pool: sqlx::PgPool) -> Harness {
     let auth = bi_server::auth::AuthConfig::from_lookup(&|key| match key {
         "BI_PUBLIC_ORIGIN" => Some(ORIGIN.into()),
         "BI_DEV_USERS" => Some(
-            r#"[{"id":"lector","display_name":"Lector"},{"id":"analista","display_name":"Analista"},{"id":"sinrol","display_name":"Sin rol"}]"#
+            r#"[{"id":"lector","display_name":"Lector"},{"id":"analista","display_name":"Analista"},{"id":"sinrol","display_name":"Sin rol"},{"id":"modelador","display_name":"Modelador"},{"id":"inspector","display_name":"Inspector"}]"#
                 .into(),
         ),
         _ => None,
     })
     .unwrap();
     let app = bi_server::router(AppState {
-        auth,
+        auth: auth.clone(),
         analytics: analytics().await,
         models: Models::new(Some(project.path().into())),
         ..AppState::new(db.clone())
@@ -142,6 +144,7 @@ async fn harness(pool: sqlx::PgPool) -> Harness {
         pool,
         project,
         db,
+        auth,
     }
 }
 
@@ -190,6 +193,22 @@ impl Harness {
         )
     }
 
+    /// The public headers of an explanation, with a correlation id.
+    async fn explain_headers(&self, cookie: &str, body: &Value) -> axum::http::HeaderMap {
+        let request = Request::post("/api/v1/semantic/explain")
+            .header("origin", ORIGIN)
+            .header("content-type", "application/json")
+            .header("cookie", cookie)
+            .header("x-request-id", "req-semantic-test");
+        self.app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+            .headers()
+            .clone()
+    }
+
     async fn receipt(&self, cookie: &str, body: Value) -> Value {
         let (status, response) = self.explain(Some(cookie), &body).await;
         assert_eq!(status, StatusCode::OK, "{response:#}");
@@ -210,6 +229,30 @@ impl Harness {
         .await
         .unwrap()
     }
+}
+
+/// The only detail a session without inspection gets for a failure that
+/// depends on the catalog (#156).
+const UNDISCLOSED: &str = "No se puede explicar la consulta solicitada.";
+
+/// The neutral answer: nothing but its code, its fixed detail and the
+/// correlation.
+fn assert_undisclosed(status: StatusCode, body: &Value) {
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body:#}");
+    let mut fields: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        ["code", "detail", "request_id", "status", "title", "type"],
+        "{body:#}"
+    );
+    assert_eq!(body["code"], "model_not_found");
+    assert_eq!(body["detail"], UNDISCLOSED);
 }
 
 fn metric(id: &str, name: &str) -> Value {
@@ -261,15 +304,12 @@ async fn a_viewer_sees_open_metrics_masked_confidential_and_never_restricted(poo
         .await;
     assert_eq!(status, StatusCode::OK, "{masked:#}");
     assert_eq!(masked["decision"]["masked"], json!(["c"]));
+    // A metric the viewer may not even see is not acknowledged (#156): the
+    // same answer as a name the model does not have.
     let (status, denied) = h
         .explain(Some(&lector), &query(&json!([metric("x", "coste")])))
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
-    assert_eq!(denied["code"], "semantic_access_denied");
-    assert_eq!(denied["reason"], "no_permit");
-    assert_eq!(denied["denied"]["kind"], "metric");
-    assert_eq!(denied["denied"]["name"], "coste");
-    assert_eq!(denied["denied"]["usage"], "project");
+    assert_undisclosed(status, &denied);
     // The analyst sees the confidential metric unmasked.
     let analista = h.login("analista").await;
     let (status, analyst) = h
@@ -325,13 +365,13 @@ async fn malformed_unknown_and_incorrect_queries_are_rejected_with_reasons(pool:
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
     assert_eq!(body["code"], "invalid_request");
-    // A name the model does not have.
-    let (status, body) = h
-        .explain(
-            Some(&analista),
-            &query(&json!([metric("m", "inexistente")])),
-        )
-        .await;
+    // A name the model does not have: neutral without inspection of the
+    // catalog (#156), with its reasons for whoever inspects it.
+    let unknown = query(&json!([metric("m", "inexistente")]));
+    let (status, body) = h.explain(Some(&analista), &unknown).await;
+    assert_undisclosed(status, &body);
+    let modelador = h.login("modelador").await;
+    let (status, body) = h.explain(Some(&modelador), &unknown).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
     assert_eq!(body["code"], "query_invalid");
     assert_eq!(body["diagnostics"][0]["phase"], "binding");
@@ -349,7 +389,12 @@ async fn malformed_unknown_and_incorrect_queries_are_rejected_with_reasons(pool:
         "comparison": ">",
         "value": { "type": "number", "value": "1" }
     });
+    // Binding resolves the model's names, so without inspection even a
+    // misplaced metric answers neutrally: telling it apart would tell
+    // which names exist (#156).
     let (status, body) = h.explain(Some(&analista), &incorrect).await;
+    assert_undisclosed(status, &body);
+    let (status, body) = h.explain(Some(&modelador), &incorrect).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
     assert!(
         !body["diagnostics"].as_array().unwrap().is_empty(),
@@ -359,8 +404,11 @@ async fn malformed_unknown_and_incorrect_queries_are_rejected_with_reasons(pool:
     let mut missing = query(&json!([metric("m", "importe")]));
     missing["model"] = json!("metrics/otro.yaml");
     let (status, body) = h.explain(Some(&analista), &missing).await;
+    assert_undisclosed(status, &body);
+    let (status, body) = h.explain(Some(&modelador), &missing).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:#}");
     assert_eq!(body["code"], "model_not_found");
+    assert_ne!(body["detail"], UNDISCLOSED);
     h.db.close().await;
 }
 
@@ -370,11 +418,12 @@ async fn identity_comes_only_from_the_session(pool: sqlx::PgPool) {
     let body = query(&json!([metric("m", "importe")]));
     let (status, _) = h.explain(None, &body).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    // A user the project grants no role is denied by default…
+    // A user the project grants no role is denied by default, without
+    // acknowledging what the model holds (#156)…
     let sinrol = h.login("sinrol").await;
     let (status, denied) = h.explain(Some(&sinrol), &body).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
-    assert_eq!(denied["reason"], "no_permit");
+    assert_undisclosed(status, &denied);
+    assert_eq!(h.audit().await.last().unwrap().0, "denial");
     // …and cannot claim one: a principal or roles in the body are refused,
     // never read.
     for claim in [
@@ -577,12 +626,20 @@ async fn requests_over_the_bounds_are_refused(pool: sqlx::PgPool) {
 async fn authorization_comes_before_correctness(pool: sqlx::PgPool) {
     let h = harness(pool).await;
     let lector = h.login("lector").await;
-    let mut body = query(&json!([metric("m", "coste")]));
-    body["query"]["having"] = json!({ "op": "compare",
-        "target": { "kind": "metric", "selection": "m" }, "comparison": ">",
-        "value": { "type": "number", "value": "1" } });
-    let (status, body) = h.explain(Some(&lector), &body).await;
+    let having = |name: &str| {
+        let mut body = query(&json!([metric("m", name)]));
+        body["query"]["having"] = json!({ "op": "compare",
+            "target": { "kind": "metric", "selection": "m" }, "comparison": ">",
+            "value": { "type": "number", "value": "1" } });
+        body
+    };
+    // Visible masked: its refused use is named before any correctness check.
+    let (status, body) = h.explain(Some(&lector), &having("margen")).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+    assert_eq!(body["denied"]["name"], "margen");
+    // Not visible at all: still refused first, without acknowledging it.
+    let (status, body) = h.explain(Some(&lector), &having("coste")).await;
+    assert_undisclosed(status, &body);
     h.db.close().await;
 }
 
@@ -594,6 +651,14 @@ async fn model_errors_never_disclose_objects_the_request_did_not_name(pool: sqlx
         &MODEL.replace("SUM(sales.quantity)", "SUM(sales.secret_internal)"),
     );
     for user in ["sinrol", "lector"] {
+        let cookie = h.login(user).await;
+        let (status, body) = h
+            .explain(Some(&cookie), &query(&json!([metric("m", "importe")])))
+            .await;
+        assert_undisclosed(status, &body);
+    }
+    {
+        let user = "modelador";
         let cookie = h.login(user).await;
         let (status, body) = h
             .explain(Some(&cookie), &query(&json!([metric("m", "importe")])))
@@ -613,7 +678,7 @@ async fn model_errors_never_disclose_objects_the_request_did_not_name(pool: sqlx
 }
 
 #[sqlx::test(migrations = false)]
-async fn a_joined_dataset_is_never_named_when_denied(pool: sqlx::PgPool) {
+async fn a_role_to_a_hidden_dataset_is_never_acknowledged(pool: sqlx::PgPool) {
     let h = harness(pool).await;
     let model = MODEL
         .replace(
@@ -630,16 +695,34 @@ async fn a_joined_dataset_is_never_named_when_denied(pool: sqlx::PgPool) {
             "{model}\nrelationships:\n  - name: self_role\n    from: sales\n    to: sales\n    from_columns: [order_id]\n    to_columns: [order_id]\n"
         ),
     );
+    let with_role = |role: &str| {
+        query(&json!([
+            metric("m", "importe"),
+            { "kind": "dimension", "id": "r", "name": "region", "roles": [role] }
+        ]))
+    };
+    // A role the request writes is a reference of the request: one that
+    // leads to a dataset the viewer may not see answers like one the model
+    // does not declare (#156).
     let lector = h.login("lector").await;
-    let (status, body) = h
-        .explain(
-            Some(&lector),
-            &query(&json!([
-                metric("m", "importe"),
-                { "kind": "dimension", "id": "r", "name": "region", "roles": ["self_role"] }
-            ])),
-        )
+    let (status, hidden) = h.explain(Some(&lector), &with_role("self_role")).await;
+    assert_undisclosed(status, &hidden);
+    let (status, unknown) = h
+        .explain(Some(&lector), &with_role("rol_inexistente"))
         .await;
+    assert_undisclosed(status, &unknown);
+    assert_eq!(without_correlation(hidden), without_correlation(unknown));
+    // Whoever inspects the catalog learns the use is refused, still without
+    // the dataset's name.
+    let modelador = h.login("modelador").await;
+    h.write(
+        "policies/project.cedar",
+        &format!(
+            "{}\nforbid (principal, action, resource is Dataset);",
+            sef_authz::BASE_POLICIES
+        ),
+    );
+    let (status, body) = h.explain(Some(&modelador), &with_role("self_role")).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
     assert_eq!(body["denied"]["kind"], "dataset", "{body:#}");
     assert!(
@@ -678,5 +761,285 @@ async fn a_correctness_message_never_quotes_an_unrequested_object(pool: sqlx::Pg
         !body.to_string().contains("region"),
         "unrequested axis leaked: {body:#}"
     );
+    h.db.close().await;
+}
+
+/// The same request and session, whatever the project holds: the bodies
+/// differ only in their correlation.
+fn without_correlation(mut body: Value) -> Value {
+    body.as_object_mut().unwrap().remove("request_id");
+    body
+}
+
+/// An explanation of `name` asked about `model`.
+fn asked(model: &str, name: &str) -> Value {
+    let mut body = query(&json!([metric("m", name)]));
+    body["model"] = json!(model);
+    body
+}
+
+#[sqlx::test(migrations = false)]
+async fn without_inspection_catalog_failures_are_indistinguishable(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    h.write(
+        "metrics/oculto.yaml",
+        "version: [\ndescription: descripcion_centinela\n",
+    );
+    let cases = [
+        ("absent file", asked("metrics/no_existe.yaml", "importe")),
+        ("invalid file", asked("metrics/oculto.yaml", "importe")),
+        (
+            "unknown member",
+            asked("metrics/ventas.yaml", "centinela_inexistente"),
+        ),
+        (
+            "member it may not see",
+            asked("metrics/ventas.yaml", "coste"),
+        ),
+        (
+            "visible then hidden",
+            query(&json!([metric("a", "importe"), metric("b", "coste")])),
+        ),
+        (
+            "hidden then visible",
+            query(&json!([metric("b", "coste"), metric("a", "importe")])),
+        ),
+    ];
+    let mut answers = Vec::new();
+    for (case, body) in &cases {
+        let (status, answer) = h.explain(Some(&lector), body).await;
+        assert_undisclosed(status, &answer);
+        let text = answer.to_string();
+        for sentinel in ["centinela", "oculto", "coste", "no_existe", "ventas"] {
+            assert!(!text.contains(sentinel), "{case}: {sentinel} in {text}");
+        }
+        answers.push((*case, without_correlation(answer)));
+    }
+    for (case, answer) in &answers[1..] {
+        assert_eq!(
+            answer, &answers[0].1,
+            "{case} differs from {}",
+            answers[0].0
+        );
+    }
+    // The same public headers as well.
+    // The same public headers as well.
+    for (case, body) in &cases {
+        let headers = h.explain_headers(&lector, body).await;
+        assert_eq!(
+            headers["content-type"], "application/problem+json",
+            "{case}"
+        );
+        assert_eq!(headers["cache-control"], "no-store", "{case}");
+        assert!(!headers["x-request-id"].is_empty(), "{case}");
+    }
+    // The same requests on a project without that file: identical.
+    std::fs::remove_file(h.project.path().join("metrics/oculto.yaml")).unwrap();
+    for (case, body) in &cases {
+        let (status, answer) = h.explain(Some(&lector), body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{case}");
+        assert_eq!(without_correlation(answer), answers[0].1, "{case}");
+    }
+    // Still allowed: a query the viewer may run, with its receipt.
+    let (status, body) = h
+        .explain(Some(&lector), &query(&json!([metric("m", "importe")])))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(body["receipt"]["decision"].as_str().is_some());
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn generated_names_never_tell_hidden_from_absent(pool: sqlx::PgPool) {
+    use proptest::prelude::*;
+    use proptest::strategy::ValueTree as _;
+    use proptest::test_runner::TestRunner;
+
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    let (_, reference) = h
+        .explain(Some(&lector), &asked("metrics/ventas.yaml", "coste"))
+        .await;
+    let reference = without_correlation(reference);
+    let name = prop_oneof![
+        Just("coste".to_owned()),
+        Just("COSTE".to_owned()),
+        Just("sales.order_id".to_owned()),
+        "[a-z_]{1,24}",
+    ];
+    let file = prop_oneof![
+        Just("metrics/ventas.yaml".to_owned()),
+        "metrics/[a-z]{1,12}[.](yaml|yml|json)",
+    ];
+    let visible = ["importe", "margen", "region", "sales.region"];
+    let mut runner = TestRunner::deterministic();
+    let mut sent = 0;
+    while sent < 32 {
+        let (name, file) = (name.clone(), file.clone())
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+        if file == "metrics/ventas.yaml" && visible.contains(&name.as_str()) {
+            continue;
+        }
+        let (status, answer) = h.explain(Some(&lector), &asked(&file, &name)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{file} {name}: {answer:#}");
+        assert_eq!(without_correlation(answer), reference, "{file} {name}");
+        sent += 1;
+    }
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_forbid_or_an_inspection_grant_proves_nothing_about_data(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    // The analyst may see the restricted metric masked, until a forbid.
+    let analista = h.login("analista").await;
+    let restricted = asked("metrics/ventas.yaml", "coste");
+    let (status, masked) = h.explain(Some(&analista), &restricted).await;
+    assert_eq!(status, StatusCode::OK, "{masked:#}");
+    let forbid = "forbid (principal, action, resource is Metric) \
+                  when { resource.classification == \"restricted\" };";
+    h.write(
+        "policies/project.cedar",
+        &format!("{}\n{forbid}", sef_authz::BASE_POLICIES),
+    );
+    let (status, body) = h.explain(Some(&analista), &restricted).await;
+    assert_undisclosed(status, &body);
+    // Inspecting the catalog only: full diagnostics, never data.
+    let inspect = "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", \
+                   resource == Model::\"project:catalog\");";
+    h.write(
+        "policies/project.cedar",
+        &format!("{}\n{inspect}", sef_authz::BASE_POLICIES),
+    );
+    h.write(
+        "policies/members.yaml",
+        &format!("{MEMBERS}  inspector: [catalog_reader]\n"),
+    );
+    let inspector = h.login("inspector").await;
+    let (status, body) = h
+        .explain(Some(&inspector), &asked("metrics/ventas.yaml", "importe"))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+    assert_eq!(body["code"], "semantic_access_denied");
+    assert_eq!(body["denied"]["name"], "importe");
+    let (status, body) = h
+        .explain(
+            Some(&inspector),
+            &asked("metrics/ventas.yaml", "inexistente"),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+    assert_eq!(body["code"], "query_invalid");
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn operational_failures_never_tell_whether_a_file_exists(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    let existing = asked("metrics/ventas.yaml", "importe");
+    let absent = asked("metrics/no_existe.yaml", "importe");
+    // Invalid policies: the same answer for an existing and an absent file.
+    h.write("policies/rota.cedar", "permit (principal, action, resource");
+    let (status, with_file) = h.explain(Some(&lector), &existing).await;
+    let (other, without_file) = h.explain(Some(&lector), &absent).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{with_file:#}");
+    assert_eq!(other, status);
+    assert_eq!(with_file["code"], "policies_invalid");
+    assert_eq!(
+        without_correlation(with_file),
+        without_correlation(without_file)
+    );
+    std::fs::remove_file(h.project.path().join("policies/rota.cedar")).unwrap();
+    // The engine down: the same, whether the file exists or not.
+    let down = bi_server::router(AppState {
+        auth: h.auth.clone(),
+        analytics: Analytics::disabled(),
+        models: Models::new(Some(h.project.path().into())),
+        ..AppState::new(h.db.clone())
+    });
+    let mut answers = Vec::new();
+    for body in [&existing, &absent] {
+        let response = down
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/semantic/explain")
+                    .header("origin", ORIGIN)
+                    .header("cookie", &lector)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["code"], "analytics_unavailable");
+        answers.push(without_correlation(answer));
+    }
+    assert_eq!(answers[0], answers[1]);
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn an_evaluation_error_never_makes_a_member_disclosable(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    // `view` fails to evaluate on the confidential metric, which the viewer
+    // could otherwise see masked: like `sef_authz`, never retried as masked.
+    let failing = "forbid (principal, action == Action::\"view\", resource is Metric) \
+                   when { resource.classification == \"confidential\" && 9223372036854775807 + 1 > 0 };";
+    h.write(
+        "policies/project.cedar",
+        &format!("{}\n{failing}", sef_authz::BASE_POLICIES),
+    );
+    let lector = h.login("lector").await;
+    let mut filtered = query(&json!([metric("c", "margen")]));
+    filtered["query"]["having"] = json!({
+        "op": "compare",
+        "target": { "kind": "metric", "selection": "c" },
+        "comparison": ">",
+        "value": { "type": "number", "value": "10" }
+    });
+    let (status, body) = h.explain(Some(&lector), &filtered).await;
+    assert_undisclosed(status, &body);
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_visible_refused_use_never_answers_for_a_hidden_one(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    // `region` restricted: hidden from the viewer, who sees `margen` masked.
+    h.write(
+        "metrics/ventas.yaml",
+        &MODEL.replace(
+            "        dimension: {}",
+            "        dimension: {}\n        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'",
+        ),
+    );
+    let lector = h.login("lector").await;
+    // A refused filter on the visible `margen`, and a filter on the hidden
+    // region: whichever use is refused first, nothing is acknowledged.
+    let mut mixed = query(&json!([metric("c", "margen")]));
+    mixed["query"]["having"] = json!({
+        "op": "compare",
+        "target": { "kind": "metric", "selection": "c" },
+        "comparison": ">",
+        "value": { "type": "number", "value": "10" }
+    });
+    mixed["query"]["filter"] = json!({
+        "op": "is_null",
+        "target": { "kind": "dimension", "name": "sales.region" }
+    });
+    let (status, body) = h.explain(Some(&lector), &mixed).await;
+    assert_undisclosed(status, &body);
+    // Without the hidden filter, the visible refusal is named.
+    mixed["query"].as_object_mut().unwrap().remove("filter");
+    let (status, body) = h.explain(Some(&lector), &mixed).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+    assert_eq!(body["denied"]["name"], "margen");
     h.db.close().await;
 }
