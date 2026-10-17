@@ -76,25 +76,37 @@ pub async fn run(
     let request_id = request_id
         .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
         .unwrap_or_default();
+    // The session middleware always sets it on this route.
+    let Some(Extension(principal)) = principal else {
+        return Rejection::new(StatusCode::UNAUTHORIZED, "session_required", None)
+            .into_response(&request_id);
+    };
     // Decided before the body is read, let alone parsed: a closed route does
     // no work and reflects nothing the client sent.
-    let outcome = match principal {
-        // The session middleware always sets it on this route.
-        None => Err(Rejection::new(
-            StatusCode::UNAUTHORIZED,
-            "session_required",
-            None,
-        )),
-        Some(Extension(principal)) => match admission::admit(&state, &principal) {
-            Admission::Closed(reason) => {
-                return admission::refuse(&state, &principal, &request_id, reason).await;
-            }
-            Admission::Pending => Err(unavailable()),
-            Admission::Admitted(runtime) => {
-                let body = Json::<QueryRequest>::from_request(request, &state).await;
-                handle(&state, &runtime, body).await
-            }
-        },
+    match admission::admit(&state, &principal) {
+        Admission::Closed(reason) => {
+            admission::refuse(&state, &principal, &request_id, reason).await
+        }
+        Admission::Pending => answer(&state, None, &request_id, request).await,
+        Admission::Admitted(runtime) => answer(&state, Some(&runtime), &request_id, request).await,
+    }
+}
+
+/// Everything after admission, on the admitted `runtime` (`None` while it
+/// is still bootstrapping): reads and validates the body, runs the query
+/// and turns the outcome into a response and its metrics.
+pub(crate) async fn answer(
+    state: &AppState,
+    runtime: Option<&bi_runtime::Runtime>,
+    request_id: &str,
+    request: Request,
+) -> Response {
+    let outcome = match runtime {
+        None => Err(unavailable()),
+        Some(runtime) => {
+            let body = Json::<QueryRequest>::from_request(request, state).await;
+            handle(state, runtime, body).await
+        }
     };
     match outcome {
         Ok(response) => response,
@@ -111,7 +123,7 @@ pub async fn run(
             if let Some(reason) = reason {
                 state.metrics.reject(reason);
             }
-            rejection.into_response(&request_id)
+            rejection.into_response(request_id)
         }
     }
 }
@@ -417,17 +429,4 @@ fn fetch(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn server_timing_lists_phases_in_milliseconds() {
-        assert_eq!(
-            server_timing(&[
-                ("plan", Duration::from_micros(120)),
-                ("execute", Duration::from_millis(15)),
-            ]),
-            "plan;dur=0.120, execute;dur=15.000"
-        );
-    }
-}
+mod tests;

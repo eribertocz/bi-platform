@@ -402,3 +402,6 @@ pub async fn from_env(analytics: Analytics) -> (QueryMetrics, Option<SdkMeterPro
         (QueryMetrics::default(), None)
     }
 }
+
+#[cfg(test)]
+mod tests;
