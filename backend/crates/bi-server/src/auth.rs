@@ -96,19 +96,26 @@ impl AuthConfig {
     }
 
     fn development_enabled(&self) -> bool {
-        cfg!(feature = "dev-auth") && !self.users.is_empty()
+        cfg!(feature = "dev-auth") && self.has_synthetic_users()
+    }
+
+    /// Synthetic identities are configured (only possible with `dev-auth`).
+    pub(crate) fn has_synthetic_users(&self) -> bool {
+        !self.users.is_empty()
+    }
+
+    /// The public origin is a loopback address.
+    pub(crate) fn loopback_origin(&self) -> bool {
+        self.origin
+            .parse::<Uri>()
+            .is_ok_and(|uri| matches!(uri.host(), Some("localhost" | "127.0.0.1" | "[::1]")))
     }
 
     /// The only setup where `BI_METADATA_MODE=development` is accepted:
     /// synthetic dev login compiled in and configured, a loopback public
     /// origin and no federated login. Never inferred from the database.
     pub(crate) fn allows_metadata_development(&self) -> bool {
-        self.development_enabled()
-            && self.oidc.is_none()
-            && self
-                .origin
-                .parse::<Uri>()
-                .is_ok_and(|uri| matches!(uri.host(), Some("localhost" | "127.0.0.1" | "[::1]")))
+        self.development_enabled() && self.oidc.is_none() && self.loopback_origin()
     }
 
     pub(crate) fn cookie(&self, token: &str, max_age: u32) -> String {

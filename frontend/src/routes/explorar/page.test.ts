@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { expect, it, vi } from 'vitest';
 import Page from './+page.svelte';
 import type { QueryRequest } from '#lib/api/query.ts';
@@ -168,5 +168,53 @@ it('redirects to login on an actual 401 Problem and cancels the sibling query', 
   await waitFor(() => expect(goto).toHaveBeenCalledWith('/login'));
   expect(signals.every((signal) => signal.aborted)).toBe(true);
   expect(goto).toHaveBeenCalledOnce();
+  expect(screen.queryByTestId('kpi-count')).toBeNull();
+});
+const closedDetail =
+  'Esta consulta de demostración solo está disponible en desarrollo sintético local. El flujo semántico de consulta aún no está disponible.';
+function problem(status: number, code: string, detail?: string) {
+  return Response.json(
+    { type: 'about:blank', title: 'Forbidden', status, code, detail, request_id: `req-${code}` },
+    { status, headers: { 'Content-Type': 'application/problem+json' } },
+  );
+}
+it('explains the closed G1 route without previous results, chart or retry', async () => {
+  let open = true;
+  const request = vi.fn<typeof fetch>(async (_, init) =>
+    open
+      ? result(JSON.parse(init!.body as string))
+      : problem(403, 'legacy_query_disabled', closedDetail),
+  );
+  vi.stubGlobal('fetch', request);
+  render(Page);
+  await screen.findByRole('table');
+  await waitFor(() => expect(mountChart).toHaveBeenCalledOnce());
+  open = false;
+  await fireEvent.click(screen.getByRole('button', { name: 'Actualizar resultados' }));
+  const alert = await screen.findByRole('alert');
+  expect(within(alert).getByText(closedDetail)).toBeTruthy();
+  expect(alert.textContent).toContain('HTTP 403 · Código: legacy_query_disabled');
+  expect(within(alert).getByText('Solicitud: req-legacy_query_disabled')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Reintentar' })).toBeNull();
+  expect(screen.queryByTestId('kpi-count')).toBeNull();
+  expect(screen.queryByTestId('kpi-amount')).toBeNull();
+  expect(screen.queryByRole('table')).toBeNull();
+  expect(screen.queryByRole('img')).toBeNull();
+  expect(cleanupChart).toHaveBeenCalledOnce();
+  // Nothing retries by itself: only the initial pair and the manual refresh.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(request).toHaveBeenCalledTimes(4);
+});
+it.each([
+  [403, 'origin_forbidden', 'Origen no permitido'],
+  [503, 'audit_unavailable', undefined],
+] as const)('keeps the manual retry for HTTP %s (%s)', async (status, code, detail) => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn<typeof fetch>(async () => problem(status, code, detail)),
+  );
+  render(Page);
+  expect((await screen.findByRole('alert')).textContent).toContain(`Código: ${code}`);
+  expect(screen.getByRole('button', { name: 'Reintentar' })).toBeTruthy();
   expect(screen.queryByTestId('kpi-count')).toBeNull();
 });

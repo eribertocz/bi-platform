@@ -825,21 +825,10 @@ async fn record(
     let event_id = crate::auth::random_token()
         .await
         .map_err(|()| UNAVAILABLE)?;
-    let raw = id
-        .and_then(|id| id.header_value().to_str().ok())
-        .unwrap_or_default();
-    let request_id = if !raw.is_empty()
-        && raw.len() <= 128
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
-    {
-        raw.to_owned()
-    } else {
-        format!("request:{}", hex(&Sha256::digest(raw.as_bytes())))
-    };
-    // Correlation reference until distributed tracing supplies a trace id.
-    let trace_id = hex(&Sha256::digest(request_id.as_bytes()))[..32].to_owned();
+    let (request_id, trace_id) = crate::audit::correlation(
+        id.and_then(|id| id.header_value().to_str().ok())
+            .unwrap_or_default(),
+    );
     let (dimensions, measures, filters, limit) = audit.shape;
     let event = bi_audit::Event {
         event_id,

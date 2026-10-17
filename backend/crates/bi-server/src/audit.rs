@@ -10,6 +10,35 @@ use opentelemetry::{
 };
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
+/// The request and trace references an HTTP event carries: the request id
+/// as received when it is a short token, otherwise its digest, so arbitrary
+/// header bytes never reach the history; and, until distributed tracing
+/// supplies one, a trace reference derived from it.
+pub(crate) fn correlation(raw: &str) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .fold(String::with_capacity(64), |mut text, byte| {
+                let _ = write!(text, "{byte:02x}");
+                text
+            })
+    };
+    let request_id = if !raw.is_empty()
+        && raw.len() <= 128
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+    {
+        raw.to_owned()
+    } else {
+        format!("request:{}", hex(&Sha256::digest(raw.as_bytes())))
+    };
+    let trace_id = hex(&Sha256::digest(request_id.as_bytes()))[..32].to_owned();
+    (request_id, trace_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Contract(bi_audit::Error),

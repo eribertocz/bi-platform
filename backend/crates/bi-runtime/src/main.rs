@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use bi_fixtures::sales::FixtureSpec;
 use bi_runtime::fixtures::{self, sales_oracle};
-use bi_runtime::{Bootstrap, RuntimeConfig};
+use bi_runtime::{Bootstrap, LoadOutcome, RuntimeConfig};
 
 const USAGE: &str = "usage: bi-runtime load-sales [--seed N] [--rows N]
   Loads the synthetic sales fixture into the DuckLake configured by BI_LAKE_*
@@ -60,6 +60,11 @@ fn run(spec: FixtureSpec) -> Result<(), Box<dyn std::error::Error>> {
     let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok())?;
     let bootstrap = Bootstrap::open(config)?;
     let outcome = fixtures::load_sales(&bootstrap, spec)?;
+    if outcome == LoadOutcome::Unverified {
+        return Err(
+            "the lake table is not this fixture (rows changed, or written by something else); left untouched".into(),
+        );
+    }
     let runtime = bootstrap.finish()?;
     let actual = tokio::runtime::Builder::new_current_thread()
         .enable_all()

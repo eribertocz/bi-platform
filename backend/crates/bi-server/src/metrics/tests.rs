@@ -1,4 +1,8 @@
-//! M15 contract against the SDK and a real local OTLP/HTTP receiver.
+//! M15 contract against the SDK and a real local OTLP/HTTP receiver. The
+//! query instruments are exercised on the admitted query path
+//! (`query::answer`): the public route is closed outside the local synthetic
+//! demo (#118), whose admission is tested through the real router in
+//! `tests/query.rs`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,20 +15,21 @@ use axum::{
     routing::post,
 };
 use bi_runtime::{Bootstrap, Runtime, RuntimeConfig};
-use bi_server::metadata::MetadataMode;
-use bi_server::{
-    AppState,
-    analytics::Analytics,
-    db::Database,
-    metrics::{self, QueryMetrics},
-    query,
-};
 use http_body_util::BodyExt;
 use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
 use prost::Message;
 use tower::ServiceExt;
+
+use crate::metadata::MetadataMode;
+use crate::{
+    AppState,
+    analytics::Analytics,
+    db::Database,
+    metrics::{self, QueryMetrics},
+    query,
+};
 
 const QUERY: &str = r#"{"dataset":"sales","measures":["row_count"]}"#;
 
@@ -37,33 +42,31 @@ fn install_tls_provider() {
     });
 }
 
-fn app(analytics: Analytics, metrics: QueryMetrics, timeout: Duration) -> Router {
+fn app(analytics: Analytics, metrics: QueryMetrics, timeout: Duration) -> AppState {
     let db = Database::start(
         &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
-    Router::new()
-        .route("/api/v1/queries", post(query::run))
-        .with_state(AppState {
-            analytics,
-            metrics,
-            query_timeout: timeout,
-            ..AppState::new(db)
-        })
+    AppState {
+        analytics,
+        metrics,
+        query_timeout: timeout,
+        ..AppState::new(db)
+    }
 }
 
-async fn request(app: &Router, query: &str) -> (StatusCode, serde_json::Value) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/api/v1/queries")
-                .header("content-type", "application/json")
-                .header("x-request-id", "private-request-id")
-                .body(Body::from(query.to_owned()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+/// One query on the admitted path, with the state's own runtime.
+async fn request(app: &AppState, query: &str) -> (StatusCode, serde_json::Value) {
+    let response = query::answer(
+        app,
+        app.analytics.runtime().as_ref(),
+        "private-request-id",
+        Request::post("/api/v1/queries")
+            .header("content-type", "application/json")
+            .body(Body::from(query.to_owned()))
+            .unwrap(),
+    )
+    .await;
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&body).unwrap())
@@ -91,7 +94,7 @@ async fn runtime() -> Runtime {
 struct Capture {
     provider: SdkMeterProvider,
     exporter: InMemoryMetricExporter,
-    app: Router,
+    app: AppState,
 }
 
 impl Capture {
@@ -197,6 +200,7 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
             "bi_query_execute" => vec!["engine", "result", "workload"],
             "bi_result_serialize" => vec!["format"],
             "bi_query_rejected" => vec!["reason", "workload"],
+            "bi_legacy_query_denied" => vec!["audit", "reason"],
             "bi_oidc_login" => vec!["code"],
             "bi_query_inflight"
             | "bi_query_queued"
@@ -217,6 +221,16 @@ fn points(exports: &[ResourceMetrics]) -> Vec<Point> {
                 "format" => &["json"],
                 "code" if p.name == "bi_oidc_login" => &["oidc_disabled", "rate_limited"],
                 "result" => &["ok", "error", "busy", "timeout", "unavailable", "cancelled"],
+                "audit" => &["recorded", "unavailable"],
+                "reason" if p.name == "bi_legacy_query_denied" => &[
+                    "dev_auth_absent",
+                    "metadata_restricted",
+                    "no_synthetic_users",
+                    "oidc_enabled",
+                    "public_origin",
+                    "federated_session",
+                    "unverified_runtime",
+                ],
                 "reason" => &[
                     "invalid_query",
                     "busy",
@@ -251,7 +265,7 @@ async fn oidc_denial_exports_a_closed_outcome_without_private_labels() {
         &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
         MetadataMode::Development,
     );
-    let app = bi_server::router(AppState {
+    let app = crate::router(AppState {
         metrics: QueryMetrics::new(&capture.provider.meter("test"), &Analytics::disabled()),
         ..AppState::new(db)
     });
@@ -308,27 +322,39 @@ async fn success_records_each_phase_and_exact_result_without_private_labels() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn validation_and_unavailability_record_only_phases_reached() {
-    for (query, status, reason, result) in [
+    // An invalid query is rejected while compiling; a runtime still
+    // bootstrapping is answered before the body is compiled at all.
+    for (query, ready, status, reason, compiled) in [
         (
             r#"{"dataset":"sales","measures":["private-invalid-measure"]}"#,
+            true,
             422,
             "invalid_query",
-            "error",
+            1,
         ),
-        (QUERY, 503, "unavailable", "ok"),
+        (QUERY, false, 503, "unavailable", 0),
     ] {
-        let capture = Capture::new(Analytics::disabled(), Duration::from_secs(5));
+        let analytics = if ready {
+            Analytics::ready(runtime().await)
+        } else {
+            Analytics::disabled()
+        };
+        let capture = Capture::new(analytics, Duration::from_secs(5));
         assert_eq!(request(&capture.app, query).await.0, status);
         let points = capture.points();
+        assert_eq!(
+            count(&points, "bi_semantic_compile_duration", None),
+            compiled
+        );
         assert_eq!(
             count(
                 &points,
                 "bi_semantic_compile_duration",
-                Some(("result", result))
+                Some(("result", "error"))
             ),
-            1
+            compiled
         );
         assert_eq!(
             count(&points, "bi_query_rejected", Some(("reason", reason))),
@@ -539,7 +565,7 @@ async fn real_otlp_http_export_decodes_metrics_at_a_local_receiver() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(bi_server::serve(listener, receiver, async {
+    let server = tokio::spawn(crate::serve(listener, receiver, async {
         stopped.await.ok();
     }));
     let analytics = Analytics::ready(runtime().await);
@@ -627,7 +653,7 @@ async fn failed_export_is_isolated_from_queries() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(bi_server::serve(listener, receiver, async {
+    let server = tokio::spawn(crate::serve(listener, receiver, async {
         stopped.await.ok();
     }));
     let analytics = Analytics::ready(runtime().await);

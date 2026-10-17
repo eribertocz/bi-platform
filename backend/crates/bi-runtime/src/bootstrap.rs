@@ -1,7 +1,7 @@
 //! Administrative phase: extensions, lake attachment and data loading, on a
 //! connection that still has file-system access. Ends with a lockdown.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 
@@ -20,12 +20,22 @@ const LOCKDOWN: &str = "
     SET lock_configuration = true;";
 
 /// Records which fixture each lake table holds, so loading is idempotent.
+const FIXTURES: &str = "bi_fixtures";
 const FIXTURES_TABLE: &str = "lake.main.bi_fixtures";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadOutcome {
+    /// The fixture was written into the lake now: the table did not exist,
+    /// or it held exactly the fixture its marker named.
     Loaded,
+    /// The lake already held this fixture: its marker matches and the table
+    /// holds exactly the fixture's columns and rows.
     AlreadyLoaded,
+    /// The table's rows cannot be vouched for: changed since they were
+    /// loaded, missing, written by something else (no marker) or named by a
+    /// marker that cannot be regenerated. Left untouched, so nothing in the
+    /// lake is ever lost to a fixture.
+    Unverified,
 }
 
 /// Absolute, `/`-separated, with a trailing slash. DuckDB only lets a
@@ -106,16 +116,25 @@ impl Bootstrap {
         })
     }
 
-    /// Loads `parquet` into `lake.main.<table>` unless the lake already holds
-    /// the fixture identified by `fingerprint`. Replacement is atomic.
+    /// Loads `parquet` into `lake.main.<table>` where nothing would be lost:
+    /// a lake without that table, or one whose table holds exactly the
+    /// fixture its marker names (`regenerate` writes that fixture from its
+    /// fingerprint, or answers `None` when it cannot). Replacement is atomic.
+    ///
+    /// A marker alone proves nothing about the table, which anyone with
+    /// access to the lake may have changed since, and a table without one
+    /// was written by someone else: rows are always compared exactly before
+    /// a table is vouched for or replaced; otherwise it is left untouched.
     ///
     /// # Errors
-    /// When no lake is configured, the table name is invalid, or the engine fails.
+    /// When no lake is configured, the table name is invalid, regenerating a
+    /// previous fixture fails, or the engine fails.
     pub fn load_parquet_fixture(
         &self,
         table: &str,
         parquet: &Path,
         fingerprint: &str,
+        regenerate: impl FnOnce(&str) -> Result<Option<PathBuf>, RuntimeError>,
     ) -> Result<LoadOutcome, RuntimeError> {
         if self.config.lake.is_none() {
             return Err(RuntimeError::Lake("no lake configured".to_owned()));
@@ -123,26 +142,49 @@ impl Bootstrap {
         if !is_identifier(table) {
             return Err(RuntimeError::Lake(format!("invalid table name {table:?}")));
         }
-        self.conn.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS {FIXTURES_TABLE} (name VARCHAR, fingerprint VARCHAR)"
-        ))?;
-        let current: Option<String> = self
-            .conn
-            .prepare(&format!(
-                "SELECT fingerprint FROM {FIXTURES_TABLE} WHERE name = ?"
-            ))?
-            .query_row([table], |row| row.get(0))
-            .map(Some)
-            .or_else(|error| match error {
-                duckdb::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })?;
-        if current.as_deref() == Some(fingerprint) {
-            return Ok(LoadOutcome::AlreadyLoaded);
+        // Read only: nothing is created in the lake unless a fixture is written.
+        let current: Option<String> = if self.table_exists(FIXTURES)? {
+            self.conn
+                .prepare(&format!(
+                    "SELECT fingerprint FROM {FIXTURES_TABLE} WHERE name = ?"
+                ))?
+                .query_row([table], |row| row.get(0))
+                .map(Some)
+                .or_else(|error| match error {
+                    duckdb::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?
+        } else {
+            None
+        };
+        let replaceable = match current.as_deref() {
+            Some(marked) if marked == fingerprint => {
+                if self.table_matches_parquet(table, parquet)? {
+                    return Ok(LoadOutcome::AlreadyLoaded);
+                }
+                false
+            }
+            None => !self.table_exists(table)?,
+            Some(marked) => match regenerate(marked)? {
+                Some(previous) => self.table_matches_parquet(table, &previous)?,
+                None => false,
+            },
+        };
+        if !replaceable {
+            tracing::warn!(
+                event_code = "fixture_unverified",
+                table,
+                fingerprint,
+                "the lake table is not the fixture its marker names, or has no marker; left untouched"
+            );
+            return Ok(LoadOutcome::Unverified);
         }
 
         self.conn.execute_batch("BEGIN TRANSACTION")?;
         let result = (|| -> Result<(), duckdb::Error> {
+            self.conn.execute_batch(&format!(
+                "CREATE TABLE IF NOT EXISTS {FIXTURES_TABLE} (name VARCHAR, fingerprint VARCHAR)"
+            ))?;
             self.conn.execute_batch(&format!(
                 "CREATE OR REPLACE TABLE {LAKE}.main.{table} AS SELECT * FROM read_parquet({})",
                 sql_string(&parquet.to_string_lossy())
@@ -163,6 +205,48 @@ impl Bootstrap {
         }
         tracing::info!(table, fingerprint, "fixture loaded into the lake");
         Ok(LoadOutcome::Loaded)
+    }
+
+    fn table_exists(&self, table: &str) -> Result<bool, duckdb::Error> {
+        let tables: i64 = self.conn.query_row(
+            "SELECT count(*) FROM information_schema.tables
+             WHERE table_catalog = ? AND table_schema = 'main' AND table_name = ?",
+            [LAKE, table],
+            |row| row.get(0),
+        )?;
+        Ok(tables > 0)
+    }
+
+    /// Whether `lake.main.<table>` exists with exactly the columns, in order
+    /// and type, and the rows of `parquet`. Rows are compared as multisets in
+    /// both directions (`EXCEPT ALL`, where NULLs are equal), so matching
+    /// counts or totals with different rows is not a match.
+    fn table_matches_parquet(&self, table: &str, parquet: &Path) -> Result<bool, duckdb::Error> {
+        if !self.table_exists(table)? {
+            return Ok(false);
+        }
+        let source = sql_string(&parquet.to_string_lossy());
+        let columns = |relation: &str| -> Result<Vec<(String, String)>, duckdb::Error> {
+            self.conn
+                .prepare(&format!(
+                    "SELECT column_name, column_type FROM (DESCRIBE {relation})"
+                ))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        };
+        let stored = format!("{LAKE}.main.{table}");
+        if columns(&stored)? != columns(&format!("SELECT * FROM read_parquet({source})"))? {
+            return Ok(false);
+        }
+        let differing: i64 = self.conn.query_row(
+            &format!(
+                "SELECT (SELECT count(*) FROM (SELECT * FROM {stored} EXCEPT ALL SELECT * FROM read_parquet({source})))
+                      + (SELECT count(*) FROM (SELECT * FROM read_parquet({source}) EXCEPT ALL SELECT * FROM {stored}))"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(differing == 0)
     }
 
     /// Locks the configuration and starts the query pool.

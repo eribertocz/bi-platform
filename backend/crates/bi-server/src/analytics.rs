@@ -5,16 +5,36 @@
 use std::time::Duration;
 
 use bi_fixtures::sales::FixtureSpec;
-use bi_runtime::{Bootstrap, Runtime, RuntimeConfig, RuntimeError, fixtures};
+use bi_runtime::{Bootstrap, LoadOutcome, Runtime, RuntimeConfig, RuntimeError, fixtures};
 use tokio::sync::watch;
 
 const RETRY_MIN: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 
+/// What a runtime's own bootstrap established about its data. Only the
+/// bootstrap sets it; a request, a header or the name of a table never can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// The synthetic `sales` fixture, written or compared row by row with the
+    /// generated fixture before the runtime started serving.
+    SyntheticSales(FixtureSpec),
+    /// Anything else: no fixture requested, a lake whose fixture table was
+    /// altered, or a runtime built outside this bootstrap.
+    Unknown,
+}
+
+/// A runtime together with its provenance, read in one step so a decision
+/// about one never applies to another.
+#[derive(Clone)]
+pub struct Instance {
+    pub runtime: Runtime,
+    pub provenance: Provenance,
+}
+
 #[derive(Clone)]
 pub struct Analytics {
     enabled: bool,
-    runtime: watch::Receiver<Option<Runtime>>,
+    instance: watch::Receiver<Option<Instance>>,
 }
 
 impl Analytics {
@@ -23,16 +43,21 @@ impl Analytics {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            runtime: watch::channel(None).1,
+            instance: watch::channel(None).1,
         }
     }
 
-    /// An already running runtime, e.g. in tests.
+    /// An already running runtime, e.g. in tests. Its data was not loaded
+    /// here, so its provenance is [`Provenance::Unknown`].
     #[must_use]
     pub fn ready(runtime: Runtime) -> Self {
         Self {
             enabled: true,
-            runtime: watch::channel(Some(runtime)).1,
+            instance: watch::channel(Some(Instance {
+                runtime,
+                provenance: Provenance::Unknown,
+            }))
+            .1,
         }
     }
 
@@ -40,11 +65,11 @@ impl Analytics {
     /// `fixture` when given, until it succeeds.
     #[must_use]
     pub fn start(config: RuntimeConfig, fixture: Option<FixtureSpec>) -> Self {
-        let (sender, runtime) = watch::channel(None);
+        let (sender, instance) = watch::channel(None);
         tokio::task::spawn_blocking(move || bootstrap_until_ready(&config, fixture, &sender));
         Self {
             enabled: true,
-            runtime,
+            instance,
         }
     }
 
@@ -55,26 +80,43 @@ impl Analytics {
 
     #[must_use]
     pub fn runtime(&self) -> Option<Runtime> {
-        self.runtime.borrow().clone()
+        self.instance
+            .borrow()
+            .as_ref()
+            .map(|instance| instance.runtime.clone())
+    }
+
+    /// The runtime and its provenance, as one snapshot.
+    #[must_use]
+    pub fn instance(&self) -> Option<Instance> {
+        self.instance.borrow().clone()
     }
 
     /// Resolves once the runtime is ready; `false` if it never will be.
     pub async fn wait_until_ready(&self) -> bool {
-        self.runtime.clone().wait_for(Option::is_some).await.is_ok()
+        self.instance
+            .clone()
+            .wait_for(Option::is_some)
+            .await
+            .is_ok()
     }
 }
 
 fn bootstrap_until_ready(
     config: &RuntimeConfig,
     fixture: Option<FixtureSpec>,
-    sender: &watch::Sender<Option<Runtime>>,
+    sender: &watch::Sender<Option<Instance>>,
 ) {
     let mut retry_in = RETRY_MIN;
     loop {
         match bootstrap(config, fixture) {
-            Ok(runtime) => {
-                tracing::info!(workers = config.workers, "analytical runtime ready");
-                sender.send_replace(Some(runtime));
+            Ok(instance) => {
+                tracing::info!(
+                    workers = config.workers,
+                    synthetic = matches!(instance.provenance, Provenance::SyntheticSales(_)),
+                    "analytical runtime ready"
+                );
+                sender.send_replace(Some(instance));
                 return;
             }
             Err(error) => tracing::warn!(
@@ -94,8 +136,9 @@ fn bootstrap_until_ready(
 fn bootstrap(
     config: &RuntimeConfig,
     fixture: Option<FixtureSpec>,
-) -> Result<Runtime, RuntimeError> {
+) -> Result<Instance, RuntimeError> {
     let bootstrap = Bootstrap::open(config.clone())?;
+    let mut provenance = Provenance::Unknown;
     if let Some(spec) = fixture {
         let outcome = fixtures::load_sales(&bootstrap, spec)?;
         tracing::info!(
@@ -104,6 +147,12 @@ fn bootstrap(
             rows = spec.rows,
             "development fixture"
         );
+        if matches!(outcome, LoadOutcome::Loaded | LoadOutcome::AlreadyLoaded) {
+            provenance = Provenance::SyntheticSales(spec);
+        }
     }
-    bootstrap.finish()
+    Ok(Instance {
+        runtime: bootstrap.finish()?,
+        provenance,
+    })
 }

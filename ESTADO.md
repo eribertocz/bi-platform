@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-*Inventario del corte escrito por Claude el 2026-10-13. Actualizado por Codex el mismo día tras verificar y cerrar #46 y hacer el triaje de G2 sobre `main` aa35372 y GitHub; el 2026-10-14 se registra la aceptación de la especificación #118; el 2026-10-17 Claude actualiza estado y conteos al entregar #116 y #117. Codex lo actualiza al cerrar cada Issue (AGENTS.md); si algo aquí contradice el código o GitHub, mandan ellos.*
+*Inventario del corte escrito por Claude el 2026-10-13. Actualizado por Codex el mismo día tras verificar y cerrar #46 y hacer el triaje de G2 sobre `main` aa35372 y GitHub; el 2026-10-14 se registra la aceptación de la especificación #118; el 2026-10-17 Claude actualiza estado y conteos al entregar #116, #117 y #118. Codex lo actualiza al cerrar cada Issue (AGENTS.md); si algo aquí contradice el código o GitHub, mandan ellos.*
 
 ## Cómo llegamos aquí
 
@@ -22,6 +22,8 @@ El 2026-10-13 el propietario decidió pasar a **roles estrictos** (`DECISIONES.m
 
 **Estado vigente (Claude, 2026-10-17, tras la fusión de #125, comprobado con `gh issue list --milestone`):** G2 tiene **23 Issues cerrados y 13 abiertos**, contando solo Issues. #115 quedó cerrado al fusionar el PR #125 por squash en `cf4eb22`, tras la aprobación de Codex sobre `d7dcaa3` y los siete checks de CI en verde.
 
+**Al entregar #118 (Claude, 2026-10-17, comprobado con `gh issue list --milestone`):** G2 tiene **24 Issues cerrados y 12 abiertos**. #117 quedó cerrado al fusionar el PR #130 en `99f711c` (ADR 0015). El PR de #118 queda en revisión.
+
 **Actualización verificada por Codex, 2026-10-15:** G2 tiene **25 Issues cerrados y 13 abiertos**; no hay PR abiertos. #120 está integrado mediante #121 en `f59a7687b0f897c7748b18c9d5d623699fb41d5c` (rustls 0.23.46). **#113 quedó cerrado al fusionar #119 por squash en `94cd6f66d1cf2334ed4cc3051a2d8fa377528904`**, tras la aprobación de Codex sobre `e0f8876` y los siete checks de CI en verde. Entrega: rechazo de JSON ambiguo en PostgreSQL, verificación de integridad posterior a contenido inválido, CLI `audit-verify --report` y clasificación/observabilidad segura de SQLSTATE 22023. La verificación y sus regresiones constan en el [veredicto final](https://github.com/eribertocz/bi-platform/pull/119#issuecomment-6204248684); las dos últimas regresiones pasaron con PostgreSQL 18.6 real en Docker. El propietario autorizó expresamente para #119 la autoría automática de GitHub con Claude como coautor; autorización registrada en el PR. #71 y G2 siguen abiertos.
 
 Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con medidas y *drill* autorizado; criterio de cierre, «usuarios con permisos distintos no cruzan filas, caché ni exportación». G0 y G1 están cerrados (app, CI, datos a gráfico). Quedan abiertos los nueve paraguas originales de G2; #117, #118 y #124, cuyas especificaciones están consultadas y aceptadas por el propietario; y el plan de seguimiento #128. El conteo de cerrados incluye #114 como **no planificado**, retirado tras consultar al propietario: exigir calidad y arquitectura del código en cada especificación sin crear nuevas reglas; no se entregó funcionalidad ni se integró documentación por ese Issue. Falta sobre todo la demo de aislamiento entre dos usuarios y migrar las rutas antiguas al punto único (Issue #69).
@@ -32,8 +34,9 @@ Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con m
 
 - [#115](https://github.com/eribertocz/bi-platform/issues/115): integrado (PR #125 en `cf4eb22`).
 - [#116](https://github.com/eribertocz/bi-platform/issues/116): integrado (PR #129, ADR 0014).
-- [#117](https://github.com/eribertocz/bi-platform/issues/117): entregado en su PR documental (ADR 0015), en revisión.
-- Después: #118 → [#124](https://github.com/eribertocz/bi-platform/issues/124), sin ampliar sus especificaciones aceptadas. Continúa el orden de los paraguas [#71 → #69 → #84 → #48 → #75 → #77 → #100 → #101 → #103](https://github.com/eribertocz/bi-platform/issues/71#issuecomment-6158911952), que se dividirán en entregas acotadas antes de implementarse. #115 integró la separación de roles de #71 y #118 es la primera entrega pendiente de #69. Modelos, ejecución semántica y Explorar/demo de dos usuarios requieren especificaciones separadas. La investigación del riesgo RSS de #101 y la comprobación de las leyes prioritarias siguen vigentes. No se inicia G3 antes de cerrar G2.
+- [#117](https://github.com/eribertocz/bi-platform/issues/117): integrado (PR #130, ADR 0015).
+- [#118](https://github.com/eribertocz/bi-platform/issues/118): entregado en su PR, en revisión.
+- Después: [#124](https://github.com/eribertocz/bi-platform/issues/124), sin ampliar sus especificaciones aceptadas. Continúa el orden de los paraguas [#71 → #69 → #84 → #48 → #75 → #77 → #100 → #101 → #103](https://github.com/eribertocz/bi-platform/issues/71#issuecomment-6158911952), que se dividirán en entregas acotadas antes de implementarse. #115 integró la separación de roles de #71 y #118 es la primera entrega de #69. Modelos, ejecución semántica y Explorar/demo de dos usuarios requieren especificaciones separadas. La investigación del riesgo RSS de #101 y la comprobación de las leyes prioritarias siguen vigentes. No se inicia G3 antes de cerrar G2.
 
 ## Qué existe y funciona
 
@@ -62,11 +65,10 @@ Según `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`: modelos semánticos con m
 
 | Issue | Qué falta exactamente |
 |---|---|
-| **#117** Experiencia web, despliegue y ubicación de datos | **Dirección acordada**, documentada en [ADR 0015](docs/decisiones/0015-navegador-contenedores-y-ubicacion-de-datos.md) (PR documental en revisión): navegador y contenedores oficiales; servidor, acceso y ubicación de los datos como elecciones independientes; publicar y compartir sin copiar datos ni ceder los permisos del autor. **Funciones pendientes:** conectores, traslados, publicación de dashboards y distribución se especificarán y probarán en G3/G4/G6; ninguna está implementada |
-| **#118** Cerrar la vía de consultas G1 fuera de desarrollo sintético | Especificación consultada y aceptada el 2026-10-14, con spec-lista: bloquear POST /api/v1/queries fuera del modo local sintético verificado, incluso para admin/OIDC; conservar la demo local y auditar los bloqueos con plazo total finito. Incluye rechazar marcas de fixture sin contenido acreditado y comprobar admisión antes de extraer JSON. Depende de #113/#115 integrados y sigue a #116/#117. No añade ejecución semántica ni cierra #69/G2 |
+| **#118** Cerrar la vía de consultas G1 fuera de desarrollo sintético | Entregado por Claude, en revisión: `POST /api/v1/queries` responde 403 `legacy_query_disabled` antes de leer el cuerpo salvo en la demo sintética local (build `dev-auth`, modo `development`, usuarios sintéticos, origen loopback, sin OIDC, sesión local y fixture acreditado por el propio arranque, comparado fila por fila al reutilizar el lago). Cada rechazo autenticado se audita con plazo total (503 `audit_unavailable` si no puede registrarse). No añade ejecución semántica ni cierra #69/G2 |
 | **#124** Modelos: `view` del catálogo completo | Decisión del propietario «1A y 2A» registrada y `spec-lista`: inspección completa de definiciones solo para identidades autorizadas (modeler/admin por políticas base; el resto por Cedar), sin conceder acceso a datos. Implementación después de #115 y #118 |
 | **#128** Plan de cierre de G2 | Seguimiento de Codex para el propietario: qué falta hasta `v0.2.0-alpha.2`, dependencias y estimación revisable. No es una tarea de implementación ni lleva `spec-lista` |
-| **#69** Punto único de permisos | Los permisos ya deciden (#90) y la vía `/explain` ya autoriza (#110), pero `/api/v1/queries` sigue sin pasar por ahí, `/api/v1/models` no exige `view`, y falta la demo de dos usuarios con totales distintos |
+| **#69** Punto único de permisos | Los permisos ya deciden (#90) y la vía `/explain` ya autoriza (#110), `/api/v1/queries` queda cerrada fuera de la demo sintética local (#118, en revisión), `/api/v1/models` no exige `view`, y falta la demo de dos usuarios con totales distintos |
 | **#48** Adaptador Ossie | Partes 1–3 integradas; falta la parte 4 (exportación CSMIR → Ossie de ida y vuelta) |
 | **#75** Metadatos Ossie en Modelos | El propietario ya validó la pantalla; falta lo mismo que #48 parte 4 |
 | **#77** Funciones de `OSSIE_SQL_2026` | Bloque 1 (texto/números, #92) y fechas (#95) integrados; falta agregados y funciones de ventana |

@@ -1054,7 +1054,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Origin ausente o distinto al configurado (`origin_forbidden`) */
+      /** @description Origin ausente o distinto al configurado (`origin_forbidden`), o vía cerrada fuera del desarrollo sintético local (`legacy_query_disabled`) */
       403: {
         headers: {
           [name: string]: unknown;
@@ -1090,7 +1090,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Motor analítico no disponible o metadatos no listos (`metadata_not_ready`) */
+      /** @description Motor analítico no disponible, metadatos no listos (`metadata_not_ready`) o denegación que no pudo registrarse en la auditoría (`audit_unavailable`) */
       503: {
         headers: {
           [name: string]: unknown;

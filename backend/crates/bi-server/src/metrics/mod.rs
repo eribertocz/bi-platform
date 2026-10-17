@@ -78,6 +78,7 @@ struct Instruments {
     execute: Histogram<f64>,
     serialize: Histogram<f64>,
     rejected: Counter<u64>,
+    legacy_denied: Counter<u64>,
     oidc_logins: Counter<u64>,
     _pool: Vec<ObservableGauge<u64>>,
 }
@@ -157,6 +158,13 @@ impl QueryMetrics {
                 .with_unit("{query}")
                 .with_description("Rejected query requests")
                 .build(),
+            legacy_denied: meter
+                .u64_counter("bi_legacy_query_denied")
+                .with_unit("{query}")
+                .with_description(
+                    "Requests refused by the closed G1 query route; no identity or request labels",
+                )
+                .build(),
             oidc_logins: meter
                 .u64_counter("bi_oidc_login")
                 .with_unit("{login}")
@@ -164,6 +172,20 @@ impl QueryMetrics {
                 .build(),
             _pool: pool,
         })))
+    }
+
+    /// `reason` and `audit` come from closed vocabularies
+    /// (`query::admission::Closed`, `recorded`/`unavailable`).
+    pub(crate) fn legacy_denied(&self, reason: &'static str, audit: &'static str) {
+        if let Some(metrics) = &self.0 {
+            metrics.legacy_denied.add(
+                1,
+                &[
+                    KeyValue::new("reason", reason),
+                    KeyValue::new("audit", audit),
+                ],
+            );
+        }
     }
 
     pub(crate) fn oidc_login(&self, result: &'static str) {
@@ -380,3 +402,6 @@ pub async fn from_env(analytics: Analytics) -> (QueryMetrics, Option<SdkMeterPro
         (QueryMetrics::default(), None)
     }
 }
+
+#[cfg(test)]
+mod tests;
