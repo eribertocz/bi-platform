@@ -39,6 +39,74 @@ pub(crate) fn correlation(raw: &str) -> (String, String) {
     (request_id, trace_id)
 }
 
+/// One event an HTTP route records about a decision or a refusal.
+pub(crate) struct HttpRecord<'a> {
+    pub actor: &'a str,
+    /// The request id as received; [`correlation`] sanitizes it.
+    pub request_id: &'a str,
+    pub action: bi_audit::Action,
+    pub result: bi_audit::ResultCode,
+    pub resource_type: &'static str,
+    pub resource_id: &'static str,
+    /// The decision's fingerprint; `None` when no decision was taken.
+    pub policy_decision_id: Option<String>,
+}
+
+/// Appends `record` within `budget`, all of it: connection, transaction,
+/// the append (which may wait for the audit head) and the commit.
+/// PostgreSQL also ends its own wait within what is left, so an abandoned
+/// statement never outlives the request; an unconfirmed transaction rolls
+/// back and frees its connection. No retry. The error is the problem code
+/// to answer with (`audit_unavailable`, or `metadata_not_ready`).
+pub(crate) async fn record_within(
+    db: &crate::db::Database,
+    record: HttpRecord<'_>,
+    budget: std::time::Duration,
+) -> Result<(), &'static str> {
+    const UNAVAILABLE: &str = "audit_unavailable";
+    let started = Instant::now();
+    let event_id = crate::auth::random_token()
+        .await
+        .map_err(|()| UNAVAILABLE)?;
+    let (request_id, trace_id) = correlation(record.request_id);
+    let event = Event {
+        event_id,
+        occurred_at: std::time::SystemTime::now().into(),
+        actor_id: record.actor.to_owned(),
+        actor_type: bi_audit::ActorType::User,
+        session_id: None,
+        action: record.action,
+        resource_type: record.resource_type.to_owned(),
+        resource_id: record.resource_id.to_owned(),
+        result: record.result,
+        request_id,
+        trace_id,
+        policy_decision_id: record.policy_decision_id,
+        source: bi_audit::Source::Http,
+        metadata_redacted: bi_audit::MetadataRedacted { query_shape: None },
+        schema_version: bi_audit::SCHEMA_VERSION,
+    };
+    let write = async {
+        let mut transaction = db
+            .begin()
+            .await
+            .map_err(|error| error.problem_code(UNAVAILABLE))?;
+        let left = budget.saturating_sub(started.elapsed()).as_millis().max(1);
+        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
+            .bind(left.to_string())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| UNAVAILABLE)?;
+        append(&mut transaction, &event)
+            .await
+            .map_err(|_| UNAVAILABLE)?;
+        transaction.commit().await.map_err(|_| UNAVAILABLE)
+    };
+    tokio::time::timeout(budget.saturating_sub(started.elapsed()), write)
+        .await
+        .map_err(|_| UNAVAILABLE)?
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Contract(bi_audit::Error),
