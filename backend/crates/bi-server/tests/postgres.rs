@@ -965,6 +965,7 @@ mod restricted {
         for _ in 0..WARMUP {
             send(&app, "GET", "/api/v1/session", Some(&cookie)).await;
         }
+        let connections = db.pool().size();
         let before = validations();
         let mut hot = Vec::with_capacity(SAMPLES);
         for _ in 0..SAMPLES {
@@ -974,11 +975,20 @@ mod restricted {
             assert_eq!(status, StatusCode::OK);
         }
         let after = validations();
-        assert_eq!(after, before, "hot requests never re-validate");
+        // SQLx returns a released connection to the pool asynchronously, so
+        // a request may still find none idle and open another one; each new
+        // physical connection validates once. A validated connection is never
+        // inspected again, whatever the number of requests.
+        let opened = db.pool().size().saturating_sub(connections);
+        assert_eq!(
+            after - before,
+            u64::from(opened),
+            "hot requests never re-validate a connection"
+        );
         println!(
             "metadata_admission inspections={INSPECTIONS} inspection_p50_ms={:.3} inspection_p95_ms={:.3} \
              warmup={WARMUP} n={SAMPLES} session_p50_ms={:.3} session_p95_ms={:.3} \
-             validations_during_hot_requests={}",
+             validations_during_hot_requests={} connections_opened_during_hot_requests={opened}",
             percentile(&mut inspection, 0.50),
             percentile(&mut inspection, 0.95),
             percentile(&mut hot, 0.50),
