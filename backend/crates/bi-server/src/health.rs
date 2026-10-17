@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::db::MetadataStatus;
+use crate::metadata::{Assessment, MetadataMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -27,7 +29,7 @@ impl From<bool> for HealthStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
-    #[schema(examples("postgres", "migrations"))]
+    #[schema(examples("postgres", "migrations", "metadata_security"))]
     pub name: String,
     pub status: HealthStatus,
 }
@@ -62,23 +64,37 @@ pub async fn live() -> Response {
     path = "/health/ready",
     tag = "health",
     operation_id = "getReadiness",
-    summary = "Readiness: PostgreSQL accesible, migraciones aplicadas y, si está habilitado, el lago analítico listo.",
+    summary = "Readiness: PostgreSQL accesible, esquema de metadatos compatible con esta versión, rol de metadatos seguro (`metadata_security`, solo en el modo restringido por defecto) y, si está habilitado, el lago analítico listo.",
+    description = "En el modo restringido el servidor nunca migra: `migrations` exige que las migraciones las haya aplicado `bi-server migrate` con la credencial administrativa, sin versiones fallidas, desconocidas ni con checksum distinto. Mientras no esté listo, las operaciones de `/api/v1` responden 503 `metadata_not_ready`.",
     responses(
         (status = 200, description = "Listo para servir", body = Health),
         (status = 503, description = "No listo; `checks` indica qué dependencia falla", body = Health)
     )
 )]
 pub async fn ready(State(state): State<AppState>) -> Response {
+    // Probe first: a failed probe stops admission before the state is read.
+    let postgres = state.db.ping().await;
+    let status = state.db.status();
+    let assessment = match &status {
+        MetadataStatus::Assessed(assessment) => Some(assessment),
+        MetadataStatus::Validating | MetadataStatus::Unavailable => None,
+    };
     let mut checks = vec![
         HealthCheck {
             name: "postgres".to_owned(),
-            status: HealthStatus::from(state.db.ping().await),
+            status: HealthStatus::from(postgres),
         },
         HealthCheck {
             name: "migrations".to_owned(),
-            status: HealthStatus::from(state.db.migrations_applied()),
+            status: HealthStatus::from(assessment.is_some_and(|a| a.schema.is_ok())),
         },
     ];
+    if state.db.mode() == MetadataMode::Restricted {
+        checks.push(HealthCheck {
+            name: "metadata_security".to_owned(),
+            status: HealthStatus::from(assessment.is_some_and(Assessment::secure)),
+        });
+    }
     // Queries need the analytical runtime (DuckDB + DuckLake) when enabled.
     if state.analytics.enabled() {
         checks.push(HealthCheck {
