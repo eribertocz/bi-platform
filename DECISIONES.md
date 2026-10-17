@@ -57,6 +57,17 @@
 
 Se actualiza `AGENTS.md` para reflejar esta decisión y se sustituye la prohibición inicial de que Claude active a Codex. La activación no sustituye el registro de la coordinación en GitHub.
 
+## Decisión: entregas pequeñas para trabajo antiguo y futuro (2026-10-17)
+
+**Instrucción del propietario** ([registrada en #128](https://github.com/eribertocz/bi-platform/issues/128#issuecomment-6237486314)), que precisa la regla vigente de `AGENTS.md` y el acuerdo de proceso de #128. Es una decisión de proceso, no de producto:
+
+- Los Issues antiguos y los nuevos se organizan como entregas pequeñas o medianas, con un resultado revisable por PR. Ningún paraguas se toma como una sola implementación.
+- Codex prepara cada entrega antes de asignarla (dependencias, alcance, aceptación medible, negativos, datos y referentes cuando apliquen) y conserva la aprobación de producto al dividir. El comportamiento nuevo necesita la conformidad del propietario, en tandas, antes de `spec-lista`.
+- Claude propone la división en el Issue cuando encuentra otro frente independiente, y Codex la resuelve en GitHub. Un Issue a la vez: una espera de revisión o de CI no adelanta dependencias sin resolver.
+- Cada pregunta al propietario lleva recomendación, motivo y consecuencias en lenguaje sencillo.
+- No fija un tamaño por líneas ni por horas, no crea scripts ni protocolos nuevos, no cambia los roles ni reduce las pruebas.
+- No aprueba capacidades futuras, no permite tocar `main` directamente ni saltarse gates, y no cambia prioridades ni aplazamientos pendientes.
+
 ## Decisión: versiones por gate (2026-10-13)
 
 **Aprobada por el propietario** ([conformidad en #116](https://github.com/eribertocz/bi-platform/issues/116#issuecomment-6159458610)). El plan vigente de versiones está en [ADR 0014](docs/decisiones/0014-versiones-por-gate.md): cortes alpha en G2 y G3, beta del alcance BI inicial desde G4 y objetivo `v1.0.0-rc.1` tras G6, cada uno condicionado a la evidencia que la ADR enumera. La propuesta histórica de publicar `v0.2.0` sin sufijo al cerrar G2 queda sustituida por un corte alpha; `ROADMAP_GLOBAL.md` se conserva intacto con su huella en `INVENTARIO.md`.
