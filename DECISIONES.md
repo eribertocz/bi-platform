@@ -10,7 +10,7 @@
 1. Leyes fundamentales      docs/producto/leyes-bi.md (13 leyes; prioridad 1, 2, 3 y 5)
 2. Anti-patrones            fundamentos-propietario.md, «Documento 2»
 3. Seguridad                ADR 0010 y 0012; AGENTS.md
-4. ADR vigentes             docs/decisiones/ (0001-0013)
+4. ADR vigentes             docs/decisiones/ (0001-0014)
 5. Principios de producto    AGENTS.md («facilidad, velocidad, modernidad...»)
 6. Resto de documentos       docs/arquitectura/, docs/semantica/, docs/referentes/...
 ```
@@ -25,7 +25,7 @@
 |---|---|---|
 | **13 leyes fundamentales** | [`docs/producto/leyes-bi.md`](docs/producto/leyes-bi.md) | Propietario |
 | **Anti-patrones y principios de diseño** | [`docs/producto/propuestas/fundamentos-propietario.md`](docs/producto/propuestas/fundamentos-propietario.md), «Documento 2» | Propietario (adoptado como objetivo, decisión 9 abajo) |
-| **13 ADR técnicas** (0001–0013) | [`docs/decisiones/README.md`](docs/decisiones/README.md) | Propietario (producto) o rutinaria (técnica) |
+| **14 ADR** (0001–0014) | [`docs/decisiones/README.md`](docs/decisiones/README.md) | Propietario (producto) o rutinaria (técnica) |
 | **10 decisiones de producto aprobadas el 2026-10-12** (ELT, Estudio, bibliotecas, fundamentos, orden de prioridad...) | [`docs/producto/propuestas/version-comun.md`](docs/producto/propuestas/version-comun.md), apartado 5 | Propietario |
 | **Blueprint del propietario** (visión original) | [`docs/producto/BLUEPRINT_2026-10-11.md`](docs/producto/BLUEPRINT_2026-10-11.md) | — (ADR manda donde contradiga) |
 | **Base histórica de arquitectura** (no se modifica) | [`docs/arquitectura/`](docs/arquitectura/INDICE_17_MODULOS.md), huellas en `INVENTARIO.md` | — (ADR la sustituye donde aplica) |
@@ -56,6 +56,14 @@
 - **Identidad:** la regla de usar la identidad del agente, nunca la del propietario, aplica a los commits creados en los clones. El commit de fusión squash lo crea GitHub con la cuenta compartida y Claude como coautor. Este es el flujo ordinario de fusión; la aprobación de Codex y el CI verde siguen siendo requisitos. La autorización puntual aplicada al PR #119 queda concretada por esta regla general para las fusiones siguientes.
 
 Se actualiza `AGENTS.md` para reflejar esta decisión y se sustituye la prohibición inicial de que Claude active a Codex. La activación no sustituye el registro de la coordinación en GitHub.
+
+## Decisión: versiones por gate (2026-10-13)
+
+**Aprobada por el propietario** ([conformidad en #116](https://github.com/eribertocz/bi-platform/issues/116#issuecomment-6159458610)). El plan vigente de versiones está en [ADR 0014](docs/decisiones/0014-versiones-por-gate.md): cortes alpha en G2 y G3, beta del alcance BI inicial desde G4 y objetivo `v1.0.0-rc.1` tras G6, cada uno condicionado a la evidencia que la ADR enumera. La propuesta histórica de publicar `v0.2.0` sin sufijo al cerrar G2 queda sustituida por un corte alpha; `ROADMAP_GLOBAL.md` se conserva intacto con su huella en `INVENTARIO.md`.
+
+- Un número de versión no cierra un gate ni permite iniciar el siguiente; si falta evidencia de release, el corte sigue en alpha o beta.
+- No autoriza tags ni releases: el propietario aprueba publicar cada candidato concreto y Claude ejecuta tag y release por instrucción registrada de Codex.
+- No cambia capacidades, orden de gates ni criterios de aceptación.
 
 ## Decisión: documentación limpia antes del corte (2026-10-13)
 
