@@ -1,26 +1,24 @@
-//! The governed preparation (#135) composed with the real execution path:
-//! a `Prepared` from a real Ossie project lowers onto DuckDB and runs, exact
-//! against an independent oracle, with row policies bound only from the
-//! verified session. No HTTP route executes yet; this is the composition the
-//! later execution route will use.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+//! The preparation composed with the real execution path: a `Prepared`
+//! from a real Ossie project lowers onto DuckDB and runs, exact against an
+//! independent oracle, with row policies bound only from the verified
+//! session. No HTTP route executes yet; this is the composition the later
+//! execution route will use.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bi_runtime::duckdb::arrow::array::{Array, Decimal128Array, Int64Array, StringArray};
-use bi_server::AppState;
-use bi_server::analytics::Analytics;
-use bi_server::db::Database;
-use bi_server::metadata::MetadataMode;
-use bi_server::models::Models;
-use bi_server::semantic::prepare::{self, LifecycleNotice, Prepared, Session};
-use bi_server::semantic::request::ExplainRequest;
-use bi_server::semantic_execution::{Event, SemanticExecutor};
+use bi_runtime::duckdb::arrow::datatypes::DataType;
 use sef_adapter_duckdb::execution::{ExecutionLimits, PhysicalRelation, SourceCatalog};
 use serde_json::{Value, json};
+
+use super::super::*;
+use crate::analytics::Analytics;
+use crate::db::Database;
+use crate::metadata::MetadataMode;
+use crate::models::Models;
+use crate::semantic_execution::{Event, SemanticExecutor};
 
 /// The rows of the Issue: id, region, city, amount, instant, note.
 const ROWS: &str = "(1, 'Norte', 'La Paz', 100.10, '2026-01-01T00:00:00Z', NULL),
@@ -39,10 +37,11 @@ fn field(name: &str, extra: &str) -> String {
     )
 }
 
-/// The project model; `extensions` adds model-level declarations.
+/// `nota` is restricted: a dimension the viewer may not see.
 fn model(extensions: &str, metrics: &str) -> String {
+    let restricted = "        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n";
     format!(
-        "version: '0.2.0.dev0'\nname: Ventas\n{extensions}datasets:\n  - name: ventas\n    source: lake.main.ventas\n    primary_key: [id]\n    fields:\n{}{}{}{}{}{}metrics:\n  - name: importe_total\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n  - name: filas\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: COUNT(ventas.id)\n{metrics}",
+        "version: '0.2.0.dev0'\nname: Ventas\n{extensions}datasets:\n  - name: ventas\n    source: lake.main.ventas\n    primary_key: [id]\n    fields:\n{}{}{}{}{}{}metrics:\n  - name: importe_total\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n  - name: filas\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: COUNT(ventas.id)\n  - name: margen\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{{\"version\": 1, \"sensitivity\": \"confidential\"}}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n{metrics}",
         field("id", ""),
         field("region", "        dimension: {}\n"),
         field("ciudad", "        dimension: {}\n"),
@@ -51,7 +50,7 @@ fn model(extensions: &str, metrics: &str) -> String {
             "instante",
             "        datatype: DateTimeTz\n        dimension: {}\n"
         ),
-        field("nota", "        dimension: {}\n"),
+        field("nota", &format!("        dimension: {{}}\n{restricted}")),
     )
 }
 
@@ -100,16 +99,20 @@ fn state(project: &Path, analytics: Analytics) -> AppState {
     }
 }
 
-fn request(selections: &Value) -> ExplainRequest {
-    serde_json::from_value(json!({
-        "model": "metrics/ventas.yaml",
-        "query": { "selections": selections }
-    }))
-    .unwrap()
+fn request(query: &Value) -> ExplainRequest {
+    serde_json::from_value(json!({ "model": "metrics/ventas.yaml", "query": query })).unwrap()
+}
+
+fn selections(selections: &Value) -> ExplainRequest {
+    request(&json!({ "selections": selections }))
 }
 
 fn metric(id: &str, name: &str) -> Value {
     json!({ "kind": "metric", "id": id, "name": name })
+}
+
+fn dimension(id: &str, name: &str) -> Value {
+    json!({ "kind": "dimension", "id": id, "name": name })
 }
 
 fn session(user: &str, attributes: &[(&str, Value)]) -> Session {
@@ -119,21 +122,30 @@ fn session(user: &str, attributes: &[(&str, Value)]) -> Session {
         attributes
             .iter()
             .map(|(k, v)| ((*k).to_owned(), v.clone()))
-            .collect::<BTreeMap<_, _>>(),
+            .collect(),
     )
 }
 
 async fn ready(state: &AppState, session: Session, request: &ExplainRequest) -> Prepared {
-    match prepare::prepare(state, session, request).await {
-        Ok(prepared) => prepared,
-        Err(_) => panic!("the query must be prepared"),
-    }
+    let Ok(prepared) = prepare(state, session, request).await else {
+        panic!("the query must be prepared");
+    };
+    prepared
+}
+
+/// The refusal of `request`, which must not prepare.
+async fn refusal(state: &AppState, session: Session, request: &ExplainRequest) -> Outcome {
+    let Err(Refusal(outcome)) = prepare(state, session, request).await else {
+        panic!("the query must be refused");
+    };
+    *outcome
 }
 
 /// Lowers the preparation onto the sources it captured and runs it: rows of
 /// `(region or "", importe_total in hundredths, filas)`.
 async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i64)> {
-    let catalog: SourceCatalog = prepared
+    let execution = prepared.execution().expect("nothing masked");
+    let catalog: SourceCatalog = execution
         .sources()
         .relations
         .iter()
@@ -152,10 +164,10 @@ async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i
         })
         .collect();
     let plan = sef_adapter_duckdb::execution::lower(
-        prepared.model(),
-        prepared.validated(),
-        prepared.plan(),
-        prepared.certificate(),
+        execution.model(),
+        execution.validated(),
+        execution.plan(),
+        execution.certificate(),
         &catalog,
     )
     .unwrap();
@@ -163,7 +175,7 @@ async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i
     let mut stream = executor
         .start(
             Arc::new(plan),
-            prepared.context().clone(),
+            execution.context().clone(),
             "semantic-prepare-test",
             ExecutionLimits {
                 max_rows: 100,
@@ -198,9 +210,7 @@ async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i
                         .schema()
                         .fields()
                         .iter()
-                        .position(|f| {
-                            f.data_type() == &bi_runtime::duckdb::arrow::datatypes::DataType::Utf8
-                        })
+                        .position(|f| f.data_type() == &DataType::Utf8)
                         .map(|i| batch.column(i).clone());
                     for i in 0..batch.num_rows() {
                         let region = regions.as_ref().map_or_else(String::new, |r| {
@@ -229,14 +239,14 @@ async fn a_prepared_query_runs_exactly_on_the_sources_it_captured() {
     let p = project(&model("", ""), "version: 1\nusers:\n  ana: [viewer]\n");
     let analytics = analytics().await;
     let state = state(p.path(), analytics.clone());
-    let totals = request(&json!([metric("t", "importe_total"), metric("f", "filas")]));
+    let totals = selections(&json!([metric("t", "importe_total"), metric("f", "filas")]));
     let prepared = ready(&state, session("ana", &[]), &totals).await;
     assert_eq!(
         run(&analytics, &prepared).await,
         vec![(String::new(), TOTAL.0, TOTAL.1)]
     );
-    let by_region = request(&json!([
-        { "kind": "dimension", "id": "r", "name": "ventas.region" },
+    let by_region = selections(&json!([
+        dimension("r", "ventas.region"),
         metric("t", "importe_total"),
         metric("f", "filas")
     ]));
@@ -254,11 +264,11 @@ async fn a_prepared_query_runs_exactly_on_the_sources_it_captured() {
 async fn row_policies_bind_only_the_verified_session() {
     let p = project(
         &model(ROW_POLICY, ""),
-        "version: 1\nusers:\n  a: [viewer]\n  b: [viewer]\n",
+        "version: 1\nusers:\n  a: [viewer]\n  b: [viewer]\n  jefa: [admin]\n",
     );
     let analytics = analytics().await;
     let state = state(p.path(), analytics.clone());
-    let totals = request(&json!([metric("t", "importe_total"), metric("f", "filas")]));
+    let totals = selections(&json!([metric("t", "importe_total"), metric("f", "filas")]));
     // The same definition and snapshot, two verified attributes.
     let a = ready(&state, session("a", &[("region", json!("Norte"))]), &totals).await;
     let b = ready(&state, session("b", &[("region", json!("Sur"))]), &totals).await;
@@ -272,46 +282,87 @@ async fn row_policies_bind_only_the_verified_session() {
         run(&analytics, &b).await,
         vec![(String::new(), SUR.0, SUR.1)]
     );
-    // An absent or mistyped attribute never prepares the query.
-    for attributes in [
-        vec![],
-        vec![("region", json!(7))],
-        vec![("region", json!(null))],
+    // An absent or mistyped attribute never prepares, an administrator's
+    // neither: the policy is mandatory for everyone.
+    for (user, attributes) in [
+        ("a", vec![]),
+        ("a", vec![("region", json!(7))]),
+        ("a", vec![("region", json!(null))]),
+        ("jefa", vec![]),
     ] {
-        let refused = prepare::prepare(&state, session("a", &attributes), &totals).await;
-        assert!(refused.is_err(), "{attributes:?}");
+        let refused = refusal(&state, session(user, &attributes), &totals).await;
+        let Outcome::Invalid { code, .. } = refused else {
+            panic!("{user} {attributes:?}: a missing context is a correctness refusal");
+        };
+        assert_eq!(code, "query_incorrect", "{user} {attributes:?}");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn refused_requests_are_never_prepared() {
+async fn refused_requests_are_never_prepared_and_say_why() {
     let restricted = "  - name: reserva_centinela\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n  - name: derivada\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: reserva_centinela\n";
     let members =
         "version: 1\nusers:\n  lector: [viewer]\n  jefa: [admin]\n  inspector: [catalog_reader]\n";
     let p = project(&model("", restricted), members);
-    let catalog_only = "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource == Model::\"project:catalog\");";
-    let analytics = analytics().await;
-    let state = state(p.path(), analytics);
-    let refused = |user: &'static str, selections: Value| {
-        let state = &state;
-        async move {
-            prepare::prepare(state, session(user, &[]), &request(&selections))
-                .await
-                .is_err()
-        }
+    let state = state(p.path(), analytics().await);
+    let lector = || session("lector", &[]);
+    let total = selections(&json!([metric("t", "importe_total")]));
+    // Without membership: denied and not acknowledged, the denial recorded.
+    let Outcome::Undisclosed { audit: Some(audit) } =
+        refusal(&state, session("nadie", &[]), &total).await
+    else {
+        panic!("no membership");
     };
-    // Without membership, a restricted metric, one derived from it.
-    assert!(refused("nadie", json!([metric("t", "importe_total")])).await);
-    assert!(refused("lector", json!([metric("r", "reserva_centinela")])).await);
-    assert!(refused("lector", json!([metric("d", "derivada")])).await);
-    assert!(!refused("lector", json!([metric("t", "importe_total")])).await);
-    // Inspecting the catalog grants no data.
+    assert!(!audit.allowed);
+    // A restricted metric, and one derived from it.
+    let hidden = selections(&json!([metric("r", "reserva_centinela")]));
+    assert!(matches!(
+        refusal(&state, lector(), &hidden).await,
+        Outcome::Undisclosed { audit: Some(_) }
+    ));
+    let derived = selections(&json!([metric("d", "derivada")]));
+    let Outcome::Denied { denial, .. } = refusal(&state, lector(), &derived).await else {
+        panic!("derived from a restricted metric");
+    };
+    assert!(
+        denial
+            .1
+            .is_some_and(|d| d.usage == "lineage" && d.name.is_none())
+    );
+    // Column-level denial of a restricted dimension, grouped or filtered.
+    let grouped = selections(&json!([
+        dimension("n", "ventas.nota"),
+        metric("t", "importe_total")
+    ]));
+    let mut filtered = selections(&json!([metric("t", "importe_total")]));
+    filtered.query = serde_json::from_value(json!({
+        "selections": [metric("t", "importe_total")],
+        "filter": { "op": "is_null", "target": { "kind": "dimension", "name": "ventas.nota" } }
+    }))
+    .unwrap();
+    for request in [&grouped, &filtered] {
+        assert!(matches!(
+            refusal(&state, lector(), request).await,
+            Outcome::Undisclosed { audit: Some(_) }
+        ));
+    }
+    // A masked metric is prepared and explained, but never run unmasked.
+    let masked = selections(&json!([metric("m", "margen")]));
+    let prepared = ready(&state, lector(), &masked).await;
+    assert!(matches!(prepared.execution(), Err(Masked)));
+    assert!(ready(&state, lector(), &total).await.execution().is_ok());
+    // Inspecting the catalog grants no data: refused, with its reason.
+    let inspection = "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource == Model::\"project:catalog\");";
     std::fs::write(
         p.path().join("policies/project.cedar"),
-        format!("{}\n{catalog_only}", sef_authz::BASE_POLICIES),
+        format!("{}\n{inspection}", sef_authz::BASE_POLICIES),
     )
     .unwrap();
-    assert!(refused("inspector", json!([metric("t", "importe_total")])).await);
+    let Outcome::Denied { denial, .. } = refusal(&state, session("inspector", &[]), &total).await
+    else {
+        panic!("an inspector without data");
+    };
+    assert_eq!(denial.0, "no_permit");
     // An explicit forbid binds the administrator too.
     std::fs::write(
         p.path().join("policies/project.cedar"),
@@ -321,10 +372,20 @@ async fn refused_requests_are_never_prepared() {
         ),
     )
     .unwrap();
-    assert!(refused("jefa", json!([metric("t", "importe_total")])).await);
+    let Outcome::Denied { denial, .. } = refusal(&state, session("jefa", &[]), &total).await else {
+        panic!("a forbid on the administrator");
+    };
+    assert_eq!(denial.0, "forbidden");
     // Corrupt policies close everything.
     std::fs::write(p.path().join("policies/project.cedar"), "permit (principal").unwrap();
-    assert!(refused("jefa", json!([metric("t", "importe_total")])).await);
+    let Outcome::Failed(status, code, _) = refusal(&state, session("jefa", &[]), &total).await
+    else {
+        panic!("corrupt policies");
+    };
+    assert_eq!(
+        (status, code),
+        (StatusCode::SERVICE_UNAVAILABLE, "policies_invalid")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -335,7 +396,8 @@ async fn a_deprecated_metric_names_only_a_visible_replacement() {
         )
     };
     let analytics = analytics().await;
-    let query = request(&json!([metric("v", "vieja")]));
+    // Selected twice: one notice.
+    let query = selections(&json!([metric("v", "vieja"), metric("w", "vieja")]));
     for (replacement, shown) in [("importe_total", true), ("oculta", false)] {
         let p = project(
             &model("", &deprecated(replacement)),

@@ -216,5 +216,85 @@
       "detail": "No se puede explicar la consulta solicitada.",
       "code": "model_not_found"
     }
+  },
+  {
+    "case": "over the bounds",
+    "user": "lector",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "Una consulta tiene entre 1 y 64 selecciones.",
+      "code": "invalid_request",
+      "diagnostics": []
+    }
+  },
+  {
+    "case": "invalid model, inspector",
+    "user": "modelador",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "El modelo tiene errores. Quien lo mantiene los ve en la pantalla Modelos.",
+      "code": "model_invalid",
+      "diagnostics": [
+        {
+          "code": "syntax",
+          "phase": "model",
+          "message": "El modelo tiene un error en su definición."
+        }
+      ]
+    }
+  },
+  {
+    "case": "incorrect query",
+    "user": "lector",
+    "status": 422,
+    "answer": {
+      "type": "about:blank",
+      "title": "Unprocessable Entity",
+      "status": 422,
+      "detail": "La consulta no tiene un resultado correcto con este modelo.",
+      "code": "query_incorrect",
+      "diagnostics": [
+        {
+          "code": "ILLEGAL_REAGGREGATION",
+          "phase": "correctness",
+          "message": "La consulta no tiene un resultado correcto con este modelo."
+        }
+      ]
+    }
+  },
+  {
+    "case": "plan reads a restricted dataset",
+    "user": "lector",
+    "status": 403,
+    "answer": {
+      "type": "about:blank",
+      "title": "Forbidden",
+      "status": 403,
+      "detail": "La consulta lee datos que tus roles en este proyecto no permiten usar.",
+      "code": "semantic_access_denied",
+      "denied": {
+        "kind": "dataset",
+        "usage": "lineage"
+      },
+      "reason": "no_permit"
+    }
+  },
+  {
+    "case": "invalid policies",
+    "user": "lector",
+    "status": 503,
+    "answer": {
+      "type": "about:blank",
+      "title": "Service Unavailable",
+      "status": 503,
+      "detail": "Las políticas o los miembros del proyecto no son válidos: nadie puede consultar hasta corregirlos.",
+      "code": "policies_invalid"
+    }
   }
 ]

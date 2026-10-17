@@ -354,7 +354,9 @@ async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -
 /// plan and the receipt, all read from what was prepared.
 fn explained(prepared: &prepare::Prepared) -> Outcome {
     let decision = prepared.decision();
-    let block = &prepared.query().blocks[0];
+    let Some(block) = prepared.query().blocks.first() else {
+        return Outcome::Refused("La consulta no tiene bloques.".to_owned());
+    };
     let receipt = receipt(
         prepared.query_fingerprint().to_owned(),
         prepared.model().content_hash().to_string(),

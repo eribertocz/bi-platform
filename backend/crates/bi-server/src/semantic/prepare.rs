@@ -50,9 +50,10 @@ impl Session {
     }
 
     /// A session whose identity, groups and attributes were already
-    /// verified by its caller (the HTTP edge, or a test standing for it).
+    /// verified by its caller: the HTTP edge, or a test standing for it.
+    /// Never public, so no route can build one from request data.
     #[must_use]
-    pub const fn verified(
+    pub(crate) const fn verified(
         user: String,
         groups: Vec<String>,
         attributes: BTreeMap<String, serde_json::Value>,
@@ -125,12 +126,6 @@ impl Prepared {
         &self.compiled.document.semantic
     }
 
-    /// The engine's description of the sources, captured with the model.
-    #[must_use]
-    pub const fn sources(&self) -> &sef_ossie::catalog::Catalog {
-        &self.compiled.catalog
-    }
-
     #[must_use]
     pub const fn query(&self) -> &SemanticQuerySet {
         &self.bound
@@ -150,11 +145,6 @@ impl Prepared {
     #[must_use]
     pub const fn plan(&self) -> &SemanticPlan {
         &self.plan
-    }
-
-    #[must_use]
-    pub const fn certificate(&self) -> &Certificate {
-        &self.certificate
     }
 
     /// The final decision: everything the plan reads, authorized.
@@ -192,15 +182,78 @@ impl Prepared {
     pub(super) const fn audit(&self) -> &Audit {
         &self.audit
     }
+
+    /// What an execution lowers and runs, only when the decision asks for
+    /// nothing the execution path cannot honour yet: a masked use would
+    /// otherwise return raw values. Masks are applied by the result codec
+    /// (#136); until then a masked preparation is explained, never run.
+    ///
+    /// # Errors
+    /// [`Masked`] when the final decision masks any object.
+    pub fn execution(&self) -> Result<Execution<'_>, Masked> {
+        if !self.decision.constraints.is_empty() {
+            return Err(Masked);
+        }
+        Ok(Execution { prepared: self })
+    }
 }
 
-/// What one request reads from the project, on a single access snapshot.
+/// A preparation whose decision masks values, which the execution path
+/// does not apply yet.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Masked;
+
+/// Everything one execution of a [`Prepared`] lowers and runs, all from the
+/// preparation's single read.
+pub struct Execution<'a> {
+    prepared: &'a Prepared,
+}
+
+impl Execution<'_> {
+    #[must_use]
+    pub const fn model(&self) -> &CompiledSemanticModel {
+        &self.prepared.compiled.document.semantic
+    }
+
+    #[must_use]
+    pub const fn validated(&self) -> &ValidatedQuery {
+        &self.prepared.validated
+    }
+
+    #[must_use]
+    pub const fn plan(&self) -> &SemanticPlan {
+        &self.prepared.plan
+    }
+
+    #[must_use]
+    pub const fn certificate(&self) -> &Certificate {
+        &self.prepared.certificate
+    }
+
+    /// The engine's description of the sources, captured with the model.
+    #[must_use]
+    pub const fn sources(&self) -> &sef_ossie::catalog::Catalog {
+        &self.prepared.compiled.catalog
+    }
+
+    /// The verified context the row policies bind.
+    #[must_use]
+    pub const fn context(&self) -> &SemanticContext {
+        &self.prepared.context
+    }
+}
+
+/// What one request reads from the project, on a single access snapshot,
+/// with the request as phase one accepted it.
 pub(super) struct Loaded {
     project: Result<Vec<ProjectFile>, ModelDiagnostic>,
     access: Access,
     disclosure: Disclosure,
     session: Session,
     permit: OwnedSemaphorePermit,
+    file: String,
+    unbound: UnboundQuerySet,
+    shape: (u32, u32, u32, u32),
 }
 
 /// Prepares `request` for `session`: the project read once, then decided,
@@ -215,7 +268,7 @@ pub async fn prepare(
     request: &ExplainRequest,
 ) -> Result<Prepared, Refusal> {
     let loaded = load_request(state, session, request).await?;
-    prepare_loaded(state, loaded, request).await
+    prepare_loaded(state, loaded).await
 }
 
 /// The first phase: bounds, admission and one read of the project.
@@ -225,7 +278,7 @@ pub(super) async fn load_request(
     request: &ExplainRequest,
 ) -> Result<Loaded, Refusal> {
     // Bounds first: nothing is read for a request over them.
-    request
+    let unbound = request
         .query
         .unbound()
         .map_err(|m| Refusal(Box::new(Outcome::Refused(m))))?;
@@ -236,13 +289,13 @@ pub(super) async fn load_request(
             "No hay un proyecto configurado.",
         ))));
     };
-    if !request.model.starts_with("metrics/") {
+    let Some(file) = request.model.strip_prefix("metrics/").map(str::to_owned) else {
         return Err(Refusal(Box::new(Outcome::Failed(
             StatusCode::NOT_FOUND,
             "model_not_found",
             "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
         ))));
-    }
+    };
     let Ok(permit) = state.models.admission.clone().try_acquire_owned() else {
         return Err(Refusal(Box::new(Outcome::Failed(
             StatusCode::TOO_MANY_REQUESTS,
@@ -250,7 +303,8 @@ pub(super) async fn load_request(
             "Ya hay dos compilaciones en curso. Reintenta en unos segundos.",
         ))));
     };
-    load(directory, session, permit)
+    let shape = shape(request);
+    load(directory, session, permit, (file, unbound, shape))
         .await
         .map_err(|(status, code, message)| {
             Refusal(Box::new(Outcome::Failed(status, code, message)))
@@ -265,6 +319,7 @@ async fn load(
     directory: PathBuf,
     session: Session,
     permit: OwnedSemaphorePermit,
+    (file, unbound, shape): (String, UnboundQuerySet, (u32, u32, u32, u32)),
 ) -> Result<Loaded, (StatusCode, &'static str, &'static str)> {
     let span = tracing::Span::current();
     let read = tokio::task::spawn_blocking(move || {
@@ -310,22 +365,25 @@ async fn load(
         disclosure: Disclosure { inspection },
         session,
         permit,
+        file,
+        unbound,
+        shape,
     })
 }
 
-/// The second phase, on what [`load_request`] read and nothing else: the
-/// file is compiled, the query bound, decided, validated and planned.
-pub(super) async fn prepare_loaded(
-    state: &AppState,
-    loaded: Loaded,
-    request: &ExplainRequest,
-) -> Result<Prepared, Refusal> {
+/// The second phase, on what [`load_request`] captured: the request, the
+/// project files and the access snapshot. Only the engine is consulted
+/// again, to describe the sources the model reads while it compiles.
+pub(super) async fn prepare_loaded(state: &AppState, loaded: Loaded) -> Result<Prepared, Refusal> {
     let Loaded {
         project,
         access,
         disclosure,
         session,
         permit,
+        file: name,
+        unbound,
+        shape,
     } = loaded;
     // An engine that is down answers before the file is looked up, the same
     // whether it exists or not.
@@ -336,7 +394,6 @@ pub(super) async fn prepare_loaded(
             "El motor analítico no está listo. Reintenta en unos segundos.",
         ))));
     };
-    let name = request.model.strip_prefix("metrics/").unwrap_or_default();
     let Some(file) = project
         .ok()
         .and_then(|files| files.into_iter().find(|f| f.name == name))
@@ -350,11 +407,6 @@ pub(super) async fn prepare_loaded(
             "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
         )))));
     };
-    let unbound = request
-        .query
-        .unbound()
-        .map_err(|m| Refusal(Box::new(Outcome::Refused(m))))?;
-    let shape = shape(request);
     let span = tracing::Span::current();
     let work = runtime.run(move |conn| {
         let _permit = permit;
@@ -586,7 +638,7 @@ fn decide(
     })
 }
 
-/// The deprecated metrics the query selects, in selection order, with a
+/// The deprecated metrics the query selects, each once, with a
 /// replacement only when `visible` admits it.
 fn notices(
     model: &CompiledSemanticModel,
@@ -602,6 +654,8 @@ fn notices(
             SelectionItem::Metric(id) => Some(id),
             _ => None,
         })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .filter_map(|id| {
             let metric = definition.metrics.iter().find(|m| m.metadata.id() == id)?;
             match &metric.metadata.governance.lifecycle {

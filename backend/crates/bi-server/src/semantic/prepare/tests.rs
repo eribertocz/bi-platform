@@ -102,7 +102,7 @@ async fn a_change_between_the_phases_never_mixes_versions() {
     };
     std::fs::write(
         p.path().join("metrics/ventas.yaml"),
-        MODEL.replace("name: Ventas", "name: Otra"),
+        MODEL.replace("SUM(ventas.importe)", "COUNT(ventas.id)"),
     )
     .unwrap();
     std::fs::write(
@@ -114,7 +114,7 @@ async fn a_change_between_the_phases_never_mixes_versions() {
     )
     .unwrap();
     std::fs::write(p.path().join("policies/members.yaml"), "version: 1\n").unwrap();
-    let Ok(during) = prepare_loaded(&state, loaded, &request()).await else {
+    let Ok(during) = prepare_loaded(&state, loaded).await else {
         panic!("the request in progress keeps its read");
     };
     assert_eq!(during.model().content_hash(), before.model().content_hash());
@@ -122,8 +122,25 @@ async fn a_change_between_the_phases_never_mixes_versions() {
     assert_eq!(during.roles(), before.roles());
     assert_eq!(during.decision().fingerprint, before.decision().fingerprint);
     assert_eq!(during.plan_fingerprint(), before.plan_fingerprint());
-    // The next request sees the change: no membership, a forbid.
-    assert!(prepare(&state, lector(), &request()).await.is_err());
+    // The next request sees the change: no membership left.
+    let Err(Refusal(next)) = prepare(&state, lector(), &request()).await else {
+        panic!("the next request sees the change");
+    };
+    assert!(matches!(*next, Outcome::Undisclosed { audit: Some(_) }));
+    // With access restored, it prepares the changed model.
+    std::fs::remove_file(p.path().join("policies/project.cedar")).unwrap();
+    std::fs::write(
+        p.path().join("policies/members.yaml"),
+        "version: 1
+users:
+  lector: [viewer]
+",
+    )
+    .unwrap();
+    let Ok(after) = prepare(&state, lector(), &request()).await else {
+        panic!("prepared after the change");
+    };
+    assert_ne!(after.model().content_hash(), before.model().content_hash());
 }
 
 #[tokio::test]
@@ -153,6 +170,25 @@ users:
     )
     .unwrap();
     let state = state(p.path(), analytics().await);
+    // Control: the same metric over an open dataset prepares, so what
+    // refuses below is the dataset the plan reads, not the request.
+    let open = tempfile::tempdir().unwrap();
+    std::fs::create_dir(open.path().join("metrics")).unwrap();
+    std::fs::create_dir(open.path().join("policies")).unwrap();
+    std::fs::write(open.path().join("metrics/ventas.yaml"), MODEL).unwrap();
+    std::fs::write(
+        open.path().join("policies/members.yaml"),
+        "version: 1
+users:
+  lector: [viewer]
+",
+    )
+    .unwrap();
+    let control = AppState {
+        models: Models::new(Some(open.path().to_owned())),
+        ..state.clone()
+    };
+    assert!(prepare(&control, lector(), &request()).await.is_ok());
     // Refused by the final decision, recorded as a denial, never prepared.
     let Err(Refusal(outcome)) = prepare(&state, lector(), &request()).await else {
         panic!("what the plan reads must be authorized too");
@@ -164,3 +200,5 @@ users:
     // An implicit read is never named.
     assert!(denial.1.is_some_and(|denied| denied.name.is_none()));
 }
+
+mod composition;
