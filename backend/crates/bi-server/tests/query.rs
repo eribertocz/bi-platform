@@ -676,3 +676,92 @@ async fn a_held_audit_head_ends_the_refusal_within_its_deadline(pool: PgPool) {
     assert_denial_event(&events[0]);
     stack.db.close().await;
 }
+
+/// Rows of the lake's `sales` table, read through `analytics`' own runtime.
+async fn sales_rows(analytics: &Analytics) -> i64 {
+    analytics
+        .runtime()
+        .unwrap()
+        .run(|conn| conn.query_row("SELECT count(*) FROM lake.main.sales", [], |row| row.get(0)))
+        .await
+        .unwrap()
+}
+
+/// A lake whose `sales` table the server never wrote (no fixture marker):
+/// the bootstrap keeps its rows, and the route stays closed (#118 review).
+#[sqlx::test(migrations = false)]
+async fn an_unknown_lake_table_is_preserved_and_the_route_closed(pool: PgPool) {
+    let data = tempfile::tempdir().unwrap();
+    let config = lake(data.path(), &schema());
+    let writer = config.clone();
+    let runtime = tokio::task::spawn_blocking(move || {
+        bi_runtime::Bootstrap::open(writer)
+            .unwrap()
+            .finish()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    runtime
+        .run(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE lake.main.sales (order_id BIGINT, ordered_at TIMESTAMPTZ,
+                     region VARCHAR, quantity BIGINT, amount DECIMAL(18,2));
+                 INSERT INTO lake.main.sales VALUES
+                     (9000001, '2026-01-01T00:00:00Z', 'private-region', 1, 123.45);",
+            )
+        })
+        .await
+        .unwrap();
+    drop(runtime);
+
+    let analytics = bootstrapped(config).await;
+    assert_eq!(
+        sales_rows(&analytics).await,
+        1,
+        "someone else's rows survive"
+    );
+    let stack = stack(&pool, analytics, ORIGIN, Duration::from_secs(10)).await;
+    let answer = stack.query(QUERY).await;
+    assert_closed(&answer);
+    assert!(!answer.text.contains("private-region"), "{}", answer.text);
+    assert_eq!(
+        stack.counted(
+            "bi_legacy_query_denied",
+            &[("reason", "unverified_runtime")]
+        ),
+        1
+    );
+    stack.assert_no_analytical_work();
+    stack.db.close().await;
+}
+
+/// A lake marked with another fixture whose rows are no longer that
+/// fixture: not replaced by the configured one, and not vouched for.
+#[sqlx::test(migrations = false)]
+async fn a_lake_marked_with_another_fixture_over_other_rows_is_preserved_and_closed(pool: PgPool) {
+    let data = tempfile::tempdir().unwrap();
+    let schema = schema();
+    let marked = Analytics::start(
+        lake(data.path(), &schema),
+        Some(FixtureSpec { seed: 7, rows: 500 }),
+    );
+    assert!(
+        tokio::time::timeout(READY, marked.wait_until_ready())
+            .await
+            .unwrap()
+    );
+    swap_two_amounts(&marked.runtime().unwrap()).await;
+    drop(marked);
+
+    let analytics = bootstrapped(lake(data.path(), &schema)).await;
+    assert_eq!(
+        sales_rows(&analytics).await,
+        500,
+        "not replaced by the configured fixture"
+    );
+    let stack = stack(&pool, analytics, ORIGIN, Duration::from_secs(10)).await;
+    assert_closed(&stack.query(QUERY).await);
+    stack.assert_no_analytical_work();
+    stack.db.close().await;
+}

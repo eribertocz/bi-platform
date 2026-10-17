@@ -60,9 +60,9 @@ fn run(spec: FixtureSpec) -> Result<(), Box<dyn std::error::Error>> {
     let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok())?;
     let bootstrap = Bootstrap::open(config)?;
     let outcome = fixtures::load_sales(&bootstrap, spec)?;
-    if outcome == LoadOutcome::Altered {
+    if outcome == LoadOutcome::Unverified {
         return Err(
-            "the lake marks this fixture as loaded but its rows differ; left untouched".into(),
+            "the lake table is not this fixture (rows changed, or written by something else); left untouched".into(),
         );
     }
     let runtime = bootstrap.finish()?;

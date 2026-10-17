@@ -143,9 +143,12 @@ desarrollo sintético local, cuando se cumple todo lo siguiente:
 - sesión del login de desarrollo;
 - el propio servidor cargó al arrancar el fixture sintético de ventas (`BI_DEV_FIXTURE_ROWS`).
 
-Al reutilizar un lago, el servidor compara la tabla con el fixture generado fila por fila
-antes de darla por buena. Si difiere, registra `fixture_altered` y no la toca. Para
-recuperar la demo, usa un lago nuevo (otros `BI_LAKE_METADATA_SCHEMA` y
+El servidor solo escribe la tabla `sales` de un lago que no la tiene, o que tiene
+exactamente el fixture que nombra su marca: al reutilizar un lago, o al cambiar
+`BI_DEV_FIXTURE_ROWS`, la compara fila por fila con el fixture generado antes de darla por
+buena o reemplazarla. Una tabla con otras filas, o sin la marca del fixture, nunca se
+modifica: el servidor registra `fixture_unverified` y la consulta de demostración queda
+cerrada. Para recuperar la demo, usa un lago nuevo (otros `BI_LAKE_METADATA_SCHEMA` y
 `BI_LAKE_DATA_PATH`) o, en la pila Compose, recrea sus volúmenes.
 
 En cualquier otro caso responde 403 `legacy_query_disabled` sin leer el cuerpo, también con

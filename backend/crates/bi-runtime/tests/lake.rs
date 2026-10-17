@@ -193,7 +193,10 @@ async fn a_matching_marker_over_other_rows_is_not_vouched_for() {
     drop(runtime);
 
     let bootstrap = Bootstrap::open(config).unwrap();
-    assert_eq!(load_sales(&bootstrap, spec).unwrap(), LoadOutcome::Altered);
+    assert_eq!(
+        load_sales(&bootstrap, spec).unwrap(),
+        LoadOutcome::Unverified
+    );
     let runtime = bootstrap.finish().unwrap();
     assert_eq!(amounts(&runtime, pair).await, altered, "left untouched");
 }
@@ -217,7 +220,10 @@ async fn a_matching_marker_without_its_table_is_not_vouched_for() {
     drop(runtime);
 
     let bootstrap = Bootstrap::open(config).unwrap();
-    assert_eq!(load_sales(&bootstrap, spec).unwrap(), LoadOutcome::Altered);
+    assert_eq!(
+        load_sales(&bootstrap, spec).unwrap(),
+        LoadOutcome::Unverified
+    );
     let runtime = bootstrap.finish().unwrap();
     let tables: i64 = runtime
         .run(|conn| {
@@ -231,6 +237,75 @@ async fn a_matching_marker_without_its_table_is_not_vouched_for() {
         .await
         .unwrap();
     assert_eq!(tables, 0, "not recreated");
+}
+
+async fn row_count(runtime: &bi_runtime::Runtime) -> i64 {
+    runtime
+        .run(|conn| conn.query_row("SELECT count(*) FROM lake.main.sales", [], |row| row.get(0)))
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_without_a_fixture_marker_is_left_untouched() {
+    let data = tempfile::tempdir().unwrap();
+    let config = lake_config(data.path());
+    let runtime = Bootstrap::open(config.clone()).unwrap().finish().unwrap();
+    runtime
+        .run(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE lake.main.sales (order_id BIGINT, ordered_at TIMESTAMPTZ,
+                     region VARCHAR, quantity BIGINT, amount DECIMAL(18,2));
+                 INSERT INTO lake.main.sales VALUES
+                     (9000001, '2026-01-01T00:00:00Z', 'private-region', 1, 123.45);",
+            )
+        })
+        .await
+        .unwrap();
+    drop(runtime);
+
+    let spec = FixtureSpec {
+        seed: 42,
+        rows: 1_000,
+    };
+    let bootstrap = Bootstrap::open(config).unwrap();
+    assert_eq!(
+        load_sales(&bootstrap, spec).unwrap(),
+        LoadOutcome::Unverified
+    );
+    let runtime = bootstrap.finish().unwrap();
+    assert_eq!(row_count(&runtime).await, 1, "someone else's rows survive");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_fixture_marker_over_other_rows_is_left_untouched() {
+    let data = tempfile::tempdir().unwrap();
+    let config = lake_config(data.path());
+    let marked = FixtureSpec {
+        seed: 1,
+        rows: 1_500,
+    };
+    let bootstrap = Bootstrap::open(config.clone()).unwrap();
+    assert_eq!(load_sales(&bootstrap, marked).unwrap(), LoadOutcome::Loaded);
+    let runtime = bootstrap.finish().unwrap();
+    let pair = same_region_pair(&runtime).await;
+    swap_amounts(&runtime, pair).await;
+    let changed = amounts(&runtime, pair).await;
+    drop(runtime);
+
+    // Its marker names another fixture, but the rows are no longer it.
+    let wanted = FixtureSpec {
+        seed: 2,
+        rows: 1_000,
+    };
+    let bootstrap = Bootstrap::open(config).unwrap();
+    assert_eq!(
+        load_sales(&bootstrap, wanted).unwrap(),
+        LoadOutcome::Unverified
+    );
+    let runtime = bootstrap.finish().unwrap();
+    assert_eq!(row_count(&runtime).await, 1_500);
+    assert_eq!(amounts(&runtime, pair).await, changed, "left untouched");
 }
 
 #[tokio::test(flavor = "multi_thread")]

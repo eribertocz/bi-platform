@@ -1,7 +1,7 @@
 //! Administrative phase: extensions, lake attachment and data loading, on a
 //! connection that still has file-system access. Ends with a lockdown.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 
@@ -24,14 +24,17 @@ const FIXTURES_TABLE: &str = "lake.main.bi_fixtures";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadOutcome {
-    /// The fixture was written into the lake now.
+    /// The fixture was written into the lake now: the table did not exist,
+    /// or it held exactly the fixture its marker named.
     Loaded,
     /// The lake already held this fixture: its marker matches and the table
     /// holds exactly the fixture's columns and rows.
     AlreadyLoaded,
-    /// The marker matches but the table is missing or holds other rows. Left
-    /// untouched, and its content is not vouched for.
-    Altered,
+    /// The table's rows cannot be vouched for: changed since they were
+    /// loaded, missing, written by something else (no marker) or named by a
+    /// marker that cannot be regenerated. Left untouched, so nothing in the
+    /// lake is ever lost to a fixture.
+    Unverified,
 }
 
 /// Absolute, `/`-separated, with a trailing slash. DuckDB only lets a
@@ -112,20 +115,25 @@ impl Bootstrap {
         })
     }
 
-    /// Loads `parquet` into `lake.main.<table>` unless the lake already holds
-    /// the fixture identified by `fingerprint`. Replacement is atomic.
+    /// Loads `parquet` into `lake.main.<table>` where nothing would be lost:
+    /// a lake without that table, or one whose table holds exactly the
+    /// fixture its marker names (`regenerate` writes that fixture from its
+    /// fingerprint, or answers `None` when it cannot). Replacement is atomic.
     ///
-    /// A matching marker alone proves nothing about the table, which anyone
-    /// with access to the lake may have changed since: the table is compared
-    /// with `parquet` row by row before reporting [`LoadOutcome::AlreadyLoaded`].
+    /// A marker alone proves nothing about the table, which anyone with
+    /// access to the lake may have changed since, and a table without one
+    /// was written by someone else: rows are always compared exactly before
+    /// a table is vouched for or replaced; otherwise it is left untouched.
     ///
     /// # Errors
-    /// When no lake is configured, the table name is invalid, or the engine fails.
+    /// When no lake is configured, the table name is invalid, regenerating a
+    /// previous fixture fails, or the engine fails.
     pub fn load_parquet_fixture(
         &self,
         table: &str,
         parquet: &Path,
         fingerprint: &str,
+        regenerate: impl FnOnce(&str) -> Result<Option<PathBuf>, RuntimeError>,
     ) -> Result<LoadOutcome, RuntimeError> {
         if self.config.lake.is_none() {
             return Err(RuntimeError::Lake("no lake configured".to_owned()));
@@ -147,17 +155,27 @@ impl Bootstrap {
                 duckdb::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(other),
             })?;
-        if current.as_deref() == Some(fingerprint) {
-            if self.table_matches_parquet(table, parquet)? {
-                return Ok(LoadOutcome::AlreadyLoaded);
+        let replaceable = match current.as_deref() {
+            Some(marked) if marked == fingerprint => {
+                if self.table_matches_parquet(table, parquet)? {
+                    return Ok(LoadOutcome::AlreadyLoaded);
+                }
+                false
             }
+            None => !self.table_exists(table)?,
+            Some(marked) => match regenerate(marked)? {
+                Some(previous) => self.table_matches_parquet(table, &previous)?,
+                None => false,
+            },
+        };
+        if !replaceable {
             tracing::warn!(
-                event_code = "fixture_altered",
+                event_code = "fixture_unverified",
                 table,
                 fingerprint,
-                "the lake marks this fixture as loaded but the table differs; left untouched"
+                "the lake table is not the fixture its marker names, or has no marker; left untouched"
             );
-            return Ok(LoadOutcome::Altered);
+            return Ok(LoadOutcome::Unverified);
         }
 
         self.conn.execute_batch("BEGIN TRANSACTION")?;
@@ -184,18 +202,22 @@ impl Bootstrap {
         Ok(LoadOutcome::Loaded)
     }
 
-    /// Whether `lake.main.<table>` exists with exactly the columns, in order
-    /// and type, and the rows of `parquet`. Rows are compared as multisets in
-    /// both directions (`EXCEPT ALL`, where NULLs are equal), so matching
-    /// counts or totals with different rows is not a match.
-    fn table_matches_parquet(&self, table: &str, parquet: &Path) -> Result<bool, duckdb::Error> {
-        let exists: i64 = self.conn.query_row(
+    fn table_exists(&self, table: &str) -> Result<bool, duckdb::Error> {
+        let tables: i64 = self.conn.query_row(
             "SELECT count(*) FROM information_schema.tables
              WHERE table_catalog = ? AND table_schema = 'main' AND table_name = ?",
             [LAKE, table],
             |row| row.get(0),
         )?;
-        if exists == 0 {
+        Ok(tables > 0)
+    }
+
+    /// Whether `lake.main.<table>` exists with exactly the columns, in order
+    /// and type, and the rows of `parquet`. Rows are compared as multisets in
+    /// both directions (`EXCEPT ALL`, where NULLs are equal), so matching
+    /// counts or totals with different rows is not a match.
+    fn table_matches_parquet(&self, table: &str, parquet: &Path) -> Result<bool, duckdb::Error> {
+        if !self.table_exists(table)? {
             return Ok(false);
         }
         let source = sql_string(&parquet.to_string_lossy());

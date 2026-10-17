@@ -22,21 +22,47 @@ pub fn sales_fingerprint(spec: FixtureSpec) -> String {
     )
 }
 
+/// The fixture a fingerprint names, when this build generates it
+/// identically (same schema version); `None` otherwise.
+fn sales_spec(fingerprint: &str) -> Option<FixtureSpec> {
+    let rest = fingerprint.strip_prefix(&format!("sales:schema={SCHEMA_VERSION}:seed="))?;
+    let (seed, rows) = rest.split_once(":rows=")?;
+    let spec = FixtureSpec {
+        seed: seed.parse().ok()?,
+        rows: rows.parse().ok()?,
+    };
+    (sales_fingerprint(spec) == fingerprint).then_some(spec)
+}
+
+fn write_sales(path: &std::path::Path, spec: FixtureSpec) -> Result<(), RuntimeError> {
+    parquet_io::write(
+        path,
+        sales::schema(),
+        sales::record_batches(spec, bench::BATCH_ROWS),
+    )
+    .map_err(|error| RuntimeError::Io(std::io::Error::other(error.to_string())))?;
+    Ok(())
+}
+
 /// Generates the `sales` fixture as Parquet and loads it into
-/// `lake.main.sales`, unless that exact fixture is already there.
+/// `lake.main.sales` where nothing would be lost; see
+/// [`Bootstrap::load_parquet_fixture`]. A lake holding exactly another
+/// `sales` fixture (another seed or size) is replaced by this one.
 ///
 /// # Errors
 /// I/O, Parquet or engine errors.
 pub fn load_sales(bootstrap: &Bootstrap, spec: FixtureSpec) -> Result<LoadOutcome, RuntimeError> {
     let scratch = tempfile::tempdir()?;
     let parquet = scratch.path().join("sales.parquet");
-    parquet_io::write(
-        &parquet,
-        sales::schema(),
-        sales::record_batches(spec, bench::BATCH_ROWS),
-    )
-    .map_err(|error| RuntimeError::Io(std::io::Error::other(error.to_string())))?;
-    bootstrap.load_parquet_fixture(SALES_TABLE, &parquet, &sales_fingerprint(spec))
+    write_sales(&parquet, spec)?;
+    bootstrap.load_parquet_fixture(SALES_TABLE, &parquet, &sales_fingerprint(spec), |marked| {
+        let Some(previous) = sales_spec(marked) else {
+            return Ok(None);
+        };
+        let path = scratch.path().join("previous.parquet");
+        write_sales(&path, previous)?;
+        Ok(Some(path))
+    })
 }
 
 /// Recomputes the `sales` oracle with DuckDB over `lake.main.sales`.
@@ -125,4 +151,28 @@ fn oracle_query(conn: &Connection, spec: FixtureSpec) -> duckdb::Result<Oracle> 
         totals,
         by_region,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_fingerprints_this_build_generates_name_a_fixture() {
+        let spec = FixtureSpec {
+            seed: 42,
+            rows: 1_000,
+        };
+        assert_eq!(sales_spec(&sales_fingerprint(spec)), Some(spec));
+        for other in [
+            format!("sales:schema={}:seed=42:rows=1000", SCHEMA_VERSION + 1),
+            "sales:schema=1:seed=42:rows=1000:extra".to_owned(),
+            "sales:schema=1:seed=-1:rows=1000".to_owned(),
+            "sales:schema=1:seed=042:rows=1000".to_owned(),
+            "orders:schema=1:seed=42:rows=1000".to_owned(),
+            String::new(),
+        ] {
+            assert_eq!(sales_spec(&other), None, "{other}");
+        }
+    }
 }
