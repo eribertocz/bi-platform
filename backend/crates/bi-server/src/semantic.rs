@@ -344,8 +344,11 @@ fn problem_headers(mut response: Response) -> Response {
 }
 
 async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -> Outcome {
-    match prepare::prepare(state, prepare::Session::of(principal), &request).await {
-        Ok(prepared) => explained(&prepared),
+    // Rendered where it was prepared: within the admission permit and the
+    // query deadline, off the async executor.
+    let session = prepare::Session::of(principal);
+    match prepare::prepare_with(state, session, &request, |prepared| explained(&prepared)).await {
+        Ok(outcome) => outcome,
         Err(prepare::Refusal(outcome)) => *outcome,
     }
 }

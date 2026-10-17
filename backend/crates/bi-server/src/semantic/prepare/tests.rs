@@ -114,7 +114,7 @@ async fn a_change_between_the_phases_never_mixes_versions() {
     )
     .unwrap();
     std::fs::write(p.path().join("policies/members.yaml"), "version: 1\n").unwrap();
-    let Ok(during) = prepare_loaded(&state, loaded).await else {
+    let Ok(during) = prepare_loaded(&state, loaded, |prepared| prepared).await else {
         panic!("the request in progress keeps its read");
     };
     assert_eq!(during.model().content_hash(), before.model().content_hash());
@@ -202,3 +202,61 @@ users:
 }
 
 mod composition;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn whatever_consumes_the_preparation_stays_within_its_permit_and_deadline() {
+    let p = tempfile::tempdir().unwrap();
+    std::fs::create_dir(p.path().join("metrics")).unwrap();
+    std::fs::create_dir(p.path().join("policies")).unwrap();
+    std::fs::write(p.path().join("metrics/ventas.yaml"), MODEL).unwrap();
+    std::fs::write(
+        p.path().join("policies/members.yaml"),
+        "version: 1\nusers:\n  lector: [viewer]\n",
+    )
+    .unwrap();
+    let state = AppState {
+        query_timeout: std::time::Duration::from_millis(300),
+        ..state(p.path(), analytics().await)
+    };
+    let permits = state.models.admission.available_permits();
+    // The consumer (explain's render) is held past the deadline.
+    let (started, running) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let preparing = tokio::spawn({
+        let state = state.clone();
+        async move {
+            prepare_with(&state, lector(), &request(), move |prepared| {
+                started.send(()).unwrap();
+                let _ = released.recv();
+                prepared.plan_fingerprint().to_owned()
+            })
+            .await
+        }
+    });
+    running
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // Answered while the consumer is still held: the deadline covers it.
+    let held = tokio::time::timeout(std::time::Duration::from_secs(5), preparing)
+        .await
+        .expect("answered within the deadline, with the consumer still held")
+        .unwrap();
+    let Err(Refusal(outcome)) = held else {
+        panic!("the deadline covers the consumer too");
+    };
+    let Outcome::Failed(status, code, _) = *outcome else {
+        panic!("a timeout");
+    };
+    assert_eq!(
+        (status, code),
+        (StatusCode::GATEWAY_TIMEOUT, "explain_timeout")
+    );
+    // The permit stays taken until the abandoned work really ends.
+    assert_eq!(state.models.admission.available_permits(), permits - 1);
+    release.send(()).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state.models.admission.available_permits() != permits {
+        assert!(std::time::Instant::now() < until, "the permit is returned");
+        tokio::task::yield_now().await;
+    }
+}

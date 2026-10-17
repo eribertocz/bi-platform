@@ -267,8 +267,24 @@ pub async fn prepare(
     session: Session,
     request: &ExplainRequest,
 ) -> Result<Prepared, Refusal> {
+    prepare_with(state, session, request, |prepared| prepared).await
+}
+
+/// Like [`prepare`], then `finish` consumes the preparation in the same
+/// native work: under the same admission permit and the same
+/// `query_timeout`, never on the async executor.
+///
+/// # Errors
+/// A [`Refusal`] for anything that is not a fully authorized, valid and
+/// planned query, or when the whole work outlives `query_timeout`.
+pub async fn prepare_with<T: Send + 'static>(
+    state: &AppState,
+    session: Session,
+    request: &ExplainRequest,
+    finish: impl FnOnce(Prepared) -> T + Send + 'static,
+) -> Result<T, Refusal> {
     let loaded = load_request(state, session, request).await?;
-    prepare_loaded(state, loaded).await
+    prepare_loaded(state, loaded, finish).await
 }
 
 /// The first phase: bounds, admission and one read of the project.
@@ -374,7 +390,11 @@ async fn load(
 /// The second phase, on what [`load_request`] captured: the request, the
 /// project files and the access snapshot. Only the engine is consulted
 /// again, to describe the sources the model reads while it compiles.
-pub(super) async fn prepare_loaded(state: &AppState, loaded: Loaded) -> Result<Prepared, Refusal> {
+pub(super) async fn prepare_loaded<T: Send + 'static>(
+    state: &AppState,
+    loaded: Loaded,
+    finish: impl FnOnce(Prepared) -> T + Send + 'static,
+) -> Result<T, Refusal> {
     let Loaded {
         project,
         access,
@@ -418,7 +438,7 @@ pub(super) async fn prepare_loaded(state: &AppState, loaded: Loaded) -> Result<P
             shape,
             disclosure: &disclosure,
         };
-        Ok(prepare_file(file, conn, &input))
+        Ok(prepare_file(file, conn, &input).map(finish))
     });
     match tokio::time::timeout(state.query_timeout, work).await {
         Err(_) => Err(Refusal(Box::new(Outcome::Failed(
