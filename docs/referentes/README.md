@@ -34,3 +34,6 @@
 - [Apache Ossie](ossie.md): estándar de intercambio semántico y lenguaje portable de expresiones (`OSSIE_SQL_2026`), base del motor semántico de G2.
 - [Motor semántico](semantica.md): Cube, Malloy, MetricFlow, Rill (código) y Looker, Power BI, Tableau, Snowflake, Databricks (documentación), contrastados con el corpus de SEF.
 - [Atlas BI](atlasbi.md): proyecto hermano del propietario (`E:\bi-platform`); ideas de filtros, cálculos de autoservicio, visualización, trabajos y mantenimiento del lago.
+
+## Propuestas que parten de esta matriz
+- [Propuesta de evolución analítica del motor semántico](../producto/propuestas/evolucion-analitica-motor-semantico.md): propuesta de dirección, no estado normativo ni ficha de una herramienta implementada. Compara siete referentes para contexto de filtros, nivel de detalle (LOD), grupos de cálculo, inteligencia temporal, composición multietapa y drill. Integrarla no aprueba implementar esas capacidades.
