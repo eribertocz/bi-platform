@@ -76,7 +76,7 @@ users:
   administrator: [admin]
   reader: [viewer]
   analyst: [analyst]
-  inspector: [catalog_reader]
+  inspector: [catalog_reader, viewer]
 groups:
   catalog_authors: [modeler]
 ";
@@ -503,6 +503,36 @@ async fn roles_without_inspection_are_refused_without_catalog_work(pool: PgPool)
     stack.db.close().await;
 }
 
+/// The semantic explanation of one metric of `metrics/ventas.yaml`.
+async fn explain(app: &Router, cookie: &str, metric: &str) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/semantic/explain")
+                .header("origin", ORIGIN)
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "metrics/ventas.yaml",
+                        "query": { "selections": [
+                            { "kind": "metric", "id": "x", "name": metric }
+                        ] }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
 #[sqlx::test(migrations = false)]
 async fn an_explicit_catalog_grant_inspects_but_does_not_query(pool: PgPool) {
     let p = project();
@@ -519,32 +549,14 @@ permit (
     let app = stack.app(Some(p.path()), analytics().await);
     let inspector = Stack::login(&app, "inspector").await;
     assert_full_listing(&list(&app, Some(&inspector)).await);
-    // Inspecting the catalog grants nothing on its members' data.
-    let explain = app
-        .clone()
-        .oneshot(
-            Request::post("/api/v1/semantic/explain")
-                .header("origin", ORIGIN)
-                .header("cookie", &inspector)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "metrics/ventas.yaml",
-                        "query": { "selections": [
-                            { "kind": "metric", "id": "x", "name": "coste" }
-                        ] }
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(explain.status(), StatusCode::FORBIDDEN);
-    let body: Value =
-        serde_json::from_slice(&explain.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body["code"], "semantic_access_denied", "{body:#}");
-    assert_eq!(body["denied"]["name"], "coste");
+    // The same user queries what viewer opens, and inspecting the catalog
+    // adds nothing to it: the restricted metric stays denied.
+    let (status, open) = explain(&app, &inspector, "importe_total").await;
+    assert_eq!(status, StatusCode::OK, "{open:#}");
+    let (status, denied) = explain(&app, &inspector, "coste").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied:#}");
+    assert_eq!(denied["code"], "semantic_access_denied");
+    assert_eq!(denied["denied"]["name"], "coste");
     // Still refused to the roles the grant does not name.
     assert_forbidden(&list(&app, Some(&Stack::login(&app, "reader").await)).await);
     stack.db.close().await;
@@ -556,17 +568,24 @@ async fn member_or_masked_grants_do_not_open_the_catalog(pool: PgPool) {
     let stack = Stack::start(pool, Duration::from_secs(10)).await;
     let app = stack.app(Some(p.path()), analytics().await);
     let inspector = Stack::login(&app, "inspector").await;
-    for grant in [
+    let grants = [
         "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource is Metric);",
         "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource is Dataset);",
         "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource is Dimension);",
         "permit (principal in Role::\"catalog_reader\", action == Action::\"view_masked\", resource);",
-        // Another model, named like a file or like the catalog's own scope.
-        "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource == Model::\"ventas\");",
+        // Every model but the catalog, the compiled `metrics/ventas.yaml`
+        // included, and an identifier shaped like a file of the catalog.
+        "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource is Model) unless { resource == Model::\"project:catalog\" };",
         "permit (principal in Role::\"catalog_reader\", action == Action::\"view\", resource == Model::\"project:catalog:metrics/ventas.yaml\");",
-    ] {
+    ];
+    for grant in grants {
         policies(p.path(), grant);
         assert_forbidden(&list(&app, Some(&inspector)).await);
+    }
+    let events = stack.events().await;
+    assert_eq!(events.len(), grants.len());
+    for event in &events {
+        assert_event(event, "inspector", "denial", "denied", true);
     }
     stack.assert_no_catalog_work();
     stack.db.close().await;
@@ -585,10 +604,10 @@ forbid (principal, action == Action::"view", resource == Model::"project:catalog
     for user in ["administrator", "catalog_author"] {
         assert_forbidden(&list(&app, Some(&Stack::login(&app, user).await)).await);
     }
-    for event in stack.events().await {
-        assert_eq!(event["action"], "denial");
-        assert_eq!(event["result"], "denied");
-    }
+    let events = stack.events().await;
+    assert_eq!(events.len(), 2);
+    assert_event(&events[0], "administrator", "denial", "denied", true);
+    assert_event(&events[1], "catalog_author", "denial", "denied", true);
     stack.assert_no_catalog_work();
     stack.db.close().await;
 }
@@ -767,12 +786,12 @@ async fn invalid_or_unreadable_access_closes_without_details(pool: PgPool) {
             "permit (principal, action, resource) when { SECRETO_POLITICA };",
         ),
     ];
-    let mut failures = 0;
+    let mut actors = Vec::new();
     for (file, text) in broken {
         std::fs::write(file, text).unwrap();
-        for cookie in [&author, &unmapped] {
+        for (actor, cookie) in [("catalog_author", &author), ("unmapped", &unmapped)] {
             closed(&list(&app, Some(cookie)).await);
-            failures += 1;
+            actors.push(actor);
         }
         std::fs::write(&members, MEMBERS).unwrap();
         let _ = std::fs::remove_file(&cedar);
@@ -782,15 +801,14 @@ async fn invalid_or_unreadable_access_closes_without_details(pool: PgPool) {
     std::fs::rename(p.path().join("policies"), &saved).unwrap();
     std::fs::write(p.path().join("policies"), "SECRETO_ARCHIVO").unwrap();
     closed(&list(&app, Some(&author)).await);
-    failures += 1;
+    actors.push("catalog_author");
     std::fs::remove_file(p.path().join("policies")).unwrap();
     std::fs::rename(&saved, p.path().join("policies")).unwrap();
     // A valid configuration opens again; nothing earlier was kept.
     assert_full_listing(&list(&app, Some(&author)).await);
     let events = stack.events().await;
-    assert_eq!(events.len(), failures + 2);
-    for event in &events[1..=failures] {
-        let actor = event["actor_id"].as_str().unwrap();
+    assert_eq!(events.len(), actors.len() + 2);
+    for (event, actor) in events[1..=actors.len()].iter().zip(&actors) {
         assert_event(event, actor, "query", "failure", false);
     }
     stack.db.close().await;
@@ -838,6 +856,14 @@ async fn refusals_are_identical_whatever_the_catalog_state(pool: PgPool) {
             let cookie = Stack::login(&app, user).await;
             assert_eq!(refusal(&list(&app, Some(&cookie)).await), reference);
         }
+    }
+    // Without the project's own files no membership can be read: even its
+    // modeler is refused, the same way.
+    let missing = p.path().join("ausente");
+    let app = stack.app(Some(&missing), analytics().await);
+    for user in ["reader", "catalog_author"] {
+        let cookie = Stack::login(&app, user).await;
+        assert_eq!(refusal(&list(&app, Some(&cookie)).await), reference);
     }
     stack.assert_no_catalog_work();
     stack.db.close().await;
@@ -952,11 +978,13 @@ async fn a_held_audit_head_ends_within_the_deadline(pool: PgPool) {
     let events = stack.events().await;
     assert_eq!(events.len(), 1);
     assert_event(&events[0], "catalog_author", "query", "success", true);
+    // The chain holds after the abandoned attempts.
+    bi_server::audit::verify(&pool, None).await.unwrap();
     stack.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
-async fn authorized_failures_are_recorded_as_failures(pool: PgPool) {
+async fn authorized_errors_fail_and_limited_listings_succeed(pool: PgPool) {
     let p = project();
     let stack = Stack::start(pool, Duration::from_secs(10)).await;
     let down = stack.app(Some(p.path()), Analytics::disabled());
@@ -981,5 +1009,106 @@ async fn authorized_failures_are_recorded_as_failures(pool: PgPool) {
         stack.counted("bi_models_requests", &[("outcome", "error")]),
         1
     );
+    stack.db.close().await;
+}
+
+/// Occupies the only worker of `analytics` until the returned sender is
+/// used or dropped; returns once the worker is busy.
+async fn occupy(
+    analytics: &Analytics,
+) -> (std::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>) {
+    let (started, running) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let worker = analytics.runtime().unwrap();
+    let busy = tokio::spawn(async move {
+        worker
+            .run(move |_| {
+                started.send(()).unwrap();
+                let _ = released.recv();
+                Ok::<(), bi_runtime::duckdb::Error>(())
+            })
+            .await
+            .unwrap();
+    });
+    running.await.unwrap();
+    (release, busy)
+}
+
+#[sqlx::test(migrations = false)]
+async fn an_authorized_compilation_past_its_deadline_is_recorded_as_a_failure(pool: PgPool) {
+    let deadline = Duration::from_secs(1);
+    let p = project();
+    let stack = Stack::start(pool, deadline).await;
+    let analytics = analytics().await;
+    let app = stack.app(Some(p.path()), analytics.clone());
+    let author = Stack::login(&app, "catalog_author").await;
+    let (release, busy) = occupy(&analytics).await;
+    let started = Instant::now();
+    let answer = list(&app, Some(&author)).await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        answer.status,
+        StatusCode::GATEWAY_TIMEOUT,
+        "{}",
+        answer.text
+    );
+    assert_eq!(answer.body["code"], "models_timeout");
+    assert_nothing_of_the_catalog(&answer);
+    assert!(elapsed < deadline + Duration::from_secs(2), "{elapsed:?}");
+    release.send(()).unwrap();
+    busy.await.unwrap();
+    let events = stack.events().await;
+    assert_eq!(events.len(), 1);
+    assert_event(&events[0], "catalog_author", "query", "failure", true);
+    stack.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn saturation_refuses_without_a_decision(pool: PgPool) {
+    let p = project();
+    let stack = Stack::start(pool, Duration::from_secs(10)).await;
+    let analytics = analytics().await;
+    let app = stack.app(Some(p.path()), analytics.clone());
+    let author = Stack::login(&app, "catalog_author").await;
+    let reader = Stack::login(&app, "reader").await;
+    let (release, busy) = occupy(&analytics).await;
+    // Two allowed listings hold both admission permits while they wait for
+    // the worker.
+    let waiting: Vec<_> = (0..2)
+        .map(|_| {
+            let (app, author) = (app.clone(), author.clone());
+            tokio::spawn(async move { list(&app, Some(&author)).await.status })
+        })
+        .collect();
+    let until = Instant::now() + Duration::from_secs(10);
+    while stack.counted("bi_models_catalog_work", &[("step", "compile")]) < 2 {
+        assert!(Instant::now() < until, "both listings reach the worker");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    for cookie in [&author, &reader] {
+        let busy = list(&app, Some(cookie)).await;
+        assert_eq!(busy.status, StatusCode::TOO_MANY_REQUESTS, "{}", busy.text);
+        assert_eq!(busy.body["code"], "models_busy");
+        assert_eq!(busy.headers["cache-control"], "no-store");
+        assert_nothing_of_the_catalog(&busy);
+    }
+    release.send(()).unwrap();
+    busy.await.unwrap();
+    for listing in waiting {
+        assert_eq!(listing.await.unwrap(), StatusCode::OK);
+    }
+    // Only the two decided listings were recorded, and only they worked.
+    let events = stack.events().await;
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_event(event, "catalog_author", "query", "success", true);
+    }
+    for step in ["read", "compile"] {
+        assert_eq!(
+            stack.counted("bi_models_catalog_work", &[("step", step)]),
+            2,
+            "{step}"
+        );
+    }
     stack.db.close().await;
 }

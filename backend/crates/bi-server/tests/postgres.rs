@@ -1177,14 +1177,20 @@ mod restricted {
                 ("denial".to_owned(), "denied".to_owned(), true),
             ]
         );
+        // The role that wrote them can neither read nor change the chain.
         let runtime = PgPool::connect_lazy_with(roles.options(&roles.runtime));
-        assert!(
-            sqlx::query("SELECT count(*) FROM bi_meta.audit_events")
-                .execute(&runtime)
-                .await
-                .is_err()
-        );
+        for statement in [
+            "SELECT count(*) FROM bi_meta.audit_events",
+            "UPDATE bi_meta.audit_events SET payload = payload",
+            "DELETE FROM bi_meta.audit_events",
+        ] {
+            assert!(
+                sqlx::query(statement).execute(&runtime).await.is_err(),
+                "{statement}"
+            );
+        }
         runtime.close().await;
+        bi_server::audit::verify(&pool, None).await.unwrap();
         db.close().await;
         roles.drop().await;
     }

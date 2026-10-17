@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d6b5434f6aca48c07ab24e510226d38e52f677f96d9896467bf6a3a1d38f795b # shrinks to user_roles = {}, group_roles = {}, mapped = false, user = "admin"

@@ -189,8 +189,8 @@ Requiere Node >=22.17 (CI usa 24.21.0). En `frontend/`: `npm ci` y
 a la API Rust en `http://127.0.0.1:8080`. En `/estado` se consulta la API real;
 si no está disponible, se muestra el error y se puede reintentar.
 
-La pila Compose habilita el login de desarrollo y configura dos identidades
-sintéticas. Abre `/login` para entrar; `/estado` sigue siendo público. El resto
+La pila Compose habilita el login de desarrollo y configura tres identidades
+sintéticas (analista, lector y modelador). Abre `/login` para entrar; `/estado` sigue siendo público. El resto
 de la UI requiere sesión y todo `/api/v1/**` la valida en PostgreSQL, salvo los
 endpoints de login de desarrollo y OIDC. Logout revoca la sesión en el servidor.
 

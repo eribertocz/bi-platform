@@ -26,7 +26,7 @@ use utoipa::ToSchema;
 use self::catalog::{Event, Verdict};
 use crate::{AppState, auth::Principal, problem::Problem};
 
-mod catalog;
+pub mod catalog;
 #[cfg(test)]
 mod tests;
 
@@ -337,10 +337,10 @@ pub async fn list(
         .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
         .unwrap_or_default();
     let (decision, result) = inspect(&state, &principal, &request_id).await;
-    let outcome = match &result {
-        Ok(_) => "ok",
-        Err((status, ..)) if *status == StatusCode::FORBIDDEN => "forbidden",
-        Err(_) => "error",
+    let (outcome, code) = match &result {
+        Ok(_) => ("ok", "none"),
+        Err((status, code, _)) if *status == StatusCode::FORBIDDEN => ("forbidden", *code),
+        Err((_, code, _)) => ("error", *code),
     };
     let attributes = [opentelemetry::KeyValue::new("outcome", outcome)];
     if let Some(duration) = &state.models.duration {
@@ -352,9 +352,10 @@ pub async fn list(
     tracing::info!(
         request_id,
         outcome,
+        code,
         decision,
         elapsed_ms = started.elapsed().as_millis(),
-        "project models loaded"
+        "project models requested"
     );
     match result {
         Ok(body) => ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response(),
@@ -364,7 +365,7 @@ pub async fn list(
     }
 }
 
-pub(crate) type Failure = (StatusCode, &'static str, &'static str);
+type Failure = (StatusCode, &'static str, &'static str);
 
 const BUSY: Failure = (
     StatusCode::TOO_MANY_REQUESTS,
@@ -420,7 +421,8 @@ async fn inspect(
         return ("none", Err(BUSY));
     };
     // A refusal binds the permit only to release it before the audit.
-    let (decision, event, result) = match decide(state, principal, directory, permit).await {
+    let decided = decide_within(state, principal, directory, permit).await;
+    let (decision, event, result) = match decided {
         Ok((Verdict::Allowed { fingerprint }, directory, permit)) => {
             let result = answer(state, directory, permit).await;
             let event = Event::answered(fingerprint, result.is_ok());
@@ -449,6 +451,13 @@ async fn inspect(
         .await;
     // Nothing of the catalog leaves without its event.
     let audited = recorded.map_err(|code| {
+        tracing::warn!(
+            request_id,
+            code,
+            decision,
+            event_code = "project_catalog_decision_unrecorded",
+            "project catalog decision not recorded"
+        );
         (
             StatusCode::SERVICE_UNAVAILABLE,
             code,
@@ -461,19 +470,14 @@ async fn inspect(
 /// Decides on the project's access, read off the executor within
 /// `query_timeout`. The permit travels with the read, also past the
 /// deadline, and comes back with the verdict.
-async fn decide(
+async fn decide_within(
     state: &AppState,
     principal: &Principal,
     directory: PathBuf,
     permit: OwnedSemaphorePermit,
 ) -> Result<(Verdict, PathBuf, OwnedSemaphorePermit), Failure> {
     let user = principal.session.user.id.clone();
-    // Groups of the verified identity only; they grant what members.yaml says.
-    let groups = principal
-        .federated_identity
-        .as_ref()
-        .map(|identity| identity.groups.clone())
-        .unwrap_or_default();
+    let groups = principal.verified_groups().to_vec();
     let span = tracing::Span::current();
     let read = tokio::task::spawn_blocking(move || {
         let _entered = span.enter();
@@ -489,7 +493,7 @@ async fn decide(
 
 /// The listing itself, for a session already allowed: reads `metrics/` and
 /// compiles each file, holding `permit` until the native work ends.
-pub(crate) async fn answer(
+async fn answer(
     state: &AppState,
     directory: PathBuf,
     permit: OwnedSemaphorePermit,

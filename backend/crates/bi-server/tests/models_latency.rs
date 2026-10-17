@@ -5,7 +5,8 @@
 //!   audit event;
 //! - `denied`: the decision and its audit event, nothing of the catalog;
 //! - `unconfigured`: no project, so the session check alone (the baseline);
-//! - `decision`: loading `policies/` and deciding, called directly.
+//! - `decision`: loading `policies/` and deciding, called directly;
+//! - `audit`: appending one event in its own transaction, as the route does.
 //!
 //! The same file runs before #124, where every session lists. Run
 //! explicitly, against a disposable PostgreSQL and catalog:
@@ -176,7 +177,9 @@ async fn models_latency(pool: PgPool) {
             json!({"status": status, "cold_ms": cold, "warm": summary(samples)}),
         );
     }
-    // The decision alone, on the same files.
+    // The decision alone, on the same files. The resource is
+    // `models::catalog::resource()`, pinned by its unit test; it is spelled
+    // out so this file also runs before #124.
     let resource = sef_authz::Resource {
         kind: sef_authz::ResourceKind::Model,
         id: "project:catalog".to_owned(),
@@ -210,6 +213,37 @@ async fn models_latency(pool: PgPool) {
     .await
     .unwrap();
     report.insert("decision", json!({"warm": summary(decision)}));
+    // One audit event alone: transaction, append to the chain, commit.
+    let mut audit = Vec::with_capacity(SAMPLES);
+    for i in 0..WARMUP + SAMPLES {
+        let event = bi_audit::Event {
+            event_id: format!("bench-{i:04}-{}", "0".repeat(32)),
+            occurred_at: std::time::SystemTime::now().into(),
+            actor_id: "modeler".to_owned(),
+            actor_type: bi_audit::ActorType::User,
+            session_id: None,
+            action: bi_audit::Action::Query,
+            resource_type: "project_catalog".to_owned(),
+            resource_id: "project:catalog".to_owned(),
+            result: bi_audit::ResultCode::Success,
+            request_id: "bench".to_owned(),
+            trace_id: "a".repeat(32),
+            policy_decision_id: Some("bench".to_owned()),
+            source: bi_audit::Source::Http,
+            metadata_redacted: bi_audit::MetadataRedacted::default(),
+            schema_version: bi_audit::SCHEMA_VERSION,
+        };
+        let started = Instant::now();
+        let mut transaction = db.begin().await.unwrap();
+        bi_server::audit::append(&mut transaction, &event)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        if i >= WARMUP {
+            audit.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    report.insert("audit", json!({"warm": summary(audit)}));
     let system = System::new_all();
     println!(
         "{}",
