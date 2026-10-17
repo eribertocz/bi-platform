@@ -13,5 +13,5 @@ pub mod error;
 pub mod query;
 pub mod unbound;
 
-pub use bind::bind;
+pub use bind::{bind, bind_visible};
 pub use error::{QueryError, QueryErrorCode};

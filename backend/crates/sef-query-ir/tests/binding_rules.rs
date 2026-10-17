@@ -586,3 +586,31 @@ proptest! {
         prop_assert_eq!(fingerprint(values), fingerprint(sorted));
     }
 }
+
+#[test]
+fn names_resolve_only_among_visible_objects() {
+    // A twin labelled like `revenue`, hidden from the caller.
+    let mut model = common::model(1);
+    let mut twin = model.metrics[0].clone();
+    twin.metadata.identity.stable_id = StableId::new("corpus/metric/revenue-2").expect("id");
+    twin.metadata.label = Some("Revenue".to_owned());
+    model.metrics.push(twin);
+    let query = one(revenue_by_region());
+    let hidden = |id: &StableId| id.as_str() != "corpus/metric/revenue-2";
+    // Unseen, the twin neither makes the name ambiguous nor answers for it.
+    let seen = sef_query_ir::bind_visible(&query, &model, &hidden)
+        .unwrap_or_else(|errors| panic!("{errors:#?}"));
+    let SelectionItem::Metric(found) = &seen.blocks[0].selections[0].item else {
+        panic!("metric");
+    };
+    assert_eq!(found.as_str(), "corpus/metric/revenue");
+    // A name only a hidden object carries is unknown to that caller.
+    let mut only_hidden = revenue_by_region();
+    only_hidden.selections[0] = metric("corpus/metric/revenue-2");
+    let errors =
+        sef_query_ir::bind_visible(&one(only_hidden), &model, &hidden).expect_err("hidden");
+    assert!(errors.iter().any(|error| error.code == Code::UnknownMetric));
+    // Seeing everything is `bind`: still ambiguous.
+    let errors = sef_query_ir::bind_visible(&query, &model, &|_| true).expect_err("ambiguous");
+    assert!(errors.iter().any(|error| error.code == Code::AmbiguousName));
+}

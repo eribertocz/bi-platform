@@ -1043,3 +1043,66 @@ async fn a_visible_refused_use_never_answers_for_a_hidden_one(pool: sqlx::PgPool
     assert_eq!(body["denied"]["name"], "margen");
     h.db.close().await;
 }
+
+/// Catalog events of this route, oldest first.
+async fn catalog_events(pool: &sqlx::PgPool) -> Vec<(String, String)> {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT payload::jsonb->>'action', payload::jsonb->>'result' FROM \
+         bi_meta.audit_events WHERE payload::jsonb->>'resource_type' = 'project_catalog' \
+         ORDER BY sequence",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = false)]
+async fn diagnostics_released_under_inspection_are_recorded_first(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let modelador = h.login("modelador").await;
+    let unknown = asked("metrics/ventas.yaml", "inexistente");
+    let (status, body) = h.explain(Some(&modelador), &unknown).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
+    assert_eq!(
+        catalog_events(&h.pool).await,
+        vec![("query".to_owned(), "success".to_owned())]
+    );
+    // Nothing of the catalog leaves without that event.
+    sqlx::query(
+        "ALTER TABLE bi_meta.audit_events ADD CONSTRAINT append_fails CHECK (false) NOT VALID",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    for body in [unknown, asked("metrics/no_existe.yaml", "importe")] {
+        let (status, answer) = h.explain(Some(&modelador), &body).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer:#}");
+        assert_eq!(answer["code"], "audit_unavailable");
+    }
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn a_hidden_homonym_never_changes_a_visible_query(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let lector = h.login("lector").await;
+    // Quoted identifiers are exact: `"importe"` and `"IMPORTE"` are two names.
+    let visible = MODEL.replace("  - name: importe", "  - name: '\"importe\"'");
+    h.write("metrics/ventas.yaml", &visible);
+    let request = asked("metrics/ventas.yaml", "\"importe\"");
+    let (before, answer) = h.explain(Some(&lector), &request).await;
+    assert_eq!(before, StatusCode::OK, "{answer:#}");
+    let hidden = "  - name: '\"IMPORTE\"'\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(sales.quantity)\n";
+    h.write("metrics/ventas.yaml", &format!("{visible}{hidden}"));
+    let (after, answer) = h.explain(Some(&lector), &request).await;
+    assert_eq!(after, before, "{answer:#}");
+    // Whoever inspects the catalog sees both, and the ambiguity.
+    let modelador = h.login("modelador").await;
+    let (status, answer) = h.explain(Some(&modelador), &request).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer:#}");
+    assert_eq!(
+        answer["diagnostics"][0]["code"], "ambiguous_name",
+        "{answer:#}"
+    );
+    h.db.close().await;
+}
