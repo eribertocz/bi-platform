@@ -17,7 +17,7 @@ cap-fs-ext = "4.0.3"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 # Engine source or prebuilt library is chosen by the `bundled` feature of
 # bi-runtime; the version must match the libduckdb the image downloads.
-duckdb = { version = "=1.10506.0" }
+duckdb = { version = "=1.10506.1" }
 getrandom = "0.4.3"
 http-body-util = "0.1"
 opentelemetry = { version = "0.33.1", default-features = false, features = ["metrics"] }
