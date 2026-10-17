@@ -158,6 +158,17 @@ pub struct Principal {
     token_hash: Vec<u8>,
 }
 
+impl Principal {
+    /// Groups the provider verified for this session; none for a local one.
+    /// They grant only what a project's `members.yaml` maps them to.
+    #[must_use]
+    pub fn verified_groups(&self) -> &[String] {
+        self.federated_identity
+            .as_ref()
+            .map_or(&[], |identity| identity.groups.as_slice())
+    }
+}
+
 pub(crate) fn problem(status: StatusCode, code: &str, request_id: &RequestId) -> Response {
     Problem::new(
         status,

@@ -4,8 +4,6 @@
 //! from the server (configuration, the stored session, the runtime's own
 //! bootstrap), never from the request.
 
-use std::time::Instant;
-
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use bi_runtime::Runtime;
@@ -175,62 +173,29 @@ pub(crate) async fn refuse(
     }
 }
 
-/// Appends one denial event within `query_timeout`, all of it: connection,
-/// transaction, the append (which may wait for the audit head) and the
-/// commit. PostgreSQL also ends its own wait within what is left, so an
-/// abandoned statement never outlives the request; an unconfirmed
-/// transaction rolls back and frees its connection. No retry.
+/// One denial event of this route, within `query_timeout`
+/// (see [`crate::audit::record_within`]).
 async fn record_denial(
     state: &AppState,
     principal: &Principal,
     request_id: &str,
 ) -> Result<(), &'static str> {
-    const UNAVAILABLE: &str = "audit_unavailable";
-    let started = Instant::now();
-    let budget = state.query_timeout;
-    let event_id = crate::auth::random_token()
-        .await
-        .map_err(|()| UNAVAILABLE)?;
-    let (request_id, trace_id) = crate::audit::correlation(request_id);
-    let event = bi_audit::Event {
-        event_id,
-        occurred_at: std::time::SystemTime::now().into(),
-        actor_id: principal.session.user.id.clone(),
-        actor_type: bi_audit::ActorType::User,
-        session_id: None,
-        action: bi_audit::Action::Denial,
-        resource_type: "query_endpoint".to_owned(),
-        resource_id: "legacy_queries".to_owned(),
-        result: bi_audit::ResultCode::Denied,
-        request_id,
-        trace_id,
-        // An operational closure, not a decision of the permission engine.
-        policy_decision_id: None,
-        source: bi_audit::Source::Http,
-        // The refused body is never read.
-        metadata_redacted: bi_audit::MetadataRedacted { query_shape: None },
-        schema_version: bi_audit::SCHEMA_VERSION,
-    };
-    let write = async {
-        let mut transaction = state
-            .db
-            .begin()
-            .await
-            .map_err(|error| error.problem_code(UNAVAILABLE))?;
-        let left = budget.saturating_sub(started.elapsed()).as_millis().max(1);
-        sqlx::query("SELECT set_config('statement_timeout', $1, true)")
-            .bind(left.to_string())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| UNAVAILABLE)?;
-        crate::audit::append(&mut transaction, &event)
-            .await
-            .map_err(|_| UNAVAILABLE)?;
-        transaction.commit().await.map_err(|_| UNAVAILABLE)
-    };
-    tokio::time::timeout(budget.saturating_sub(started.elapsed()), write)
-        .await
-        .map_err(|_| UNAVAILABLE)?
+    crate::audit::record_within(
+        &state.db,
+        crate::audit::HttpRecord {
+            actor: &principal.session.user.id,
+            request_id,
+            action: bi_audit::Action::Denial,
+            result: bi_audit::ResultCode::Denied,
+            resource_type: "query_endpoint",
+            resource_id: "legacy_queries",
+            // An operational closure, not a decision of the permission engine;
+            // the refused body is never read.
+            policy_decision_id: None,
+        },
+        state.query_timeout,
+    )
+    .await
 }
 
 #[cfg(test)]

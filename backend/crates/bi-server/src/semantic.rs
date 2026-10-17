@@ -414,7 +414,7 @@ impl Session {
         let identity = principal.federated_identity.as_ref();
         Self {
             user: principal.session.user.id.clone(),
-            groups: identity.map(|i| i.groups.clone()).unwrap_or_default(),
+            groups: principal.verified_groups().to_vec(),
             attributes: identity.map(|i| i.attributes.clone()).unwrap_or_default(),
         }
     }

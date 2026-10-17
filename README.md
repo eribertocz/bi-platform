@@ -63,6 +63,31 @@ Se rechazan enlaces simbólicos y archivos mayores que 8 MiB; el máximo es
 100 modelos, 32 MiB en conjunto y 4096 entradas en `metrics/`.
 La pila de desarrollo monta `examples/models-project/` como proyecto de ejemplo.
 
+Modelos es la inspección del catálogo completo del proyecto: definiciones,
+archivos inválidos y metadatos confidenciales o restringidos, sin valores ni
+permiso de consulta. Exige `view` sobre el recurso reservado
+`Model::"project:catalog"`, que se decide con las políticas y los miembros de
+`policies/` antes de leer `metrics/`; cada decisión queda en la auditoría antes
+de responder. Las políticas base lo conceden a `modeler` y `admin`; cualquier
+otro rol, o una identidad sin membresía, recibe 403 `models_forbidden`. Para
+concederlo a otro rol, copia las políticas base (`backend/crates/sef-authz/src/base.cedar`)
+en `policies/` (las del proyecto sustituyen a las base) y añade una regla
+dirigida exactamente a ese recurso:
+
+```cedar
+@id("catalog_reader.inspect")
+permit (
+  principal in Role::"catalog_reader",
+  action == Action::"view",
+  resource == Model::"project:catalog"
+);
+```
+
+La regla solo abre la lectura de definiciones: no concede consultar métricas
+ni filas, que se siguen decidiendo miembro a miembro. En la demo,
+`examples/models-project/policies/members.yaml` asigna `modeler` a
+`synthetic-modeler`; entra con ese usuario para revisar Modelos.
+
 Métricas de consulta M15: `OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318`
 habilita exportación OTLP/HTTP protobuf a `/v1/metrics`. Sin la variable, la
 instrumentación es no-op y no inicia el SDK ni hilos de exportación.
@@ -164,8 +189,8 @@ Requiere Node >=22.17 (CI usa 24.21.0). En `frontend/`: `npm ci` y
 a la API Rust en `http://127.0.0.1:8080`. En `/estado` se consulta la API real;
 si no está disponible, se muestra el error y se puede reintentar.
 
-La pila Compose habilita el login de desarrollo y configura dos identidades
-sintéticas. Abre `/login` para entrar; `/estado` sigue siendo público. El resto
+La pila Compose habilita el login de desarrollo y configura tres identidades
+sintéticas (analista, lector y modelador). Abre `/login` para entrar; `/estado` sigue siendo público. El resto
 de la UI requiere sesión y todo `/api/v1/**` la valida en PostgreSQL, salvo los
 endpoints de login de desarrollo y OIDC. Logout revoca la sesión en el servidor.
 

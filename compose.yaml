@@ -15,7 +15,7 @@ services:
       # deployment keeps the default restricted mode: see README.
       BI_METADATA_MODE: development
       BI_PUBLIC_ORIGIN: http://127.0.0.1:8080
-      BI_DEV_USERS: '[{"id":"synthetic-analyst","display_name":"Analista sintético"},{"id":"synthetic-viewer","display_name":"Lector sintético"}]'
+      BI_DEV_USERS: '[{"id":"synthetic-analyst","display_name":"Analista sintético"},{"id":"synthetic-viewer","display_name":"Lector sintético"},{"id":"synthetic-modeler","display_name":"Modelador sintético"}]'
       BI_LAKE_CATALOG: dbname=bi_lake_catalog host=postgres port=5432 user=bi password=bi
       # The stack's own catalog: DuckLake binds a catalog to one DATA_PATH, so
       # it must not share metadata with `cargo run` on the host (data/lake).

@@ -57,7 +57,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real. */
+    /**
+     * Recarga metrics/*.yaml, *.yml y *.json del proyecto y compila cada archivo con el catálogo analítico real.
+     * @description Requiere `view` sobre `Model::"project:catalog"`: inspección del catálogo completo del proyecto, incluidos archivos inválidos y metadatos confidenciales o restringidos. No concede consultar, visualizar ni extraer datos. La decisión se toma antes de leer `metrics/` y se audita antes de responder.
+     */
     get: operations['listModels'];
     put?: never;
     post?: never;
@@ -841,6 +844,15 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
+      /** @description Sin permiso para revisar el catálogo del proyecto (`models_forbidden`); sin nada del catálogo */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
       /** @description Demasiadas cargas simultáneas */
       429: {
         headers: {
@@ -850,7 +862,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Motor no disponible, lectura fallida o metadatos no listos (`metadata_not_ready`) */
+      /** @description Motor no disponible, lectura fallida, políticas o miembros ilegibles o inválidos (`policies_invalid`), auditoría no disponible (`audit_unavailable`) o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -859,7 +871,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Tiempo de compilación agotado */
+      /** @description Tiempo agotado al revisar los permisos o al compilar */
       504: {
         headers: {
           [name: string]: unknown;
