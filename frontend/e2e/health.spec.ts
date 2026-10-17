@@ -30,6 +30,13 @@ test('Estado del sistema reflects real PostgreSQL availability and recovery', as
   ).toBeVisible();
   const live = page.getByRole('region', { name: 'Proceso de la API' });
   const ready = page.getByRole('region', { name: 'Listo para servir' });
+  // The status shown in one dependency's own row of the readiness card.
+  const dependencyStatus = (name: string) =>
+    ready
+      .getByRole('listitem')
+      .filter({ has: page.getByText(name, { exact: true }) })
+      .locator('span')
+      .last();
   await expect(live.getByText('OK (HTTP 200)', { exact: true })).toBeVisible();
   await expect(ready.getByText('OK (HTTP 200)', { exact: true })).toBeVisible();
   await expect(ready.getByText('postgres', { exact: true })).toBeVisible();
@@ -51,7 +58,10 @@ test('Estado del sistema reflects real PostgreSQL availability and recovery', as
     await expect.poll(async () => (await request.get('/health/ready')).status()).toBe(503);
     await page.getByRole('button', { name: 'Actualizar estado' }).click();
     await expect(ready.getByText('No listo (HTTP 503)', { exact: true })).toBeVisible();
-    await expect(ready.getByText('No disponible', { exact: true })).toBeVisible();
+    // After a loss nothing about the schema is trusted until revalidated (#115).
+    for (const dependency of ['postgres', 'migrations']) {
+      await expect(dependencyStatus(dependency)).toHaveText('No disponible');
+    }
     await expect(live.getByText('OK (HTTP 200)', { exact: true })).toBeVisible();
   } finally {
     compose('start');
@@ -60,5 +70,8 @@ test('Estado del sistema reflects real PostgreSQL availability and recovery', as
   await expect.poll(async () => (await request.get('/health/ready')).status()).toBe(200);
   await page.getByRole('button', { name: 'Actualizar estado' }).click();
   await expect(ready.getByText('OK (HTTP 200)', { exact: true })).toBeVisible();
+  for (const dependency of ['postgres', 'migrations']) {
+    await expect(dependencyStatus(dependency)).toHaveText('OK');
+  }
   expect(errors).toEqual([]);
 });
