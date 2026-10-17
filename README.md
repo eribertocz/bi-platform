@@ -131,6 +131,29 @@ abarca todo el RSS del proceso. El rechazo HTTP 422 `query_memory_limit` recomie
 la consulta y se cuenta en `bi_query_rejected{reason="query_memory_limit"}`. Véase
 [ADR 0013](docs/decisiones/0013-presupuesto-memoria-consulta.md) para alcance y costes.
 
+### Consulta de demostración (Explorar)
+
+`POST /api/v1/queries`, la consulta de Explorar, compila consultas del catálogo G1 y ejecuta
+DuckDB sin el motor de permisos ni un plan semántico certificado. Por eso solo responde en
+desarrollo sintético local, cuando se cumple todo lo siguiente:
+
+- build con `dev-auth`;
+- `BI_METADATA_MODE=development` y `BI_DEV_USERS` configurados;
+- `BI_PUBLIC_ORIGIN` loopback y sin OIDC;
+- sesión del login de desarrollo;
+- el propio servidor cargó al arrancar el fixture sintético de ventas (`BI_DEV_FIXTURE_ROWS`).
+
+Al reutilizar un lago, el servidor compara la tabla con el fixture generado fila por fila
+antes de darla por buena. Si difiere, registra `fixture_altered` y no la toca. Para
+recuperar la demo, usa un lago nuevo (otros `BI_LAKE_METADATA_SCHEMA` y
+`BI_LAKE_DATA_PATH`) o, en la pila Compose, recrea sus volúmenes.
+
+En cualquier otro caso responde 403 `legacy_query_disabled` sin leer el cuerpo, también con
+OIDC o para administradores, y registra la denegación en la auditoría. Si no puede
+registrarla dentro de `BI_QUERY_TIMEOUT_MS` (por defecto 10 s), responde 503 `audit_unavailable` y tampoco
+ejecuta. Las consultas fuera de esta demo llegarán por el flujo semántico, que aún no está
+disponible.
+
 ## Frontend
 
 Requiere Node >=22.17 (CI usa 24.21.0). En `frontend/`: `npm ci` y
