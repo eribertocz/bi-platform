@@ -2,7 +2,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use bi_server::auth::AuthConfig;
-use bi_server::db::{self, Database};
+use bi_server::db::Database;
+use bi_server::metadata::MetadataMode;
 use bi_server::problem::Problem;
 use bi_server::{AppState, router};
 use http_body_util::BodyExt;
@@ -24,7 +25,8 @@ fn offline(config: AuthConfig) -> Router {
     router(AppState {
         auth: config,
         ..AppState::new(Database::start(
-            db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+            &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
+            MetadataMode::Development,
         ))
     })
 }
@@ -181,9 +183,13 @@ fn auth_configuration_fails_closed_and_redacts_invalid_values() {
     }
 }
 
+/// Origin is rejected before anything else; with metadata not ready, every
+/// other login attempt is refused by the admission point, before any work.
+/// `postgres::login_validates_payload_before_writing` covers the payload
+/// checks once metadata is ready.
 #[cfg(feature = "dev-auth")]
 #[tokio::test]
-async fn login_validates_origin_and_payload_before_database_access() {
+async fn login_validates_origin_and_refuses_before_metadata_is_ready() {
     let app = offline(config("http://127.0.0.1:8080"));
     for origin in [
         None,
@@ -206,7 +212,12 @@ async fn login_validates_origin_and_payload_before_database_access() {
         )
         .await;
     }
-    for body in ["broken", r#"{"user_id":"analyst","role":"admin"}"#] {
+    for body in [
+        "broken",
+        r#"{"user_id":"analyst","role":"admin"}"#,
+        r#"{"user_id":"unknown"}"#,
+        r#"{"user_id":"analyst"}"#,
+    ] {
         assert_problem(
             send(
                 &app,
@@ -217,25 +228,11 @@ async fn login_validates_origin_and_payload_before_database_access() {
                 body,
             )
             .await,
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "metadata_not_ready",
         )
         .await;
     }
-    assert_problem(
-        send(
-            &app,
-            "POST",
-            "/api/v1/dev/login",
-            None,
-            Some("http://127.0.0.1:8080"),
-            r#"{"user_id":"unknown"}"#,
-        )
-        .await,
-        StatusCode::UNAUTHORIZED,
-        "unknown_dev_user",
-    )
-    .await;
     for headers in [
         vec![
             ("origin", "http://127.0.0.1:8080"),
@@ -294,22 +291,24 @@ mod postgres {
     use axum::http::StatusCode;
     use bi_server::auth::Session;
     use bi_server::db::Database;
+    use bi_server::metadata::MetadataMode;
     use bi_server::{AppState, router};
     use http_body_util::BodyExt;
     use sha2::{Digest, Sha256};
     use sqlx::PgPool;
 
-    async fn app(pool: PgPool, origin: &str) -> Router {
-        let db = Database::start(pool);
+    async fn app(pool: &PgPool, origin: &str) -> (Router, Database) {
+        let db = Database::start(&pool.connect_options(), MetadataMode::Development);
         assert!(
-            tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_migrated())
+            tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_ready())
                 .await
                 .unwrap()
         );
-        router(AppState {
+        let app = router(AppState {
             auth: config(origin),
-            ..AppState::new(db)
-        })
+            ..AppState::new(db.clone())
+        });
+        (app, db)
     }
 
     async fn login(app: &Router, origin: &str, previous: Option<&str>, user: &str) -> String {
@@ -341,9 +340,9 @@ mod postgres {
     #[sqlx::test(migrations = false)]
     async fn persistent_session_rotates_revokes_and_expires(pool: PgPool) {
         let origin = "http://127.0.0.1:8080";
-        let first_app = app(pool.clone(), origin).await;
+        let (first_app, first_db) = app(&pool, origin).await;
         let first = login(&first_app, origin, None, "analyst").await;
-        let restarted = app(pool.clone(), origin).await;
+        let (restarted, restarted_db) = app(&pool, origin).await;
         assert_eq!(
             send(&restarted, "GET", "/api/v1/session", Some(&first), None, "")
                 .await
@@ -413,12 +412,14 @@ mod postgres {
         .await;
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.sessions WHERE octet_length(token_hash) = 32 AND data_scope = 'synthetic'").fetch_one(&pool).await.unwrap();
         assert_eq!(count, 3);
+        first_db.close().await;
+        restarted_db.close().await;
     }
 
     #[sqlx::test(migrations = false)]
     async fn https_cookies_and_session_store_failure(pool: PgPool) {
         let origin = "https://example.test";
-        let app = app(pool.clone(), origin).await;
+        let (app, db) = app(&pool, origin).await;
         let cookie = login(&app, origin, None, "analyst").await;
         let response = send(
             &app,
@@ -435,12 +436,45 @@ mod postgres {
                 .unwrap()
                 .contains("; Secure")
         );
-        pool.close().await;
+        db.close().await;
+        // A closed store stops admission before any handler runs.
         assert_problem(
             send(&app, "GET", "/api/v1/session", Some(&cookie), None, "").await,
             StatusCode::SERVICE_UNAVAILABLE,
-            "session_store_unavailable",
+            "metadata_not_ready",
         )
         .await;
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn login_validates_payload_before_writing(pool: PgPool) {
+        let origin = "http://127.0.0.1:8080";
+        let (app, db) = app(&pool, origin).await;
+        for (body, status, code) in [
+            ("broken", StatusCode::BAD_REQUEST, "invalid_request"),
+            (
+                r#"{"user_id":"analyst","role":"admin"}"#,
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+            ),
+            (
+                r#"{"user_id":"unknown"}"#,
+                StatusCode::UNAUTHORIZED,
+                "unknown_dev_user",
+            ),
+        ] {
+            assert_problem(
+                send(&app, "POST", "/api/v1/dev/login", None, Some(origin), body).await,
+                status,
+                code,
+            )
+            .await;
+        }
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0, "rejected logins never write a session");
+        db.close().await;
     }
 }

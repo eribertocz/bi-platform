@@ -508,7 +508,7 @@ pub(crate) struct NoParameters {}
         (status = 403, description = "Origin inválido", body = Problem),
         (status = 404, description = "OIDC deshabilitado", body = Problem),
         (status = 429, description = "Admisión OIDC limitada", body = Problem),
-        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible", body = Problem)))]
+        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible, o metadatos no listos (`metadata_not_ready`)", body = Problem)))]
 pub(crate) async fn start(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,
@@ -570,8 +570,19 @@ pub(crate) async fn start(
         .url();
     // Bounded lifetime, opportunistic cleanup; plaintext nonce/verifier never leave the server.
     let previous = auth::token_hash(&headers);
+    let tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            return failure(
+                &state,
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.problem_code("session_store_unavailable"),
+                &id,
+            );
+        }
+    };
     let result = save_attempt(
-        state.db.pool().clone(),
+        tx,
         Sha256::digest(state_token.as_bytes()).to_vec(),
         Sha256::digest(browser.as_bytes()).to_vec(),
         nonce,
@@ -604,14 +615,13 @@ pub(crate) async fn start(
 }
 
 async fn save_attempt(
-    pool: sqlx::PgPool,
+    mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
     state_hash: Vec<u8>,
     browser_hash: Vec<u8>,
     nonce: String,
     verifier: String,
     previous: Option<Vec<u8>>,
 ) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
     // Serialize cleanup/count/insert across processes sharing this database.
     sqlx::query("LOCK TABLE bi_meta.oidc_attempts IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut *tx)
@@ -652,7 +662,7 @@ pub(crate) struct Callback {
         (status = 401, description = "Intento o token inválido", body = Problem),
         (status = 404, description = "OIDC deshabilitado", body = Problem),
         (status = 429, description = "Admisión OIDC limitada", body = Problem),
-        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible", body = Problem)))]
+        (status = 503, description = "Proveedor, PostgreSQL o capacidad de intentos no disponible, o metadatos no listos (`metadata_not_ready`)", body = Problem)))]
 pub(crate) async fn callback(
     State(state): State<AppState>,
     Extension(id): Extension<RequestId>,
@@ -666,22 +676,22 @@ pub(crate) async fn callback(
     }
     let mut response = complete(&state, &id, &headers, query).await;
     if response.status() == StatusCode::UNAUTHORIZED {
-        let result = async {
-            let event = login_event(&id, None).await?;
-            let mut tx = state.db.pool().begin().await.map_err(|_| ())?;
+        const UNAVAILABLE: &str = "audit_store_unavailable";
+        let recorded = async {
+            let event = login_event(&id, None).await.map_err(|()| UNAVAILABLE)?;
+            let mut tx = state
+                .db
+                .begin()
+                .await
+                .map_err(|error| error.problem_code(UNAVAILABLE))?;
             crate::audit::append(&mut tx, &event)
                 .await
-                .map_err(|_| ())?;
-            tx.commit().await.map_err(|_| ())
+                .map_err(|_| UNAVAILABLE)?;
+            tx.commit().await.map_err(|_| UNAVAILABLE)
         }
         .await;
-        if result.is_err() {
-            response = failure(
-                &state,
-                StatusCode::SERVICE_UNAVAILABLE,
-                "audit_store_unavailable",
-                &id,
-            );
+        if let Err(code) = recorded {
+            response = failure(&state, StatusCode::SERVICE_UNAVAILABLE, code, &id);
         }
     }
     response.headers_mut().append(
@@ -715,9 +725,22 @@ async fn complete(
     let Some(browser) = browser_binding(headers) else {
         return failure(state, StatusCode::UNAUTHORIZED, "oidc_attempt_invalid", id);
     };
+    let mut connection = match state.db.acquire().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            return failure(
+                state,
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.problem_code("session_store_unavailable"),
+                id,
+            );
+        }
+    };
     let attempt = sqlx::query("DELETE FROM bi_meta.oidc_attempts WHERE state_hash = $1 AND browser_hash = $2 AND expires_at > clock_timestamp() RETURNING nonce, verifier, previous_session")
         .bind(Sha256::digest(state_token.as_bytes()).to_vec()).bind(browser)
-        .fetch_optional(state.db.pool()).await;
+        .fetch_optional(&mut *connection).await;
+    // Not held across the exchange with the provider.
+    drop(connection);
     let row = match attempt {
         Ok(Some(row)) => row,
         Ok(None) => return failure(state, StatusCode::UNAUTHORIZED, "oidc_attempt_invalid", id),
@@ -809,8 +832,18 @@ async fn create_session(
     let Ok(identity) = serde_json::to_string(&identity) else {
         return failure(state, StatusCode::UNAUTHORIZED, "oidc_token_invalid", id);
     };
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            return failure(
+                state,
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.problem_code("session_store_unavailable"),
+                id,
+            );
+        }
+    };
     let result = async {
-        let mut tx = state.db.pool().begin().await?;
         if let Some(previous) = previous {
             sqlx::query("UPDATE bi_meta.sessions SET revoked_at = clock_timestamp() WHERE token_hash = $1")
                 .bind(previous).execute(&mut *tx).await?;

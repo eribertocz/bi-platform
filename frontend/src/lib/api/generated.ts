@@ -192,7 +192,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Readiness: PostgreSQL accesible, migraciones aplicadas y, si está habilitado, el lago analítico listo. */
+    /**
+     * Readiness: PostgreSQL accesible, esquema de metadatos compatible con esta versión, rol de metadatos seguro (`metadata_security`, solo en el modo restringido por defecto) y, si está habilitado, el lago analítico listo.
+     * @description En el modo restringido el servidor nunca migra: `migrations` exige que las migraciones las haya aplicado `bi-server migrate` con la credencial administrativa, sin versiones fallidas, desconocidas ni con checksum distinto. Mientras no esté listo, las operaciones de `/api/v1` responden 503 `metadata_not_ready`.
+     */
     get: operations['getReadiness'];
     put?: never;
     post?: never;
@@ -262,6 +265,7 @@ export interface components {
       /**
        * @example postgres
        * @example migrations
+       * @example metadata_security
        */
       name: string;
       status: components['schemas']['HealthStatus'];
@@ -725,7 +729,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description No se pudo crear la sesión */
+      /** @description No se pudo crear la sesión, o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -799,7 +803,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description PostgreSQL no disponible */
+      /** @description PostgreSQL no disponible, o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -846,7 +850,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Motor no disponible o lectura fallida */
+      /** @description Motor no disponible, lectura fallida o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -914,7 +918,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description Proveedor, PostgreSQL o capacidad de intentos no disponible */
+      /** @description Proveedor, PostgreSQL o capacidad de intentos no disponible, o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -999,7 +1003,7 @@ export interface operations {
           'application/json': components['schemas']['Problem'];
         };
       };
-      /** @description Proveedor, PostgreSQL o capacidad de intentos no disponible */
+      /** @description Proveedor, PostgreSQL o capacidad de intentos no disponible, o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -1086,7 +1090,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Motor analítico no disponible */
+      /** @description Motor analítico no disponible o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -1173,7 +1177,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description Políticas no válidas, motor o auditoría no disponibles */
+      /** @description Políticas no válidas, motor o auditoría no disponibles, o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;
@@ -1220,7 +1224,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description PostgreSQL no disponible */
+      /** @description PostgreSQL no disponible, o metadatos no listos (`metadata_not_ready`) */
       503: {
         headers: {
           [name: string]: unknown;

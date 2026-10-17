@@ -127,6 +127,48 @@ fn starts_with_optional_metrics(endpoint: &str, valid: bool) {
     );
 }
 
+/// `migrate` is finite: 2 for missing or invalid configuration, 1 when the
+/// database or a migration fails, and only stable codes, never the URL or
+/// its password, on either stream.
+#[test]
+fn migrate_subcommand_exit_codes_are_stable_and_redacted() {
+    let decoy = "decoy-password-7f3a";
+    for (url, code, message) in [
+        (None, 2, "metadata_database_url_required"),
+        (
+            Some("not a url".to_owned()),
+            2,
+            "metadata_invalid_database_url",
+        ),
+        (
+            Some(format!("postgres://bi:{decoy}@127.0.0.1:1/bi")),
+            1,
+            "metadata_migration_failed",
+        ),
+    ] {
+        let mut command = Command::new(BINARY);
+        command.arg("migrate").env_remove("BI_DATABASE_URL");
+        if let Some(url) = &url {
+            command.env("BI_DATABASE_URL", url);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(code), "{url:?}");
+        assert_eq!(output.stdout, b"", "no partial receipt: {url:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(stderr.trim(), message, "{url:?}");
+        assert!(!stderr.contains(decoy) && !stderr.contains("postgres://"));
+    }
+    let output = Command::new(BINARY)
+        .args(["migrate", "--force"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "unknown arguments are refused"
+    );
+}
+
 #[test]
 fn openapi_subcommand_prints_the_contract() {
     let output = Command::new(BINARY).arg("openapi").output().unwrap();
