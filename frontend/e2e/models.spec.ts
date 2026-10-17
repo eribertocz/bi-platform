@@ -159,3 +159,84 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   );
   expect(errors).toEqual([]);
 });
+
+const DENIED =
+  'No tienes permiso para revisar las definiciones y los errores de este proyecto. Solicita acceso a quien lo administra.';
+const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21aa', 'wcag22aa', 'best-practice'];
+
+test('real server: denial, temporary failure and recovery without keeping the catalog', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  const members = fileURLToPath(
+    new URL('../../examples/models-project/policies/members.yaml', import.meta.url),
+  );
+  const original = readFileSync(members, 'utf8');
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  /** Nothing of the catalog stays in the page, visible or announced. */
+  const assertNoCatalog = async () => {
+    const text = await page.locator('body').innerText();
+    for (const sentinel of ['Ventas', 'Origen inexistente', 'importe_total', 'metrics/']) {
+      expect(text).not.toContain(sentinel);
+    }
+    expect(await page.locator('body').ariaSnapshot()).not.toContain('Ventas');
+  };
+  const login = async (user: string) => {
+    await page.goto('/login');
+    await page.getByLabel('Usuario de desarrollo').selectOption(user);
+    await page.getByRole('button', { name: 'Entrar', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Inicio', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: 'Modelos', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Modelos', exact: true })).toBeVisible();
+  };
+  try {
+    await login('synthetic-modeler');
+    await page.getByRole('button', { name: 'Ventas', exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Ventas', exact: true })).toContainText(
+      'importe_total',
+    );
+
+    // Membership withdrawn: the same session is refused and the catalog goes.
+    const withdrawn = original.replace(/^ {2}synthetic-modeler: \[modeler\]\r?\n/m, '');
+    expect(withdrawn).not.toBe(original);
+    writeFileSync(members, withdrawn);
+    await page.getByRole('button', { name: 'Actualizar modelos' }).click();
+    const denied = page.getByRole('alert');
+    await expect(denied).toContainText('No tienes acceso a los modelos de este proyecto');
+    await expect(denied).toContainText(DENIED);
+    await assertNoCatalog();
+    expect(await denied.ariaSnapshot()).toContain(DENIED);
+    expect((await new AxeBuilder({ page }).withTags(AXE_TAGS).analyze()).violations).toEqual([]);
+
+    // Invalid access configuration: a failure, not a lack of permission.
+    writeFileSync(members, ['version: 2', ''].join('\n'));
+    const recheck = page.getByRole('button', { name: 'Comprobar el acceso de nuevo' });
+    await recheck.focus();
+    await page.keyboard.press('Enter');
+    const unavailable = page.getByRole('alert');
+    await expect(unavailable).toContainText('Los modelos no están disponibles en este momento');
+    await expect(unavailable).toContainText('no son válidos');
+    await expect(unavailable).not.toContainText('No tienes acceso');
+    expect(await unavailable.ariaSnapshot()).toContain('Los modelos no están disponibles');
+    await assertNoCatalog();
+    expect((await new AxeBuilder({ page }).withTags(AXE_TAGS).analyze()).violations).toEqual([]);
+
+    // Restored: the real content comes back, and nothing reopens by itself.
+    writeFileSync(members, original);
+    await page.getByRole('button', { name: 'Reintentar' }).click();
+    await expect(page.getByRole('list', { name: 'Modelos del proyecto' })).toContainText('Válido');
+    await expect(page.getByRole('region', { name: 'Ventas', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+
+    // Another user after logout never sees the previous catalog.
+    await page.getByRole('button', { name: 'Cerrar sesión' }).click();
+    await expect(page).toHaveURL('/login');
+    await login('synthetic-viewer');
+    await expect(page.getByRole('alert')).toContainText(DENIED);
+    await assertNoCatalog();
+  } finally {
+    writeFileSync(members, original);
+  }
+  expect(errors).toEqual([]);
+});
