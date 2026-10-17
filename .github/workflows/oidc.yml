@@ -46,7 +46,17 @@ jobs:
             if curl -fsS http://127.0.0.1:18071/realms/bi-test/.well-known/openid-configuration >/dev/null; then break; fi
             sleep 2
           done
-          LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi BI_PUBLIC_ORIGIN=http://127.0.0.1:18070 BI_BIND_ADDR=127.0.0.1:18070 BI_STATIC_DIR=frontend/build BI_ANALYTICS=off BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test BI_OIDC_CLIENT_ID=bi-platform backend/target/debug/bi-server > /tmp/oidc-server.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if pg_isready -q -h 127.0.0.1 -p 18072 -U bi; then break; fi
+            sleep 1
+          done
+          # Production sequence (#115): the owner migrates, the runtime role gets
+          # only the documented grants, and the server runs in the default
+          # restricted mode as that role. Test-only credentials.
+          LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi backend/target/debug/bi-server migrate
+          psql postgres://bi:bi@127.0.0.1:18072/bi -v ON_ERROR_STOP=1 -c "CREATE ROLE bi_runtime LOGIN PASSWORD 'runtime-test-only'"
+          psql postgres://bi:bi@127.0.0.1:18072/bi -v ON_ERROR_STOP=1 -f backend/crates/bi-server/admin/runtime-grants.sql
+          LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi_runtime:runtime-test-only@127.0.0.1:18072/bi BI_PUBLIC_ORIGIN=http://127.0.0.1:18070 BI_BIND_ADDR=127.0.0.1:18070 BI_STATIC_DIR=frontend/build BI_ANALYTICS=off BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test BI_OIDC_CLIENT_ID=bi-platform backend/target/debug/bi-server > /tmp/oidc-server.log 2>&1 &
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:18070/health/ready >/dev/null; then exit 0; fi
             sleep 2

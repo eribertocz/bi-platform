@@ -887,6 +887,105 @@ mod restricted {
         roles.drop().await;
     }
 
+    fn percentile(samples: &mut [Duration], fraction: f64) -> f64 {
+        samples.sort();
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )] // A rank within a few hundred samples.
+        let rank = ((samples.len() as f64 * fraction).ceil() as usize).max(1) - 1;
+        samples[rank].as_secs_f64() * 1000.0
+    }
+
+    /// Measurement for #115, without thresholds on shared machines: what
+    /// one validation (role and schema inspection) costs, the latency of hot
+    /// authenticated requests through the admission point, and proof that
+    /// those requests never re-validate (the validation counter is unchanged).
+    #[sqlx::test(migrations = false)]
+    async fn admission_cost_baseline(pool: PgPool) {
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{
+            AggregatedMetrics, MetricData, ResourceMetrics, ScopeMetrics, SumDataPoint,
+        };
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
+        const WARMUP: usize = 20;
+        const SAMPLES: usize = 200;
+        const INSPECTIONS: usize = 30;
+
+        let roles = Roles::create(&pool).await;
+        roles.migrate().await;
+        roles.grant().await;
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let db = Database::start_observed(
+            db::lazy_pool_with(roles.options(&roles.runtime)),
+            MetadataMode::Restricted,
+            MetadataMetrics::new(&provider.meter("test")),
+        );
+        ready(&db).await;
+        let validations = || {
+            provider.force_flush().unwrap();
+            exporter
+                .get_finished_metrics()
+                .unwrap()
+                .iter()
+                .flat_map(ResourceMetrics::scope_metrics)
+                .flat_map(ScopeMetrics::metrics)
+                .filter(|metric| metric.name() == "bi.metadata.validation.attempts")
+                .filter_map(|metric| match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                        Some(sum.data_points().map(SumDataPoint::value).sum::<u64>())
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or_default()
+        };
+
+        let mut connection = db.pool().acquire().await.unwrap();
+        let mut inspection = Vec::with_capacity(INSPECTIONS);
+        for _ in 0..INSPECTIONS {
+            let started = Instant::now();
+            bi_server::metadata::inspect::facts(&mut connection)
+                .await
+                .unwrap();
+            inspection.push(started.elapsed());
+        }
+        drop(connection);
+
+        let app = app(db.clone());
+        let (_, _, cookie) = send(&app, "POST", "/api/v1/dev/login", None).await;
+        let cookie = cookie.unwrap();
+        for _ in 0..WARMUP {
+            send(&app, "GET", "/api/v1/session", Some(&cookie)).await;
+        }
+        let before = validations();
+        let mut hot = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let started = Instant::now();
+            let (status, _, _) = send(&app, "GET", "/api/v1/session", Some(&cookie)).await;
+            hot.push(started.elapsed());
+            assert_eq!(status, StatusCode::OK);
+        }
+        let after = validations();
+        assert_eq!(after, before, "hot requests never re-validate");
+        println!(
+            "metadata_admission inspections={INSPECTIONS} inspection_p50_ms={:.3} inspection_p95_ms={:.3} \
+             warmup={WARMUP} n={SAMPLES} session_p50_ms={:.3} session_p95_ms={:.3} \
+             validations_during_hot_requests={}",
+            percentile(&mut inspection, 0.50),
+            percentile(&mut inspection, 0.95),
+            percentile(&mut hot, 0.50),
+            percentile(&mut hot, 0.95),
+            after - before,
+        );
+        db.pool().close().await;
+        roles.drop().await;
+    }
+
     /// Runs the real `bi-server`, with its production log setup (default
     /// `info` filter, text format), until its output names `expected`, and
     /// returns everything it printed. A separate process per state, so no
