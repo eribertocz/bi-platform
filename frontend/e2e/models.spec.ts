@@ -16,6 +16,7 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   page.on('pageerror', (error) => errors.push(error.message));
   await page.goto('/modelos');
   await expect(page).toHaveURL('/login');
+  await page.getByLabel('Usuario de desarrollo').selectOption('synthetic-modeler');
   await page.getByRole('button', { name: 'Entrar', exact: true }).click();
   await page.getByRole('link', { name: 'Modelos', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Modelos', exact: true })).toBeVisible();

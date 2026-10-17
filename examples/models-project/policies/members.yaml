@@ -5,3 +5,4 @@ version: 1
 users:
   synthetic-analyst: [analyst]
   synthetic-viewer: [viewer]
+  synthetic-modeler: [modeler]
