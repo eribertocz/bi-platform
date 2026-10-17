@@ -722,6 +722,9 @@ pub(crate) struct Compiled {
     pub(crate) loaded: sef_ossie::Loaded,
     pub(crate) document: sef_ossie::csmir::CompiledDocument,
     pub(crate) text: String,
+    /// The engine's description of every source the model reads, as it was
+    /// when the file compiled: what an execution of this model lowers onto.
+    pub(crate) catalog: Catalog,
 }
 
 /// Why a project file did not compile: the model's name when the document
@@ -776,6 +779,7 @@ pub(crate) fn compile(
             loaded,
             document,
             text,
+            catalog,
         }),
         Err(ds) => Err(Rejected {
             name,
@@ -797,6 +801,7 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
             loaded,
             document: compiled,
             text,
+            ..
         }) => {
             let name = loaded.model.name.clone();
             let definition = compiled.semantic.definition();
