@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use bi_audit::ResultCode;
-use sef_authz::{Action, AttrValue, Context, Resource, ResourceKind};
+use sef_authz::{Action, AttrValue, Context, PolicySnapshot, Principal, Resource, ResourceKind};
 
 use crate::audit::HttpRecord;
 use crate::db::Database;
@@ -63,10 +63,20 @@ pub fn decide(project: &Path, user: &str, groups: &[String]) -> Verdict {
             return Verdict::Unavailable;
         }
     };
-    let principal = access::principal(&access.members, user, groups);
-    let decision = sef_authz::authorize(
+    decide_for(
         &access.snapshot,
-        &principal,
+        &access::principal(&access.members, user, groups),
+    )
+}
+
+/// Decides on a snapshot already loaded for the request, so a route that
+/// needs the access configuration anyway (the semantic path) never reads it
+/// twice nor decides on another version.
+#[must_use]
+pub fn decide_for(snapshot: &PolicySnapshot, principal: &Principal) -> Verdict {
+    let decision = sef_authz::authorize(
+        snapshot,
+        principal,
         Action::View,
         &resource(),
         &Context::new(),
