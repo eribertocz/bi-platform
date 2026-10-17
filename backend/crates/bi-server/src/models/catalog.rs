@@ -148,6 +148,8 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use proptest::prelude::*;
 
     use super::*;
@@ -172,12 +174,29 @@ mod tests {
         p
     }
 
+    /// `members.yaml` v1 with these users and groups, each with its roles.
+    fn members(users: &[(&str, &[&str])], groups: &[(&str, &[&str])]) -> String {
+        use std::fmt::Write as _;
+        let section = |text: &mut String, title: &str, entries: &[(&str, &[&str])]| {
+            writeln!(text, "{title}:").unwrap();
+            for (name, roles) in entries {
+                writeln!(text, "  {name}: [{}]", roles.join(", ")).unwrap();
+            }
+        };
+        let mut text = String::from("version: 1\n");
+        if users.is_empty() {
+            text.push_str("users: {}\n");
+        } else {
+            section(&mut text, "users", users);
+        }
+        if !groups.is_empty() {
+            section(&mut text, "groups", groups);
+        }
+        text
+    }
+
     fn base_with(extra: &str) -> String {
-        format!(
-            "{}
-{extra}",
-            sef_authz::BASE_POLICIES
-        )
+        format!("{}\n{extra}", sef_authz::BASE_POLICIES)
     }
 
     fn allowed(verdict: &Verdict) -> bool {
@@ -213,24 +232,14 @@ mod tests {
             mapped in any::<bool>(),
             user in prop::sample::select(&["ana", "admin", "modeler", "Role::\"admin\""][..]),
         ) {
-            let list = |roles: &std::collections::BTreeSet<&str>| {
-                roles.iter().copied().collect::<Vec<_>>().join(", ")
-            };
+            let user_list: Vec<&str> = user_roles.iter().copied().collect();
+            let group_list: Vec<&str> = group_roles.iter().copied().collect();
             let p = project(
-                &format!(
-                    "version: 1
-users:
-  ana: [{}]
-groups:
-  equipo: [{}]
-",
-                    list(&user_roles),
-                    list(&group_roles)
-                ),
+                &members(&[("ana", &user_list)], &[("equipo", &group_list)]),
                 None,
             );
             let groups = vec![if mapped { "equipo" } else { "otro-equipo" }.to_owned()];
-            let mut held = if user == "ana" { user_roles } else { std::collections::BTreeSet::default() };
+            let mut held = if user == "ana" { user_roles } else { BTreeSet::new() };
             if mapped {
                 held.extend(group_roles);
             }
@@ -251,30 +260,29 @@ groups:
             case in 0..7_usize,
             role in prop::sample::select(&["modeler", "admin"][..]),
         ) {
-            let granted = format!("version: 1
-users:
-  ana: [{role}]
-");
+            let granted = members(&[("ana", &[role])], &[]);
             let p = project(&granted, None);
             prop_assert!(allowed(&decide(p.path(), "ana", &[])));
             let forbid = r#"forbid (principal, action == Action::"view", resource == Model::"project:catalog");"#;
-            let failing = "@id(\"all\")
-permit (principal, action, resource);
-                           @id(\"overflow\")
-forbid (principal, action, resource)                            when { 9223372036854775807 + 1 > 0 };";
+            let failing = concat!(
+                "@id(\"all\")\n",
+                "permit (principal, action, resource);\n",
+                "@id(\"overflow\")\n",
+                "forbid (principal, action, resource) when { 9223372036854775807 + 1 > 0 };\n",
+            );
             let (members, policies, user, reason) = match case {
-                0 => ("version: 1
-users: {}
-".to_owned(), None, "ana", Some("no_permit")),
-                1 => ("version: 1
-users:
-  ana: [viewer]
-".to_owned(), None, "ana", Some("no_permit")),
+                0 => (members(&[], &[]), None, "ana", Some("no_permit")),
+                1 => (members(&[("ana", &["viewer"])], &[]), None, "ana", Some("no_permit")),
                 2 => (granted.clone(), None, "otra", Some("no_permit")),
                 3 => (granted.clone(), Some(base_with(forbid)), "ana", Some("forbidden")),
                 4 => (granted.clone(), Some(failing.to_owned()), "ana", Some("evaluation_error")),
                 5 => (granted.replace("version: 1", "version: 2"), None, "ana", None),
-                _ => (granted.clone(), Some("permit (principal, action, resource) when { x };".to_owned()), "ana", None),
+                _ => (
+                    granted.clone(),
+                    Some("permit (principal, action, resource) when { x };".to_owned()),
+                    "ana",
+                    None,
+                ),
             };
             let p = project(&members, policies.as_deref());
             let verdict = decide(p.path(), user, &[]);
