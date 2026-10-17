@@ -20,6 +20,7 @@ Cada registro contiene: contexto, decisión, alternativas descartadas, consecuen
 | [0012](0012-motor-de-permisos-cedar.md) | Motor de permisos: Cedar dentro del motor semántico (RBAC + ABAC, CLS en tres niveles; RLS sigue en CSMIR) | Aprobada 2026-10-12 | Concreta 0010 §A |
 | [0013](0013-presupuesto-memoria-consulta.md) | Presupuesto independiente de memoria por consulta activa | Aprobada 2026-10-13 | Pool de conexiones G1; concreta M13 §13 y §19 |
 | [0014](0014-versiones-por-gate.md) | Versiones tentativas por gate: alpha en G2/G3, beta del alcance BI inicial desde G4 y objetivo de candidato a producción tras G6, siempre condicionados a evidencia | Aprobada 2026-10-13 | Correspondencia de versiones de «Milestones de release propuestos» de `ROADMAP_GLOBAL.md` |
+| [0015](0015-navegador-contenedores-y-ubicacion-de-datos.md) | Navegador como experiencia y contenedores oficiales como distribución principal; servidor, acceso y ubicación de los datos son elecciones independientes; publicar y compartir sin copiar datos ni ceder los permisos del autor | Aprobada 2026-10-13 (funciones pendientes en G3/G4/G6) | Concreta 0003, 0004 y 0009; prevalece sobre PostgreSQL BI como formato exclusivo de dashboards en M08 |
 
 Plantilla: copiar un registro existente y numerar con el siguiente número libre.
 
@@ -33,5 +34,6 @@ Plantilla: copiar un registro existente y numerar con el siguiente número libre
 | `docs/arquitectura/INDICE_17_MODULOS.md` (título de M13) | "Runtime analítico Rust, DuckDB y Polars" | Igual: ADR 0001 |
 | `docs/arquitectura/DECISIONES_TECNICAS_RC2.md` (enmienda I.2) | "Polars 2.0 de primera clase" | Igual: ADR 0001 (la sustituye explícitamente) |
 | `docs/semantica/06_TECHNOLOGY.md` (tabla de tecnología) | Polars para "DataFrame/ETL tooling" | ADR 0001. Este documento no está en `INVENTARIO.md`, pero se conserva igual (ver `docs/semantica/README.md`) |
+| `docs/arquitectura/modulos/M08_Canvas_Dashboard_Composition_RC1.md` (§0 «Fuentes de verdad», §2 punto 2, §3 «Fuente de verdad» y §6 «Persistencia») | `PostgreSQL BI` como fuente de verdad de las definiciones y revisiones de dashboards (`DashboardRevision`) | ADR 0003 y 0015: la definición canónica está en los archivos del proyecto (`dashboards/*.yaml`); PostgreSQL de la plataforma guarda usuarios, sesiones, permisos, auditoría y referencias operativas a revisiones publicadas. La edición multiusuario opcional en PostgreSQL sigue pendiente de diseño en G4 |
 
 **ADBC no está en esta lista:** sigue vigente para conectores a otras bases (ADR 0002, ADR 0007). Solo Polars se descartó del núcleo.
