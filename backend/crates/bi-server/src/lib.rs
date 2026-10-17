@@ -6,6 +6,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod health;
+pub mod metadata;
 pub mod metrics;
 pub mod models;
 pub mod oidc;

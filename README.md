@@ -29,8 +29,14 @@ las dependencias.
 ```sh
 podman compose up -d postgres # o: docker compose up -d postgres
 cd backend
-cargo run -p bi-server        # API sin login de desarrollo; health sigue público
+# Desarrollo sintético local: migra al arrancar y avisa que el rol `bi` es privilegiado.
+BI_METADATA_MODE=development BI_DEV_USERS='[{"id":"synthetic-analyst","display_name":"Analista sintético"}]' \
+  cargo run -p bi-server --features dev-auth
 ```
+
+Sin `BI_METADATA_MODE=development`, el servidor arranca en el modo restringido
+por defecto: no migra y no admite operaciones con un rol privilegiado como el
+`bi` de desarrollo (ver «Metadatos: migraciones y rol de la aplicación»).
 
 En otra terminal: `cd frontend`, `npm ci` y `npm run dev`. Vite sirve
 `http://127.0.0.1:5173` y envía `/health` y `/api` a Rust en el puerto 8080.
@@ -41,6 +47,9 @@ Pruebas: en `backend/`, `cargo fmt --all --check`,
 `cargo test --locked`; con PostgreSQL real, configura
 `DATABASE_URL=postgres://bi:bi@127.0.0.1:54320/bi` y ejecuta
 `cargo test --locked --all-features` (PowerShell: `$env:DATABASE_URL='postgres://bi:bi@127.0.0.1:54320/bi'`).
+Usa `127.0.0.1`, no `localhost`: en Windows la resolución de `localhost` por
+conexión vuelve muy lentas estas pruebas. Ese usuario debe poder crear bases y
+roles: las pruebas del modo restringido crean y borran roles temporales propios.
 Estas pruebas también requieren el proveedor real descrito en «Login corporativo».
 Variables: `BI_BIND_ADDR`, `BI_DATABASE_URL` (por defecto la base local de
 `compose.yaml`), `BI_LOG_FORMAT=text|json`, `RUST_LOG` y `BI_STATIC_DIR`
@@ -66,6 +75,48 @@ El tiempo de ejecución llega hasta la finalización o el deadline de la petici�
 el gauge `bi_query_inflight` sigue contando trabajo nativo y recuperación hasta
 liberar el worker. `bi_query_queued` incluye slots cancelados aún sin retirar;
 `bi_query_queue_capacity` y `bi_query_capacity` muestran cola máxima y workers vivos.
+
+## Metadatos: migraciones y rol de la aplicación
+
+Por defecto (`BI_METADATA_MODE=restricted`) el servidor **nunca migra ni ejecuta
+DDL**: comprueba, solo leyendo, que el esquema de `bi_meta` sea exactamente el
+de esta versión y que el rol con el que se conecta tenga los permisos mínimos
+y nada más. Hasta comprobarlo, y de nuevo tras perder la conexión, `/health/ready`
+responde 503 (checks `migrations` y `metadata_security`) y toda operación de
+`/api/v1` responde 503 `metadata_not_ready`; `/health/live` sigue respondiendo.
+Cada conexión nueva que abre el servidor se comprueba también antes de usarse:
+si una falla, se detiene la admisión hasta volver a comprobar.
+
+Secuencia administrativa (en cada instalación y antes de desplegar una versión nueva):
+
+1. Un administrador del clúster crea el rol de la aplicación, `LOGIN` y sin
+   `SUPERUSER`, `CREATEROLE`, `CREATEDB`, `REPLICATION` ni `BYPASSRLS`, y sin ser
+   miembro del rol dueño de los metadatos. Su contraseña nunca va al repositorio.
+2. Con la credencial del dueño: `BI_DATABASE_URL=<url del dueño> bi-server migrate`.
+   Termina con código 0, 1 si falla la base o una migración y 2 si falta o es
+   inválida la configuración; nunca imprime la URL. Dura como mucho 5 minutos,
+   también si espera un bloqueo: al agotarlos, código 1 con
+   `metadata_migration_timed_out`, sin dejar nada esperando en PostgreSQL.
+3. También como dueño, aplica los permisos documentados (idempotente; vuelve a
+   aplicarlos tras una versión con tablas nuevas):
+   `psql "<url del dueño>" -v ON_ERROR_STOP=1 -f backend/crates/bi-server/admin/runtime-grants.sql`
+   (reemplaza el nombre de ejemplo `bi_runtime` por el tuyo).
+4. Arranca el servidor con la credencial del rol de la aplicación; el proceso
+   HTTP nunca recibe la credencial del dueño.
+
+El servidor rechaza un rol que sea superusuario, tenga esas capacidades, sea o
+pueda convertirse (por herencia o `SET ROLE`) en el dueño de la base, de
+`bi_meta`, del almacenamiento de auditoría o de la tabla de migraciones, pueda
+leer o escribir `audit_events`/`audit_head` fuera de `audit_append` (también por
+columna o mediante `PUBLIC`) o modificar el historial de migraciones; y también
+rechaza un rol al que le falte un permiso necesario. Los motivos aparecen en el
+log con códigos estables (`metadata_not_ready`, `reason=...`), sin roles, URL ni
+SQL, y en la métrica `bi.metadata.validation.attempts{result}`.
+
+`BI_METADATA_MODE=development` solo se acepta con el build `dev-auth`,
+`BI_DEV_USERS` configurado, un `BI_PUBLIC_ORIGIN` local y sin OIDC: migra al
+arrancar y avisa con `metadata_privileged_development` si el rol es privilegiado.
+`compose.yaml` lo declara de forma explícita. Nunca se deduce del entorno.
 
 ## Lago de datos (DuckLake)
 
@@ -95,9 +146,11 @@ endpoints de login de desarrollo y OIDC. Logout revoca la sesión en el servidor
 Para desarrollar con Vite, configura en el proceso Rust
 `BI_PUBLIC_ORIGIN=http://127.0.0.1:5173` y
 `BI_DEV_USERS=[{"id":"synthetic-analyst","display_name":"Analista sintético"}]`,
-y ejecuta `cargo run -p bi-server --features dev-auth`. En PowerShell, asigna
-estas variables con `$env:BI_PUBLIC_ORIGIN='http://127.0.0.1:5173'` y
-`$env:BI_DEV_USERS='[{"id":"synthetic-analyst","display_name":"Analista sintético"}]'`.
+y `BI_METADATA_MODE=development`, y ejecuta
+`cargo run -p bi-server --features dev-auth`. En PowerShell, asigna estas
+variables con `$env:BI_PUBLIC_ORIGIN='http://127.0.0.1:5173'`,
+`$env:BI_DEV_USERS='[{"id":"synthetic-analyst","display_name":"Analista sintético"}]'`
+y `$env:BI_METADATA_MODE='development'`.
 La cookie es HttpOnly y SameSite=Strict; con origen HTTPS añade Secure. Solo
 se permite HTTP en loopback. `BI_SESSION_TTL_SECONDS` admite 60–86400 segundos
 (por defecto 3600). Las operaciones mutadoras exigen el Origin configurado.
@@ -148,9 +201,14 @@ ejecuta `cargo test --locked --all-features -j 4`.
 La fixture contiene credenciales públicas **solo de prueba**, sin valor para despliegue.
 
 Para probar en navegador, compila `frontend/` con `npm ci` y `npm run build`.
+Como OIDC solo admite el modo restringido, sigue la secuencia administrativa con
+la base de la fixture (las mismas órdenes que CI): `bi-server migrate` con
+`BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi`; luego, con `psql` sobre esa
+URL, `CREATE ROLE bi_runtime LOGIN PASSWORD 'runtime-test-only'` y el archivo
+`backend/crates/bi-server/admin/runtime-grants.sql`.
 En el servidor configura `BI_BIND_ADDR=127.0.0.1:18070`,
 `BI_PUBLIC_ORIGIN=http://127.0.0.1:18070`,
-`BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi`,
+`BI_DATABASE_URL=postgres://bi_runtime:runtime-test-only@127.0.0.1:18072/bi`,
 `BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test`,
 `BI_OIDC_CLIENT_ID=bi-platform`, `BI_ANALYTICS=off` y el directorio absoluto
 de `frontend/build` como `BI_STATIC_DIR`; ejecuta `cargo run --locked -j 4 -p bi-server`

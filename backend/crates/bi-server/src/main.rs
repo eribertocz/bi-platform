@@ -11,6 +11,7 @@ use tokio::net::TcpListener;
 
 const USAGE: &str =
     "usage: bi-server            run the API server (configured by BI_* environment variables)
+       bi-server migrate         apply metadata migrations with the administrative BI_DATABASE_URL, then exit
        bi-server openapi [PATH]  write the OpenAPI document to PATH or stdout
        bi-server audit-verify [SEQUENCE HASH]  verify audit history (BI_DATABASE_URL; read-only)
        bi-server audit-verify --report [SEQUENCE HASH]  bounded JSON report instead of strict pass/fail";
@@ -25,6 +26,7 @@ fn main() -> ExitCode {
         .as_slice()
     {
         [] => run(),
+        ["migrate"] => migrate_metadata(),
         ["audit-verify"] => verify_audit(None),
         ["audit-verify", "--report"] => report_audit(None),
         ["audit-verify", sequence, hash] => {
@@ -101,6 +103,42 @@ fn audit_pool() -> Result<sqlx::PgPool, ExitCode> {
         eprintln!("audit_invalid_database_url");
         ExitCode::from(2)
     })
+}
+
+/// `migrate`: the administrative step the restricted server never performs.
+/// Finite (at most [`db::MIGRATION_TIMEOUT`], lock waits included) and
+/// side-effect free beyond the migrations: no HTTP, analytical runtime, OIDC
+/// or exporters, and the URL is never printed or kept.
+#[tokio::main]
+async fn migrate_metadata() -> ExitCode {
+    let Ok(url) = std::env::var("BI_DATABASE_URL") else {
+        eprintln!("metadata_database_url_required");
+        return ExitCode::from(2);
+    };
+    let Ok(options) = url.parse::<PgConnectOptions>() else {
+        eprintln!("metadata_invalid_database_url");
+        return ExitCode::from(2);
+    };
+    if let Err(error) = db::migrate(&options, db::MIGRATION_TIMEOUT).await {
+        eprintln!("{}", migration_failure_code(&error));
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "migrations": db::MIGRATOR.iter().count().to_string(),
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// The stable code `migrate` prints for each failure; never the database error.
+fn migration_failure_code(error: &db::MigrationError) -> &'static str {
+    match error {
+        db::MigrationError::TimedOut => "metadata_migration_timed_out",
+        db::MigrationError::Failed(_) => "metadata_migration_failed",
+    }
 }
 
 #[tokio::main]
@@ -208,9 +246,9 @@ async fn run() -> ExitCode {
         port = options.get_port(),
         database = options.get_database().unwrap_or_default(),
         development_default = config.database_url_is_default,
+        mode = ?config.metadata_mode,
         "metadata database"
     );
-    let db = Database::start(db::lazy_pool_with(options));
 
     let listener = match TcpListener::bind(config.bind_addr).await {
         Ok(listener) => listener,
@@ -226,6 +264,14 @@ async fn run() -> ExitCode {
         None => Analytics::disabled(),
     };
     let (metrics, metrics_provider) = metrics::from_env(analytics.clone()).await;
+    let metadata_metrics =
+        metrics_provider
+            .as_ref()
+            .map_or_else(db::MetadataMetrics::default, |provider| {
+                use opentelemetry::metrics::MeterProvider as _;
+                db::MetadataMetrics::new(&provider.meter("bi-server"))
+            });
+    let db = Database::start_observed(&options, config.metadata_mode, metadata_metrics);
     let mut models = bi_server::models::Models::new(config.project_dir);
     if let Some(provider) = &metrics_provider {
         use opentelemetry::metrics::MeterProvider as _;
@@ -241,7 +287,7 @@ async fn run() -> ExitCode {
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
-    db.pool().close().await;
+    db.close().await;
     if let Some(provider) = metrics_provider {
         tokio::task::spawn_blocking(move || {
             if provider.shutdown().is_err() {
@@ -280,6 +326,20 @@ mod tests {
         ] {
             assert!(super::parse_checkpoint(sequence, &hash).is_none());
         }
+    }
+
+    #[test]
+    fn migration_failures_print_only_their_stable_codes() {
+        use bi_server::db::MigrationError;
+        assert_eq!(
+            super::migration_failure_code(&MigrationError::TimedOut),
+            "metadata_migration_timed_out"
+        );
+        let failed = MigrationError::Failed(sqlx::migrate::MigrateError::VersionMissing(7));
+        assert_eq!(
+            super::migration_failure_code(&failed),
+            "metadata_migration_failed"
+        );
     }
 
     #[test]

@@ -7,10 +7,11 @@ use axum::{
     http::{Request, StatusCode},
     routing::get,
 };
+use bi_server::metadata::MetadataMode;
 use bi_server::{
     AppState,
     analytics::Analytics,
-    db::{self, Database},
+    db::Database,
     models::{self, Models},
 };
 use http_body_util::BodyExt;
@@ -155,7 +156,8 @@ fn app(project: Option<&Path>, analytics: Analytics) -> Router {
         models: Models::new(project.map(Path::to_owned)),
         analytics,
         ..AppState::new(Database::start(
-            db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+            &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
+            MetadataMode::Development,
         ))
     };
     Router::new()
@@ -181,7 +183,8 @@ async fn without_session_never_reads_the_project() {
     let app = bi_server::router(AppState {
         models: Models::new(Some("does-not-exist".into())),
         ..AppState::new(Database::start(
-            db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap(),
+            &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
+            MetadataMode::Development,
         ))
     });
     let (status, body) = response(&app).await;
@@ -416,9 +419,9 @@ async fn symlink_file_metrics_directory_and_project_root_never_read_external_con
 async fn real_session_can_list_and_revocation_denies_access(pool: sqlx::PgPool) {
     let p = project();
     write(p.path(), "ventas.yaml", VALID);
-    let db = Database::start(pool);
+    let db = Database::start(&pool.connect_options(), MetadataMode::Development);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_migrated())
+        tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_ready())
             .await
             .unwrap()
     );
@@ -432,7 +435,7 @@ async fn real_session_can_list_and_revocation_denies_access(pool: sqlx::PgPool) 
         auth,
         analytics: analytics().await,
         models: Models::new(Some(p.path().into())),
-        ..AppState::new(db)
+        ..AppState::new(db.clone())
     });
     let login = app
         .clone()
@@ -489,6 +492,7 @@ async fn real_session_can_list_and_revocation_denies_access(pool: sqlx::PgPool) 
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    db.close().await;
 }
 
 #[cfg(feature = "postgres-tests")]

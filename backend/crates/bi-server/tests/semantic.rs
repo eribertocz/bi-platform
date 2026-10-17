@@ -8,6 +8,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use bi_server::metadata::MetadataMode;
 use bi_server::{AppState, analytics::Analytics, db::Database, models::Models};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -110,13 +111,14 @@ struct Harness {
     app: Router,
     pool: sqlx::PgPool,
     project: tempfile::TempDir,
+    db: Database,
 }
 
 async fn harness(pool: sqlx::PgPool) -> Harness {
     let project = project();
-    let db = Database::start(pool.clone());
+    let db = Database::start(&pool.connect_options(), MetadataMode::Development);
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_migrated())
+        tokio::time::timeout(std::time::Duration::from_secs(30), db.wait_until_ready())
             .await
             .unwrap()
     );
@@ -133,9 +135,14 @@ async fn harness(pool: sqlx::PgPool) -> Harness {
         auth,
         analytics: analytics().await,
         models: Models::new(Some(project.path().into())),
-        ..AppState::new(db)
+        ..AppState::new(db.clone())
     });
-    Harness { app, pool, project }
+    Harness {
+        app,
+        pool,
+        project,
+        db,
+    }
 }
 
 impl Harness {
@@ -283,6 +290,7 @@ async fn a_viewer_sees_open_metrics_masked_confidential_and_never_restricted(poo
             ("query".to_owned(), "success".to_owned()),
         ]
     );
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -304,6 +312,7 @@ async fn a_masked_metric_can_be_shown_but_not_filtered_or_ordered(pool: sqlx::Pg
     let (status, body) = h.explain(Some(&lector), &filtered).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
     assert_eq!(body["denied"]["usage"], "filter");
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -352,6 +361,7 @@ async fn malformed_unknown_and_incorrect_queries_are_rejected_with_reasons(pool:
     let (status, body) = h.explain(Some(&analista), &missing).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body:#}");
     assert_eq!(body["code"], "model_not_found");
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -379,6 +389,7 @@ async fn identity_comes_only_from_the_session(pool: sqlx::PgPool) {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused:#}");
         assert_eq!(refused["code"], "invalid_request");
     }
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -400,6 +411,7 @@ async fn invalid_policies_or_members_close_the_path(pool: sqlx::PgPool) {
     h.write("policies/members.yaml", MEMBERS);
     let (status, open) = h.explain(Some(&analista), &body).await;
     assert_eq!(status, StatusCode::OK, "{open:#}");
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -437,6 +449,7 @@ async fn the_receipt_follows_query_model_and_policies_but_not_labels(pool: sqlx:
     let model = receipt(query(&json!([region(), metric("m", "importe")]))).await;
     assert_ne!(policies["model"], model["model"]);
     assert_ne!(policies["id"], model["id"]);
+    h.db.close().await;
 }
 
 /// Baseline for the semantic engine's performance work (#100): the whole
@@ -459,6 +472,7 @@ async fn explain_latency(pool: sqlx::PgPool) {
         times[15].as_secs_f64() * 1e3,
         times[28].as_secs_f64() * 1e3
     );
+    h.db.close().await;
 }
 
 // ---- From the review of #110: lineage and names never leak ------------------
@@ -510,17 +524,22 @@ async fn showing_a_masked_metric_never_waives_deriving_from_it(pool: sqlx::PgPoo
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body:#}");
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
 async fn an_audit_failure_closes_both_answers_and_denials(pool: sqlx::PgPool) {
     let h = harness(pool).await;
     let lector = h.login("lector").await;
-    // An isolated database per test: nothing else is touched.
-    sqlx::query("DROP TABLE bi_meta.audit_events CASCADE")
-        .execute(&h.pool)
-        .await
-        .unwrap();
+    // An isolated database per test: nothing else is touched. Only the write
+    // fails; schema and role still validate, so whichever connection the
+    // pool hands out, the failure is the append itself.
+    sqlx::query(
+        "ALTER TABLE bi_meta.audit_events ADD CONSTRAINT append_fails CHECK (false) NOT VALID",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
     for name in ["importe", "coste"] {
         let (status, body) = h
             .explain(Some(&lector), &query(&json!([metric("m", name)])))
@@ -528,6 +547,7 @@ async fn an_audit_failure_closes_both_answers_and_denials(pool: sqlx::PgPool) {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body:#}");
         assert_eq!(body["code"], "audit_unavailable", "{body:#}");
     }
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -550,6 +570,7 @@ async fn requests_over_the_bounds_are_refused(pool: sqlx::PgPool) {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body:#}");
         assert_eq!(body["code"], "invalid_request", "{body:#}");
     }
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -562,6 +583,7 @@ async fn authorization_comes_before_correctness(pool: sqlx::PgPool) {
         "value": { "type": "number", "value": "1" } });
     let (status, body) = h.explain(Some(&lector), &body).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body:#}");
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -587,6 +609,7 @@ async fn model_errors_never_disclose_objects_the_request_did_not_name(pool: sqlx
             "{user}: unrequested name disclosed: {body:#}"
         );
     }
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -623,6 +646,7 @@ async fn a_joined_dataset_is_never_named_when_denied(pool: sqlx::PgPool) {
         body["denied"].get("name").is_none(),
         "unrequested dataset disclosed: {body:#}"
     );
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -654,4 +678,5 @@ async fn a_correctness_message_never_quotes_an_unrequested_object(pool: sqlx::Pg
         !body.to_string().contains("region"),
         "unrequested axis leaked: {body:#}"
     );
+    h.db.close().await;
 }

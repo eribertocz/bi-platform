@@ -8,17 +8,20 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use bi_server::db::{self, Database};
+use bi_server::db::Database;
 use bi_server::health::{Health, HealthCheck, HealthStatus};
+use bi_server::metadata::MetadataMode;
 use bi_server::{AppState, router};
 use common::{get, get_health};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 
-/// An app whose pool points at a port where nothing listens.
+/// An app whose pools point at a port where nothing listens.
 fn app_without_database() -> Router {
-    let pool = db::lazy_pool("postgres://bi:bi@127.0.0.1:1/bi").unwrap();
-    router(AppState::new(Database::start(pool)))
+    router(AppState::new(Database::start(
+        &"postgres://bi:bi@127.0.0.1:1/bi".parse().unwrap(),
+        MetadataMode::Development,
+    )))
 }
 
 fn check(name: &str, status: HealthStatus) -> HealthCheck {

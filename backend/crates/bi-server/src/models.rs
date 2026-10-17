@@ -300,7 +300,7 @@ fn semantic_message(message: &str) -> String {
         (status = 200, description = "Estado del proyecto y resultados por archivo; sin configuración, lista vacía. Directorio inaccesible o límites globales: project_status unavailable y diagnóstico; nunca resultados parciales.", body = ModelsResponse),
         (status = 401, description = "Sin sesión válida", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Demasiadas cargas simultáneas", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "Motor no disponible o lectura fallida", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Motor no disponible, lectura fallida o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "Tiempo de compilación agotado", body = Problem, content_type = "application/problem+json")
     )
 )]

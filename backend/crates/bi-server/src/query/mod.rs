@@ -60,7 +60,7 @@ pub struct QueryResult {
         (status = 422, description = "Consulta fuera del catálogo o de los límites (`invalid_query`), resultado mayor que el presupuesto de bytes (`result_too_large`) o memoria de consulta agotada (`query_memory_limit`)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Cola de consultas llena; reintentar", body = Problem, content_type = "application/problem+json"),
         (status = 500, description = "Fallo interno al ejecutar", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "Motor analítico no disponible", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Motor analítico no disponible o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "Superó el tiempo máximo y se canceló", body = Problem, content_type = "application/problem+json")
     )
 )]

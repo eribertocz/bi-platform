@@ -10,6 +10,10 @@ services:
         BI_CARGO_FEATURES: dev-auth
     environment:
       BI_DATABASE_URL: postgres://bi:bi@postgres:5432/bi
+      # Local synthetic development only: migrates on start and warns that
+      # the `bi` role is privileged (metadata_privileged_development). Any
+      # deployment keeps the default restricted mode: see README.
+      BI_METADATA_MODE: development
       BI_PUBLIC_ORIGIN: http://127.0.0.1:8080
       BI_DEV_USERS: '[{"id":"synthetic-analyst","display_name":"Analista sintético"},{"id":"synthetic-viewer","display_name":"Lector sintético"}]'
       BI_LAKE_CATALOG: dbname=bi_lake_catalog host=postgres port=5432 user=bi password=bi
