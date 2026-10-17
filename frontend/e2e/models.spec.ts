@@ -18,6 +18,8 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   await expect(page).toHaveURL('/login');
   await page.getByLabel('Usuario de desarrollo').selectOption('synthetic-modeler');
   await page.getByRole('button', { name: 'Entrar', exact: true }).click();
+  // Login lands on Inicio; navigating before that would race its redirect.
+  await expect(page.getByRole('heading', { name: 'Inicio', exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'Modelos', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Modelos', exact: true })).toBeVisible();
   await expect(page.getByRole('list', { name: 'Modelos del proyecto' })).toContainText('Válido');
