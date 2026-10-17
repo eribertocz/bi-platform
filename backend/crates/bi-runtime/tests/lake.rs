@@ -125,6 +125,114 @@ async fn loading_a_different_fixture_replaces_the_table() {
     assert_matches_oracle(&sales_oracle(&runtime, second).await.unwrap(), second);
 }
 
+/// Two orders of the same region with different amounts.
+async fn same_region_pair(runtime: &bi_runtime::Runtime) -> (i64, i64) {
+    runtime
+        .run(|conn| {
+            conn.query_row(
+                "SELECT a.order_id, b.order_id FROM lake.main.sales a JOIN lake.main.sales b
+                 ON a.region = b.region AND a.order_id < b.order_id AND a.amount <> b.amount
+                 ORDER BY a.order_id, b.order_id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .await
+        .unwrap()
+}
+
+/// Swaps the amounts of `pair`: same schema, row count, totals and
+/// per-region totals, different rows.
+async fn swap_amounts(runtime: &bi_runtime::Runtime, (first, second): (i64, i64)) {
+    runtime
+        .run(move |conn| {
+            conn.execute(
+                "UPDATE lake.main.sales SET amount = CASE order_id
+                     WHEN ?1 THEN (SELECT amount FROM lake.main.sales WHERE order_id = ?2)
+                     ELSE (SELECT amount FROM lake.main.sales WHERE order_id = ?1) END
+                 WHERE order_id IN (?1, ?2)",
+                [first, second],
+            )
+        })
+        .await
+        .unwrap();
+}
+
+async fn amounts(runtime: &bi_runtime::Runtime, (first, second): (i64, i64)) -> Vec<String> {
+    runtime
+        .run(move |conn| {
+            conn.prepare(
+                "SELECT amount::VARCHAR FROM lake.main.sales WHERE order_id IN (?, ?) ORDER BY order_id",
+            )?
+            .query_map([first, second], |row| row.get(0))?
+            .collect()
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_matching_marker_over_other_rows_is_not_vouched_for() {
+    let data = tempfile::tempdir().unwrap();
+    let config = lake_config(data.path());
+    let spec = FixtureSpec {
+        seed: 42,
+        rows: 2_000,
+    };
+
+    let bootstrap = Bootstrap::open(config.clone()).unwrap();
+    assert_eq!(load_sales(&bootstrap, spec).unwrap(), LoadOutcome::Loaded);
+    let runtime = bootstrap.finish().unwrap();
+    let pair = same_region_pair(&runtime).await;
+    let before = amounts(&runtime, pair).await;
+    swap_amounts(&runtime, pair).await;
+    let altered = amounts(&runtime, pair).await;
+    assert_eq!(altered, [before[1].clone(), before[0].clone()]);
+    // Every aggregate the oracle checks still matches: totals cannot tell.
+    assert_matches_oracle(&sales_oracle(&runtime, spec).await.unwrap(), spec);
+    drop(runtime);
+
+    let bootstrap = Bootstrap::open(config).unwrap();
+    assert_eq!(load_sales(&bootstrap, spec).unwrap(), LoadOutcome::Altered);
+    let runtime = bootstrap.finish().unwrap();
+    assert_eq!(amounts(&runtime, pair).await, altered, "left untouched");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_matching_marker_without_its_table_is_not_vouched_for() {
+    let data = tempfile::tempdir().unwrap();
+    let config = lake_config(data.path());
+    let spec = FixtureSpec {
+        seed: 7,
+        rows: 1_000,
+    };
+
+    let bootstrap = Bootstrap::open(config.clone()).unwrap();
+    assert_eq!(load_sales(&bootstrap, spec).unwrap(), LoadOutcome::Loaded);
+    let runtime = bootstrap.finish().unwrap();
+    runtime
+        .run(|conn| conn.execute_batch("DROP TABLE lake.main.sales"))
+        .await
+        .unwrap();
+    drop(runtime);
+
+    let bootstrap = Bootstrap::open(config).unwrap();
+    assert_eq!(load_sales(&bootstrap, spec).unwrap(), LoadOutcome::Altered);
+    let runtime = bootstrap.finish().unwrap();
+    let tables: i64 = runtime
+        .run(|conn| {
+            conn.query_row(
+                "SELECT count(*) FROM information_schema.tables
+                 WHERE table_catalog = 'lake' AND table_name = 'sales'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(tables, 0, "not recreated");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn locked_down_connections_read_the_lake_but_nothing_else() {
     let data = tempfile::tempdir().unwrap();
