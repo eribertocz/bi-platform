@@ -3,6 +3,7 @@
 //! pool with a deadline and a result-size budget, and returns exact, typed
 //! values. Each response reports its phases in a `Server-Timing` header.
 
+pub(crate) mod admission;
 pub mod catalog;
 pub mod plan;
 #[cfg(test)]
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, FromRequest, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bi_runtime::RuntimeError;
@@ -23,8 +24,10 @@ use tower_http::request_id::RequestId;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::auth::Principal;
 use crate::metrics::{Outcome, QueryMetrics, Rejected};
 use crate::problem::Problem;
+use admission::Admission;
 use plan::{Param, QueryRequest, ResultColumn};
 
 /// Total bytes of all values a result may carry.
@@ -56,23 +59,44 @@ pub struct QueryResult {
         (status = 200, description = "Resultado tipado y exacto; fases en la cabecera `Server-Timing` (plan, queue, execute, serialize; ms)", body = QueryResult),
         (status = 400, description = "JSON inválido o campos desconocidos", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Sin sesión válida (`session_required`)", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Origin ausente o distinto al configurado (`origin_forbidden`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Origin ausente o distinto al configurado (`origin_forbidden`), o vía cerrada fuera del desarrollo sintético local (`legacy_query_disabled`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Consulta fuera del catálogo o de los límites (`invalid_query`), resultado mayor que el presupuesto de bytes (`result_too_large`) o memoria de consulta agotada (`query_memory_limit`)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Cola de consultas llena; reintentar", body = Problem, content_type = "application/problem+json"),
         (status = 500, description = "Fallo interno al ejecutar", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "Motor analítico no disponible o metadatos no listos (`metadata_not_ready`)", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Motor analítico no disponible, metadatos no listos (`metadata_not_ready`) o denegación que no pudo registrarse en la auditoría (`audit_unavailable`)", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "Superó el tiempo máximo y se canceló", body = Problem, content_type = "application/problem+json")
     )
 )]
 pub async fn run(
     State(state): State<AppState>,
     request_id: Option<Extension<RequestId>>,
-    body: Result<Json<QueryRequest>, JsonRejection>,
+    principal: Option<Extension<Principal>>,
+    request: Request,
 ) -> Response {
     let request_id = request_id
         .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
         .unwrap_or_default();
-    match handle(&state, body).await {
+    // Decided before the body is read, let alone parsed: a closed route does
+    // no work and reflects nothing the client sent.
+    let outcome = match principal {
+        // The session middleware always sets it on this route.
+        None => Err(Rejection::new(
+            StatusCode::UNAUTHORIZED,
+            "session_required",
+            None,
+        )),
+        Some(Extension(principal)) => match admission::admit(&state, &principal) {
+            Admission::Closed(reason) => {
+                return admission::refuse(&state, &principal, &request_id, reason).await;
+            }
+            Admission::Pending => Err(unavailable()),
+            Admission::Admitted(runtime) => {
+                let body = Json::<QueryRequest>::from_request(request, &state).await;
+                handle(&state, &runtime, body).await
+            }
+        },
+    };
+    match outcome {
         Ok(response) => response,
         Err(rejection) => {
             let reason = match rejection.code {
@@ -121,9 +145,19 @@ impl Rejection {
     }
 }
 
-/// Validates, plans, executes and serializes one query, timing each phase.
+fn unavailable() -> Rejection {
+    Rejection::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "analytics_unavailable",
+        Some("El motor analítico no está listo.".to_owned()),
+    )
+}
+
+/// Validates, plans, executes on the admitted `runtime` and serializes one
+/// query, timing each phase.
 async fn handle(
     state: &AppState,
+    runtime: &bi_runtime::Runtime,
     body: Result<Json<QueryRequest>, JsonRejection>,
 ) -> Result<Response, Rejection> {
     let Json(request) = body.map_err(|rejection| {
@@ -134,17 +168,10 @@ async fn handle(
         )
     })?;
     let (plan, plan_time) = compile(&request, &state.metrics)?;
-    let runtime = state.analytics.runtime().ok_or_else(|| {
-        Rejection::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "analytics_unavailable",
-            Some("El motor analítico no está listo.".to_owned()),
-        )
-    })?;
 
     let fetch_limit = plan.limit + 1;
     let (fetched, queue_time, execute_time) = execute(
-        &runtime,
+        runtime,
         state.query_timeout,
         plan.sql,
         plan.params,
