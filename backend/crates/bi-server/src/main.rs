@@ -284,6 +284,7 @@ async fn run() -> ExitCode {
             "no entropy for the context key: explain stays unavailable"
         );
     }
+    let audit_reader = audit_reader(config.audit_reader.as_ref());
     let state = AppState {
         db: db.clone(),
         auth: config.auth,
@@ -295,6 +296,9 @@ async fn run() -> ExitCode {
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
+    if let Some(reader) = &audit_reader {
+        reader.close().await;
+    }
     db.close().await;
     if let Some(provider) = metrics_provider {
         tokio::task::spawn_blocking(move || {
@@ -319,6 +323,40 @@ async fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The audit reader's pool (#159), when configured: checked once at start
+/// so the operator learns its state, never with the credential in a log.
+/// Unset, malformed or refused, audit reading stays disabled and nothing
+/// falls back to another role.
+fn audit_reader(
+    url: Option<&bi_server::audit::reader::ReaderUrl>,
+) -> Option<bi_server::audit::reader::AuditReader> {
+    use tracing::instrument::WithSubscriber as _;
+    let url = url?;
+    let Some(options) = url.options() else {
+        tracing::error!(
+            event_code = "audit_reader_invalid_url",
+            "BI_AUDIT_READER_DATABASE_URL is not a valid PostgreSQL URL: audit reading stays disabled"
+        );
+        return None;
+    };
+    let reader = bi_server::audit::reader::AuditReader::start(&options);
+    let probe = reader.clone();
+    tokio::spawn(
+        async move {
+            if probe.acquire().await.is_ok() {
+                tracing::info!(event_code = "audit_reader_ready", "audit reader ready");
+            } else {
+                tracing::warn!(
+                    event_code = "audit_reader_unavailable",
+                    "audit reader unavailable: audit reading stays disabled"
+                );
+            }
+        }
+        .with_current_subscriber(),
+    );
+    Some(reader)
 }
 
 #[cfg(test)]
