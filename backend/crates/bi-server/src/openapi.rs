@@ -28,8 +28,10 @@ use crate::{auth, health, models, oidc, query, semantic};
     ),
     components(schemas(
         crate::problem::Problem,
-        // The exact result body (#136); the route that returns it is #138.
-        semantic::result::SemanticResult
+        // The exact result body (#136) and the whole answer with its receipt
+        // (#146); the route that returns it is #138.
+        semantic::result::SemanticResult,
+        semantic::envelope::SemanticRun
     )),
     security(),
     modifiers(&SessionSecurity)

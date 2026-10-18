@@ -633,6 +633,112 @@ export interface components {
     SemanticResult: {
       blocks: components['schemas']['SemanticBlock'][];
     };
+    /**
+     * @description The answer of one execution: rows, receipt and notices, as one JSON
+     *     body of at most 4 MiB.
+     */
+    SemanticRun: {
+      notices: components['schemas']['SemanticRunNotice'][];
+      receipt: components['schemas']['SemanticRunReceipt'];
+      result: components['schemas']['SemanticResult'];
+    };
+    SemanticRunDefinition: {
+      content: string;
+      id: string;
+    };
+    /**
+     * @description The query's fingerprint, which anyone can derive from `query.sqir`, and
+     *     the others protected under this instance's key and for this principal:
+     *     the plain ones cover what this session may not see (hidden policies and
+     *     definitions, the policy files, the principal and its roles), and a
+     *     dictionary of guesses would reproduce them. Comparable within one
+     *     instance and for one principal, never across restarts.
+     */
+    SemanticRunFingerprints: {
+      /** @description The protected fingerprint of the row-policy values (#204). */
+      context: string;
+      /** @description `decision-hmac-sha256-v1:` and 64 hexadecimal digits. */
+      decision: string;
+      /** @description `model-hmac-sha256-v1:` and 64 hexadecimal digits. */
+      model: string;
+      /** @description `plan-hmac-sha256-v1:` and 64 hexadecimal digits. */
+      plan: string;
+      /** @description `policies-hmac-sha256-v1:` and 64 hexadecimal digits. */
+      policies: string;
+      query: string;
+    };
+    /**
+     * @description A selected metric that is deprecated, as its authorized definition
+     *     declares it.
+     */
+    SemanticRunNotice: {
+      metric: string;
+      /** @description Only a replacement this session may see. */
+      replacement: string | null;
+      sunset: string | null;
+    };
+    /** @description The query, as its canonical intent with typed literals. */
+    SemanticRunQuery: {
+      /** @description `sef-canonical-cbor-v1`: deterministic CBOR (RFC 8949 §4.2) of SQIR. */
+      encoding: string;
+      /** @description The encoded query, in hexadecimal. */
+      sqir: string;
+    };
+    /**
+     * @description What the answer depended on, as far as this session may see it. `id` is
+     *     SHA-256 of the RFC 8785 (JCS) form of this object without `id`,
+     *     `read_started_at` and `read_finished_at`: anyone recomputes it from what
+     *     is shown. It identifies that content; it is no signature, and proves
+     *     neither who issued it nor that whoever handed it over changed nothing.
+     */
+    SemanticRunReceipt: {
+      /**
+       * @description The selected metrics and dimensions this session may see, with the
+       *     fingerprint of their content. The projection may be incomplete:
+       *     reproducing the answer needs authorized access to all its evidence.
+       */
+      definitions: components['schemas']['SemanticRunDefinition'][];
+      /**
+       * @description Opaque commitment to the evidence not shown, under this instance's
+       *     key and for this principal: comparable within one instance and for
+       *     one principal, never across restarts.
+       */
+      evidence: string;
+      fingerprints: components['schemas']['SemanticRunFingerprints'];
+      /** @description `run:` and 64 hexadecimal digits. */
+      id: string;
+      query: components['schemas']['SemanticRunQuery'];
+      /** @description When this read ended (RFC 3339, UTC). */
+      read_finished_at: string;
+      /**
+       * @description When this read began (RFC 3339, UTC): the time of this execution,
+       *     never of a refresh of its sources.
+       */
+      read_started_at: string;
+      /** @description The datasets read that this session may see. */
+      sources: components['schemas']['SemanticRunSource'][];
+      version: string;
+      versions: components['schemas']['SemanticRunVersions'];
+    };
+    SemanticRunSource: {
+      /**
+       * @description The DuckLake snapshot observed in the transaction that read the
+       *     rows, as decimal text; `null` for a source with no persistent
+       *     version, which cannot be read again as it was. Observed, not
+       *     retained: no promise that it can still be read.
+       */
+      data_snapshot: string | null;
+      /** @description The dataset's stable identifier; never its physical relation. */
+      dataset: string;
+      /** @description When the source itself was last refreshed; `null` while unknown. */
+      source_refreshed_at: string | null;
+    };
+    SemanticRunVersions: {
+      adapter: string;
+      capability_profile: string;
+      engine: string;
+      tzdb: string;
+    };
     SemanticSelection:
       | {
           /** @description Query-local name of the column; ordering and `having` use it. */

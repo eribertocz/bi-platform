@@ -150,6 +150,37 @@ async fn refusal(state: &AppState, session: Session, request: &ExplainRequest) -
 /// Lowers the preparation onto the sources it captured and runs it: the
 /// blocks the executor delivers, as they arrive.
 pub(crate) async fn execute(analytics: &Analytics, prepared: &Prepared) -> Vec<BlockResult> {
+    let mut blocks = Vec::new();
+    let mut complete = 0;
+    for event in events(analytics, prepared).await {
+        match event {
+            Event::Batch(block) => blocks.push(block),
+            Event::Complete(_) => complete += 1,
+            Event::Failed(failure) => panic!("{failure:?}"),
+        }
+    }
+    assert_eq!(complete, 1);
+    blocks
+}
+
+/// Every event of one execution of the preparation, in order.
+pub(crate) async fn events(analytics: &Analytics, prepared: &Prepared) -> Vec<Event> {
+    let mut stream = stream(analytics, prepared, 100, 2);
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+    events
+}
+
+/// The stream of one execution, with up to `max_rows` rows and `capacity`
+/// events in flight.
+pub(crate) fn stream(
+    analytics: &Analytics,
+    prepared: &Prepared,
+    max_rows: usize,
+    capacity: usize,
+) -> crate::semantic_execution::SemanticStream {
     let execution = prepared.execution().expect("nothing masked");
     let catalog: SourceCatalog = execution
         .sources()
@@ -177,33 +208,21 @@ pub(crate) async fn execute(analytics: &Analytics, prepared: &Prepared) -> Vec<B
         &catalog,
     )
     .unwrap();
-    let executor = SemanticExecutor::new(analytics.runtime().unwrap());
-    let mut stream = executor
+    SemanticExecutor::new(analytics.runtime().unwrap())
         .start(
             Arc::new(plan),
             execution.context().clone(),
             "semantic-prepare-test",
             ExecutionLimits {
-                max_rows: 100,
-                max_bytes: 1024 * 1024,
-                max_intermediate_bytes: 1024 * 1024,
-                deadline: Some(Instant::now() + Duration::from_secs(10)),
+                max_rows,
+                max_bytes: 64 * 1024 * 1024,
+                max_intermediate_bytes: 64 * 1024 * 1024,
+                deadline: Some(Instant::now() + Duration::from_secs(30)),
                 ..ExecutionLimits::default()
             },
-            2,
+            capacity,
         )
-        .unwrap();
-    let mut blocks = Vec::new();
-    let mut complete = 0;
-    while let Some(event) = stream.next().await {
-        match event {
-            Event::Batch(block) => blocks.push(block),
-            Event::Complete(_) => complete += 1,
-            Event::Failed(failure) => panic!("{failure:?}"),
-        }
-    }
-    assert_eq!(complete, 1);
-    blocks
+        .unwrap()
 }
 
 /// The executed rows: `(region or "", importe_total in hundredths, filas)`.

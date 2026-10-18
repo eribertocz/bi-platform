@@ -62,27 +62,64 @@ impl ContextKey {
         scope: &Scope<'_>,
         context: &SemanticContext,
     ) -> Option<String> {
+        let slots = C::Map(
+            context
+                .slots
+                .iter()
+                .map(|(name, value)| (name.clone(), value.canonical_value()))
+                .collect(),
+        );
+        self.mac(DOMAIN, PREFIX, scope, ("slots", slots))
+    }
+
+    /// A commitment to evidence kept private (#146): binds it, under the
+    /// same key and scope, without revealing it; another use of the key
+    /// never yields the same value.
+    #[must_use]
+    pub(crate) fn commit(&self, scope: &Scope<'_>, evidence: C) -> Option<String> {
+        self.mac(
+            b"bi-run-evidence-v1",
+            "ev-hmac-sha256-v1:",
+            scope,
+            ("evidence", evidence),
+        )
+    }
+
+    /// The public form of a fingerprint `of` one kind (#146): `model`,
+    /// `plan`, `policies` or `decision`. Each plain fingerprint covers what
+    /// a session may not see (the model's and the plan's hidden policies,
+    /// the policy files, the principal and its roles), and a dictionary of
+    /// guesses would reproduce it; this one needs the key. Each kind has its
+    /// own domain, so no two kinds ever yield the same value.
+    #[must_use]
+    pub(crate) fn protect(&self, scope: &Scope<'_>, of: &str, fingerprint: &str) -> Option<String> {
+        self.mac(
+            format!("bi-run-{of}-v1").as_bytes(),
+            &format!("{of}-hmac-sha256-v1:"),
+            scope,
+            ("fingerprint", C::text(fingerprint)),
+        )
+    }
+
+    fn mac(
+        &self,
+        domain: &[u8],
+        prefix: &str,
+        scope: &Scope<'_>,
+        (name, value): (&str, C),
+    ) -> Option<String> {
         let key = self.0.as_deref()?;
         let encoded = C::Map(vec![
             ("project".to_owned(), C::text(scope.project)),
             ("principal".to_owned(), C::text(scope.principal)),
-            (
-                "slots".to_owned(),
-                C::Map(
-                    context
-                        .slots
-                        .iter()
-                        .map(|(name, value)| (name.clone(), value.canonical_value()))
-                        .collect(),
-                ),
-            ),
+            (name.to_owned(), value),
         ])
         .encode()
         .ok()?;
         let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).ok()?;
-        mac.update(DOMAIN);
+        mac.update(domain);
         mac.update(&encoded);
-        Some(format!("{PREFIX}{}", hex(&mac.finalize().into_bytes())))
+        Some(format!("{prefix}{}", hex(&mac.finalize().into_bytes())))
     }
 }
 
@@ -98,8 +135,8 @@ impl fmt::Debug for ContextKey {
 }
 
 /// Who and where a context was bound: the project and the verified
-/// principal, never taken from the request.
-pub(crate) struct Scope<'a> {
+/// principal, never taken from the request: only this crate builds one.
+pub struct Scope<'a> {
     pub(crate) project: &'a str,
     pub(crate) principal: &'a str,
 }

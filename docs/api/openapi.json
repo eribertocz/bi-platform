@@ -2093,6 +2093,237 @@
           }
         }
       },
+      "SemanticRun": {
+        "type": "object",
+        "description": "The answer of one execution: rows, receipt and notices, as one JSON\nbody of at most 4 MiB.",
+        "required": [
+          "result",
+          "receipt",
+          "notices"
+        ],
+        "properties": {
+          "notices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticRunNotice"
+            }
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/SemanticRunReceipt"
+          },
+          "result": {
+            "$ref": "#/components/schemas/SemanticResult"
+          }
+        }
+      },
+      "SemanticRunDefinition": {
+        "type": "object",
+        "required": [
+          "id",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "SemanticRunFingerprints": {
+        "type": "object",
+        "description": "The query's fingerprint, which anyone can derive from `query.sqir`, and\nthe others protected under this instance's key and for this principal:\nthe plain ones cover what this session may not see (hidden policies and\ndefinitions, the policy files, the principal and its roles), and a\ndictionary of guesses would reproduce them. Comparable within one\ninstance and for one principal, never across restarts.",
+        "required": [
+          "query",
+          "model",
+          "plan",
+          "decision",
+          "policies",
+          "context"
+        ],
+        "properties": {
+          "context": {
+            "type": "string",
+            "description": "The protected fingerprint of the row-policy values (#204)."
+          },
+          "decision": {
+            "type": "string",
+            "description": "`decision-hmac-sha256-v1:` and 64 hexadecimal digits."
+          },
+          "model": {
+            "type": "string",
+            "description": "`model-hmac-sha256-v1:` and 64 hexadecimal digits."
+          },
+          "plan": {
+            "type": "string",
+            "description": "`plan-hmac-sha256-v1:` and 64 hexadecimal digits."
+          },
+          "policies": {
+            "type": "string",
+            "description": "`policies-hmac-sha256-v1:` and 64 hexadecimal digits."
+          },
+          "query": {
+            "type": "string"
+          }
+        }
+      },
+      "SemanticRunNotice": {
+        "type": "object",
+        "description": "A selected metric that is deprecated, as its authorized definition\ndeclares it.",
+        "required": [
+          "metric",
+          "sunset",
+          "replacement"
+        ],
+        "properties": {
+          "metric": {
+            "type": "string"
+          },
+          "replacement": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only a replacement this session may see."
+          },
+          "sunset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SemanticRunQuery": {
+        "type": "object",
+        "description": "The query, as its canonical intent with typed literals.",
+        "required": [
+          "encoding",
+          "sqir"
+        ],
+        "properties": {
+          "encoding": {
+            "type": "string",
+            "description": "`sef-canonical-cbor-v1`: deterministic CBOR (RFC 8949 §4.2) of SQIR."
+          },
+          "sqir": {
+            "type": "string",
+            "description": "The encoded query, in hexadecimal."
+          }
+        }
+      },
+      "SemanticRunReceipt": {
+        "type": "object",
+        "description": "What the answer depended on, as far as this session may see it. `id` is\nSHA-256 of the RFC 8785 (JCS) form of this object without `id`,\n`read_started_at` and `read_finished_at`: anyone recomputes it from what\nis shown. It identifies that content; it is no signature, and proves\nneither who issued it nor that whoever handed it over changed nothing.",
+        "required": [
+          "id",
+          "version",
+          "query",
+          "fingerprints",
+          "definitions",
+          "versions",
+          "sources",
+          "evidence",
+          "read_started_at",
+          "read_finished_at"
+        ],
+        "properties": {
+          "definitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticRunDefinition"
+            },
+            "description": "The selected metrics and dimensions this session may see, with the\nfingerprint of their content. The projection may be incomplete:\nreproducing the answer needs authorized access to all its evidence."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "Opaque commitment to the evidence not shown, under this instance's\nkey and for this principal: comparable within one instance and for\none principal, never across restarts."
+          },
+          "fingerprints": {
+            "$ref": "#/components/schemas/SemanticRunFingerprints"
+          },
+          "id": {
+            "type": "string",
+            "description": "`run:` and 64 hexadecimal digits."
+          },
+          "query": {
+            "$ref": "#/components/schemas/SemanticRunQuery"
+          },
+          "read_finished_at": {
+            "type": "string",
+            "description": "When this read ended (RFC 3339, UTC)."
+          },
+          "read_started_at": {
+            "type": "string",
+            "description": "When this read began (RFC 3339, UTC): the time of this execution,\nnever of a refresh of its sources."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticRunSource"
+            },
+            "description": "The datasets read that this session may see."
+          },
+          "version": {
+            "type": "string"
+          },
+          "versions": {
+            "$ref": "#/components/schemas/SemanticRunVersions"
+          }
+        }
+      },
+      "SemanticRunSource": {
+        "type": "object",
+        "required": [
+          "dataset",
+          "data_snapshot",
+          "source_refreshed_at"
+        ],
+        "properties": {
+          "data_snapshot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The DuckLake snapshot observed in the transaction that read the\nrows, as decimal text; `null` for a source with no persistent\nversion, which cannot be read again as it was. Observed, not\nretained: no promise that it can still be read."
+          },
+          "dataset": {
+            "type": "string",
+            "description": "The dataset's stable identifier; never its physical relation."
+          },
+          "source_refreshed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the source itself was last refreshed; `null` while unknown."
+          }
+        }
+      },
+      "SemanticRunVersions": {
+        "type": "object",
+        "required": [
+          "engine",
+          "adapter",
+          "capability_profile",
+          "tzdb"
+        ],
+        "properties": {
+          "adapter": {
+            "type": "string"
+          },
+          "capability_profile": {
+            "type": "string"
+          },
+          "engine": {
+            "type": "string"
+          },
+          "tzdb": {
+            "type": "string"
+          }
+        }
+      },
       "SemanticSelection": {
         "oneOf": [
           {

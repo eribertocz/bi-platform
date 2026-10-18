@@ -174,7 +174,7 @@ pub fn encode(prepared: &Prepared, results: &[BlockResult]) -> Result<SemanticRe
 }
 
 /// [`encode`] with a body budget of `max_bytes`.
-fn encode_within(
+pub(super) fn encode_within(
     prepared: &Prepared,
     results: &[BlockResult],
     max_bytes: usize,
