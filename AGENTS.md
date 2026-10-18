@@ -6,11 +6,13 @@
 - **Claude — implementador.** Escribe el código de los Issues que Codex especificó y ejecuta todo lo operativo de Git (ramas, commits, *push*, PR, conflictos, *tags* cuando Codex lo indique). Nunca fusiona su propio trabajo.
 - El propietario decide producto con Codex; ambos agentes se coordinan por escrito en el repositorio, nunca en un chat efímero.
 
-Antes de empezar cualquier sesión: leer este archivo, `ESTADO.md` (qué existe, qué funciona, qué falta) y `DECISIONES.md` (qué manda sobre qué). No asumir memoria de sesiones anteriores.
+Antes de empezar cualquier sesión: leer este archivo y `DECISIONES.md` (qué manda sobre qué); después, el Issue y el PR indicados para la tarea. No asumir memoria de sesiones anteriores. Si no hay una tarea indicada, consultar la cola de #128 y pedir a Codex la siguiente entrega disponible; `spec-lista` no elimina sus dependencias ni la prioridad de las correcciones.
+
+**Contexto de implementación preparado por Codex:** cada nueva asignación incluye alcance, dependencias, contratos y enlaces a las secciones vigentes necesarias, con revisión o commit cuando corresponda. Codex resuelve las contradicciones de diseño antes de asignar: Claude lee esas fuentes y el código/pruebas del área para implementar, sin reconstruir el roadmap ni investigar todo el repositorio. Si falta una decisión o una referencia necesaria, la plantea en el Issue y Codex completa la especificación. No se exige releer los 17 módulos ni todo el historial en cada sesión. Esta preparación no reabre ni reorganiza el trabajo ya iniciado.
 
 ## Referencia técnica
 
-- **Empezar por `ESTADO.md` y `DECISIONES.md`.** El primero dice qué hay; el segundo, qué documento prevalece sobre cuál.
+- **Estado y decisiones:** GitHub conserva el estado de Issues/PR y sus evidencias; #128 ordena las entregas y enlaza sus dependencias. No copiar conteos, listas de integraciones ni veredictos en un archivo de estado. `DECISIONES.md` indica qué documento prevalece sobre cuál; los contratos, el código y las pruebas del área permiten comprobar qué existe.
 - Arquitectura original: `LEER_PRIMERO.md`, `docs/arquitectura/INDICE_17_MODULOS.md`, `docs/arquitectura/gobierno/ROADMAP_GLOBAL.md`. Es la base histórica: no se modifica (huellas en `INVENTARIO.md`).
 - Decisiones vigentes: `docs/decisiones/` (ADR). Prevalecen sobre `docs/arquitectura/` donde la contradigan; incluye qué menciones de la base están obsoletas.
 - Leyes fundamentales, principios de producto y anti-patrones: `docs/producto/` (ver `DECISIONES.md` para el orden de prioridad entre todo esto).
@@ -27,7 +29,7 @@ El propietario define el objetivo. A partir de ahí:
 5. **Terminado** significa: cumple la especificación del Issue, sus pruebas pasan, y deja pruebas que protegen contra regresiones. Ni la opinión de Claude ni la de Codex cierran un Issue por sí solas — los criterios sí. Codex lo cierra; Claude nunca cierra su propio trabajo.
 6. **Validación del propietario.** Cuando se integra algo que se puede ver o usar, Claude lo explica en lenguaje llano: qué puede hacer ahora, cómo probarlo paso a paso y qué debería ver. El propietario acepta o rechaza; si rechaza, se abre un Issue con lo que falla. Lo que no se puede probar a mano (correcciones internas, rendimiento, seguridad) lo validan la verificación de Codex y las pruebas automáticas.
 
-**Retroactividad:** las leyes y los fundamentos de producto se auditan contra lo ya construido (Issue #84). El resto del código existente, construido antes del corte, se especifica retroactivamente solo para los módulos críticos que señale `ESTADO.md`; lo demás, solo cuando se vuelva a tocar. Todo lo nuevo sigue el flujo completo desde el primer día.
+**Retroactividad:** las leyes y los fundamentos de producto se auditan contra lo ya construido (Issue #84). El resto del código existente, construido antes del corte, se especifica retroactivamente solo para los módulos críticos que Codex identifique en sus Issues, con alcance y evidencia enlazados desde #84/#128; lo demás, solo cuando se vuelva a tocar. Todo lo nuevo sigue el flujo completo desde el primer día. Retirar el archivo de estado no cierra auditorías ni da por cumplidos sus criterios.
 
 ## Protocolo de comunicación
 

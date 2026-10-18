@@ -270,7 +270,7 @@ Este documento es la **fuente de la propuesta de producto**. El flujo recomendad
 | Issue #128 | Resumen de la relación con G2 y enlaces al Issue/PR/documento. Evita mantener otra versión editable del contenido completo |
 | ADR posteriores | Decisiones arquitectónicas aceptadas y cambios normativos concretos; no convertir toda la comparación en una ADR |
 | Issues de producto posteriores | Una entrega por Issue, con contratos, criterios medibles, negativos y pruebas. Se presentan en tandas y se implementan según dependencias |
-| ESTADO.md | Situación y enlaces cuando corresponde actualizar el estado; no repite esta propuesta ni presenta capacidades como terminadas |
+| Issues y PR enlazados | Estado de cada entrega y evidencia de su implementación; no copiar conteos ni presentar capacidades propuestas como terminadas |
 
 La entrega documental se integra sin interrumpir un Issue en curso. La cola de implementación vigente no cambia por publicar una propuesta. Su ubicación en el milestone actual identifica el trabajo documental de planificación; no incorpora las capacidades posteriores como requisitos ocultos de G2.
 
