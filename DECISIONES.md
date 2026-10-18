@@ -31,7 +31,17 @@
 | **Base histórica de arquitectura** (no se modifica) | [`docs/arquitectura/`](docs/arquitectura/INDICE_17_MODULOS.md), huellas en `INVENTARIO.md` | — (ADR la sustituye donde aplica) |
 | **Diseño normativo del motor semántico** | [`docs/semantica/`](docs/semantica/README.md) | — (ADR manda donde contradiga) |
 | **Reglas de trabajo y calidad** | [`AGENTS.md`](AGENTS.md) | Propietario |
-| **Estado actual del proyecto** | [`ESTADO.md`](ESTADO.md) | Se actualiza solo, al cerrar cada Issue |
+| **Estado y evidencia de entregas** | [Issues](https://github.com/eribertocz/bi-platform/issues), [PR](https://github.com/eribertocz/bi-platform/pulls) y [milestones](https://github.com/eribertocz/bi-platform/milestones); [#128](https://github.com/eribertocz/bi-platform/issues/128) define el orden de G2 | Codex especifica/verifica; Claude implementa; GitHub registra abierto, cerrado e integrado |
+
+## Decisión: una fuente por dato y retirada del archivo de estado (2026-10-18)
+
+**Aprobada por el propietario**, con aplicación de una modificación por vez ([registro y entrega acotada en #214](https://github.com/eribertocz/bi-platform/issues/214)). Sustituye la obligación de leer y actualizar el archivo de estado del proyecto:
+
+- El Issue contiene alcance y criterios; el PR, implementación, pruebas y veredicto. El estado abierto/cerrado/integrado se consulta en GitHub, sin transcribirlo. #128 conserva prioridades y dependencias; no es otra copia de los estados o las especificaciones. Su simplificación es una entrega posterior.
+- Los contratos y pruebas del área permiten verificar el producto; la arquitectura, las leyes y las ADR conservan su autoridad. Un comportamiento existente contrario a ellas es un defecto, no una decisión que las sustituya.
+- Las versiones siguen en ADR 0014 y la dirección posterior en su propuesta/Issues; los pendientes mantienen sus Issues/gates. La investigación original y sus huellas no se modifican. El inventario y los hallazgos del archivo retirado conservan trazabilidad en #214 y en Git; no se crea otro documento de estado.
+- Codex prepara las referencias pertinentes al asignar una entrega. Claude consulta reglas, Issue/PR y fuentes del área; no reconstruye la arquitectura ni el orden de trabajo. Los Issues/PR ya iniciados conservan su alcance y prioridad.
+- Este primer cambio solo retira el archivo y actualiza sus referencias. La depuración de #128, de los Issues pendientes y del resto de instrucciones, así como cualquier cambio de CI, se hace por separado. No reduce funcionalidades, calidad ni auditorías, no cierra gates y no autoriza releases.
 
 ## Decisión: roles estrictos (2026-10-13)
 
