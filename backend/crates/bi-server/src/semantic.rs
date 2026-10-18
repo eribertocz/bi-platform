@@ -499,6 +499,7 @@ const fn kind_code(kind: ResourceKind) -> &'static str {
         ResourceKind::Source => "source",
         ResourceKind::User => "user",
         ResourceKind::Role => "role",
+        ResourceKind::AuditLog => "audit_log",
     }
 }
 

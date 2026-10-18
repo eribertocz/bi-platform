@@ -22,13 +22,20 @@ use serde::Deserialize;
 use crate::models::{project_subdir, read_file};
 
 /// The edge's fragment of the Cedar schema (ADR 0012 §7): users in roles,
-/// and no request attributes yet.
+/// no request attributes yet, and the audit trail with the one action that
+/// reads it (#158), applicable to nothing else.
 pub const PLATFORM_SCHEMA: &str = "\
 type RequestContext = {};
 entity Role;
 entity User in [Role];
 entity Dashboard = { classification: String };
 entity Source;
+entity AuditLog;
+action \"view_audit\" appliesTo {
+  principal: [User],
+  resource: [AuditLog],
+  context: RequestContext,
+};
 ";
 
 const MAX_POLICY_FILES: usize = 100;
