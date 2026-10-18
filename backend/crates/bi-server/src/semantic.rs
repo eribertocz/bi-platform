@@ -10,6 +10,7 @@
 
 pub mod access;
 pub mod context;
+pub mod envelope;
 pub mod prepare;
 pub mod request;
 pub mod result;

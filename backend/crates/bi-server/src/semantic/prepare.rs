@@ -6,7 +6,7 @@
 //! and validation and planning succeeded; anything else is a [`Refusal`],
 //! which can be answered but never consumed as a success.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use axum::http::StatusCode;
@@ -117,6 +117,9 @@ pub struct Prepared {
     query_fingerprint: String,
     plan_fingerprint: String,
     notices: Vec<LifecycleNotice>,
+    /// Of the objects the plan reads, those this session may see, decided
+    /// on the same snapshot: deriving from an object never shows it.
+    visible: BTreeSet<StableId>,
     audit: Audit,
 }
 
@@ -177,6 +180,17 @@ impl Prepared {
     #[must_use]
     pub fn notices(&self) -> &[LifecycleNotice] {
         &self.notices
+    }
+
+    #[must_use]
+    pub const fn certificate(&self) -> &Certificate {
+        &self.certificate
+    }
+
+    /// Whether this session may see `id`, one of the objects the plan reads.
+    #[must_use]
+    pub fn shows(&self, id: &StableId) -> bool {
+        self.visible.contains(id)
     }
 
     pub(super) const fn audit(&self) -> &Audit {
@@ -635,11 +649,13 @@ fn decide(
             "No se pudo calcular la huella de la consulta.",
         )));
     };
-    let notices = notices(model, &bound, |id| {
+    let shows = |id: &StableId| {
         resources
             .get(id)
             .is_some_and(|resource| shown(access, principal, resource))
-    });
+    };
+    let notices = notices(model, &bound, shows);
+    let visible = visible(&planned.plan, shows);
     let audit = audit(&decision, true);
     Ok(Prepared {
         roles: principal.roles.iter().cloned().collect(),
@@ -652,10 +668,24 @@ fn decide(
         certificate: planned.certificate,
         decision,
         notices,
+        visible,
         audit,
         bound,
         compiled,
     })
+}
+
+/// The objects `plan` reads that `shows` admits.
+fn visible(plan: &SemanticPlan, shows: impl Fn(&StableId) -> bool) -> BTreeSet<StableId> {
+    let roots: Vec<_> = plan.blocks.iter().map(|block| block.root).collect();
+    plan.graph
+        .topological(&roots)
+        .iter()
+        .flat_map(|node| node.operator.objects())
+        .map(|object| &object.id)
+        .filter(|id| shows(id))
+        .cloned()
+        .collect()
 }
 
 /// The deprecated metrics the query selects, each once, with a
