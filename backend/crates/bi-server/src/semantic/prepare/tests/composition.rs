@@ -57,7 +57,7 @@ pub(crate) fn model(extensions: &str, metrics: &str) -> String {
 }
 
 /// Rows of each session visible only through the policy on `region`.
-const ROW_POLICY: &str = "custom_extensions:\n  - vendor_name: bi-platform\n    data: '{\"version\": 1, \"semantic_version\": \"0.1.0\", \"policies\": [{\"name\": \"zona\", \"dataset\": \"ventas\", \"enforcement\": \"mandatory\", \"predicate\": \"region = :region\", \"context\": [{\"name\": \"region\", \"type\": \"string\", \"sensitivity\": \"sensitive\"}]}]}'\n";
+pub(crate) const ROW_POLICY: &str = "custom_extensions:\n  - vendor_name: bi-platform\n    data: '{\"version\": 1, \"semantic_version\": \"0.1.0\", \"policies\": [{\"name\": \"zona\", \"dataset\": \"ventas\", \"enforcement\": \"mandatory\", \"predicate\": \"region = :region\", \"context\": [{\"name\": \"region\", \"type\": \"string\", \"sensitivity\": \"sensitive\"}]}]}'\n";
 
 pub(crate) fn project(model: &str, members: &str) -> tempfile::TempDir {
     let p = tempfile::tempdir().unwrap();

@@ -610,7 +610,12 @@ export interface components {
     };
     /** @description Fingerprints of everything the answer depended on. */
     SemanticReceipt: {
-      /** @description The session values the model's row policies read; never the values. */
+      /**
+       * @description The verified session's row-policy values, as an HMAC under a secret
+       *     of this instance: equal within one instance for the same project,
+       *     principal and values; never comparable across restarts, never the
+       *     values.
+       */
       context: string;
       decision: string;
       /** @description Covers every fingerprint below. */

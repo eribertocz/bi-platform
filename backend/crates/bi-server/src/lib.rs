@@ -46,6 +46,8 @@ pub struct AppState {
     pub query_timeout: Duration,
     pub metrics: metrics::QueryMetrics,
     pub models: models::Models,
+    /// The secret of this instance for public context fingerprints.
+    pub context_key: semantic::context::ContextKey,
 }
 
 impl AppState {
@@ -60,6 +62,7 @@ impl AppState {
             query_timeout: config::DEFAULT_QUERY_TIMEOUT,
             metrics: metrics::QueryMetrics::default(),
             models: models::Models::default(),
+            context_key: semantic::context::ContextKey::generate(),
         }
     }
 }

@@ -9,6 +9,7 @@
 //! or the base roles. An unreadable or invalid policy set closes the path.
 
 pub mod access;
+pub mod context;
 pub mod prepare;
 pub mod request;
 pub mod result;
@@ -75,7 +76,10 @@ pub struct SemanticReceipt {
     pub plan: String,
     pub decision: String,
     pub policies: String,
-    /// The session values the model's row policies read; never the values.
+    /// The verified session's row-policy values, as an HMAC under a secret
+    /// of this instance: equal within one instance for the same project,
+    /// principal and values; never comparable across restarts, never the
+    /// values.
     pub context: String,
 }
 
@@ -347,8 +351,32 @@ fn problem_headers(mut response: Response) -> Response {
 async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -> Outcome {
     // Rendered where it was prepared: within the admission permit and the
     // query deadline, off the async executor.
+    // Without the instance's key there is no public context fingerprint,
+    // and nothing is read to find out.
+    if !state.context_key.is_available() {
+        return Outcome::Failed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "explain_unavailable",
+            "No se pudo proteger la huella del contexto.",
+        );
+    }
+    let key = state.context_key.clone();
+    let project = state
+        .models
+        .directory
+        .as_deref()
+        .map(|directory| directory.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let subject = principal.session.user.id.clone();
     let session = prepare::Session::of(principal);
-    match prepare::prepare_with(state, session, &request, |prepared| explained(&prepared)).await {
+    let render = move |prepared: prepare::Prepared| {
+        let scope = context::Scope {
+            project: &project,
+            principal: &subject,
+        };
+        explained(&prepared, &key, &scope)
+    };
+    match prepare::prepare_with(state, session, &request, render).await {
         Ok(outcome) => outcome,
         Err(prepare::Refusal(outcome)) => *outcome,
     }
@@ -356,10 +384,21 @@ async fn run(state: &AppState, principal: &Principal, request: ExplainRequest) -
 
 /// Explain, as one consumer of the preparation: the decision, the certified
 /// plan and the receipt, all read from what was prepared.
-fn explained(prepared: &prepare::Prepared) -> Outcome {
+fn explained(
+    prepared: &prepare::Prepared,
+    key: &context::ContextKey,
+    scope: &context::Scope<'_>,
+) -> Outcome {
     let decision = prepared.decision();
     let Some(block) = prepared.query().blocks.first() else {
         return Outcome::Refused("La consulta no tiene bloques.".to_owned());
+    };
+    let Some(context) = key.fingerprint(scope, prepared.context()) else {
+        return Outcome::Failed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "explain_unavailable",
+            "No se pudo proteger la huella del contexto.",
+        );
     };
     let receipt = receipt(
         prepared.query_fingerprint().to_owned(),
@@ -367,7 +406,7 @@ fn explained(prepared: &prepare::Prepared) -> Outcome {
         prepared.plan_fingerprint().to_owned(),
         decision.fingerprint.to_string(),
         prepared.policies().to_owned(),
-        prepared.context(),
+        context,
     );
     let obligations = prepared
         .validated()
@@ -534,7 +573,7 @@ fn receipt(
     plan: String,
     decision: String,
     policies: String,
-    slots: &SemanticContext,
+    context: String,
 ) -> SemanticReceipt {
     // Length-prefixed, so no two different inputs encode alike.
     let digest = |parts: &[&str]| {
@@ -545,13 +584,6 @@ fn receipt(
         }
         hex(&hasher.finalize())
     };
-    let values: Vec<String> = slots
-        .slots
-        .iter()
-        .flat_map(|(name, value)| [name.clone(), format!("{value:?}")])
-        .collect();
-    let values: Vec<&str> = values.iter().map(String::as_str).collect();
-    let context = format!("sha256:{}", digest(&values));
     let id = format!(
         "receipt:{}",
         digest(&[&query, &model, &plan, &decision, &policies, &context])

@@ -141,6 +141,7 @@ async fn stack(
         query_timeout,
         metrics,
         models: bi_server::models::Models::default(),
+        context_key: bi_server::semantic::context::ContextKey::generate(),
     });
     let login = app
         .clone()

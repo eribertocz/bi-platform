@@ -124,6 +124,7 @@ async fn query_latency(pool: PgPool) {
         metrics,
         query_timeout: Duration::from_secs(10),
         models: bi_server::models::Models::default(),
+        context_key: bi_server::semantic::context::ContextKey::generate(),
     });
     let login = app
         .clone()

@@ -159,6 +159,19 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// A session the provider verified, without a stored token.
+    #[cfg(test)]
+    pub(crate) const fn federated(
+        session: Session,
+        identity: crate::oidc::FederatedIdentity,
+    ) -> Self {
+        Self {
+            session,
+            federated_identity: Some(identity),
+            token_hash: Vec::new(),
+        }
+    }
+
     /// Groups the provider verified for this session; none for a local one.
     /// They grant only what a project's `members.yaml` maps them to.
     #[must_use]

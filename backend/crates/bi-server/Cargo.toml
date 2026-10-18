@@ -34,6 +34,7 @@ sef-planner = { path = "../sef-planner" }
 sef-query-ir = { path = "../sef-query-ir" }
 serde-saphyr = "=1.3.0"
 getrandom.workspace = true
+hmac = "0.13.0"
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
