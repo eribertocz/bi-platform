@@ -2033,7 +2033,7 @@
         "properties": {
           "context": {
             "type": "string",
-            "description": "The session values the model's row policies read; never the values."
+            "description": "The verified session's row-policy values, as an HMAC under a secret\nof this instance: equal within one instance for the same project,\nprincipal and values; never comparable across restarts, never the\nvalues."
           },
           "decision": {
             "type": "string"

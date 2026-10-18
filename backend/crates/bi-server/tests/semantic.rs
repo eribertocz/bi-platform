@@ -771,6 +771,24 @@ fn without_correlation(mut body: Value) -> Value {
     body
 }
 
+/// The context fingerprint is an HMAC under this instance's key and its
+/// project (#204), and the receipt ID covers it: both differ on every run.
+/// Their form is fixed here; their values, in `semantic::context`.
+fn per_instance(mut body: Value) -> Value {
+    let hex = |text: &str, prefix: &str| {
+        text.strip_prefix(prefix)
+            .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    if let Some(receipt) = body.get_mut("receipt") {
+        for (field, prefix) in [("context", "ctx-hmac-sha256-v1:"), ("id", "receipt:")] {
+            let value = receipt[field].as_str().unwrap();
+            assert!(hex(value, prefix), "{field}: {value}");
+            receipt[field] = json!(format!("{prefix}<per instance>"));
+        }
+    }
+    body
+}
+
 /// An explanation of `name` asked about `model`.
 fn asked(model: &str, name: &str) -> Value {
     let mut body = query(&json!([metric("m", name)]));
@@ -1191,7 +1209,7 @@ async fn the_explain_contract_is_preserved(pool: sqlx::PgPool) {
             "case": case,
             "user": user,
             "status": status.as_u16(),
-            "answer": without_correlation(answer),
+            "answer": per_instance(without_correlation(answer)),
         }));
     }
     // Cases that need another project state, applied in this order.
@@ -1253,7 +1271,7 @@ async fn the_explain_contract_is_preserved(pool: sqlx::PgPool) {
             "case": case,
             "user": user,
             "status": status.as_u16(),
-            "answer": without_correlation(answer),
+            "answer": per_instance(without_correlation(answer)),
         }));
     }
     let recorded = serde_json::to_string_pretty(&Value::from(recorded)).unwrap() + "\n";

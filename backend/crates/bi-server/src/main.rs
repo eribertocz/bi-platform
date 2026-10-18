@@ -277,6 +277,13 @@ async fn run() -> ExitCode {
         use opentelemetry::metrics::MeterProvider as _;
         models = models.with_meter(&provider.meter("bi-server"));
     }
+    let context_key = bi_server::semantic::context::ContextKey::generate();
+    if !context_key.is_available() {
+        tracing::error!(
+            event_code = "context_key_unavailable",
+            "no entropy for the context key: explain stays unavailable"
+        );
+    }
     let state = AppState {
         db: db.clone(),
         auth: config.auth,
@@ -284,6 +291,7 @@ async fn run() -> ExitCode {
         query_timeout: config.query_timeout,
         metrics,
         models,
+        context_key,
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;

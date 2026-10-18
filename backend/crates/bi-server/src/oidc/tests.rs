@@ -684,22 +684,7 @@ mod real {
         state.auth.oidc = Some(config(&issuer(), "bi-platform"));
         state.models = crate::models::Models::new(Some(project.path().to_owned()));
         let app = crate::router(state);
-        let (url, cookie) = begin(&app).await;
-        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
-        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
-        let response = send(&app, "GET", &path, Some(&cookie), None).await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        let session = response
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .map(|v| v.to_str().unwrap())
-            .find(|v| v.starts_with("bi_session="))
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned();
+        let session = signed_in(&app).await;
         let list = |uri: &str, claimed: Option<(&'static str, &'static str)>| {
             let mut request = Request::get(uri).header(header::COOKIE, &session);
             if let Some((name, value)) = claimed {
@@ -757,6 +742,139 @@ mod real {
                 denial,
             ]
         );
+        db.close().await;
+    }
+
+    /// A whole login of `oidc-user` at the real provider: its session cookie.
+    async fn signed_in(app: &Router) -> String {
+        let (url, cookie) = begin(app).await;
+        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let path = format!("{}?{}", callback.path(), callback.query().unwrap());
+        let response = send(app, "GET", &path, Some(&cookie), None).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .find(|v| v.starts_with("bi_session="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Explain over a row policy that reads the provider's verified
+    /// `department` (#204), through the router and its audit: the value
+    /// leaves in no form, neither in the answer nor in the audit, and
+    /// without the instance's key nothing is read or recorded.
+    #[sqlx::test(migrations = false)]
+    async fn explain_never_publishes_a_verified_context_value(pool: PgPool) {
+        use crate::semantic::prepare::tests::composition::{ROW_POLICY, analytics, model};
+        use sha2::Digest as _;
+        let policy = ROW_POLICY
+            .replace(":region", ":department")
+            .replace(r#""name": "region""#, r#""name": "department""#);
+        assert_eq!(policy.matches("department").count(), 2, "{policy}");
+        let project = tempfile::tempdir().unwrap();
+        for dir in ["metrics", "policies"] {
+            std::fs::create_dir(project.path().join(dir)).unwrap();
+        }
+        std::fs::write(
+            project.path().join("metrics/ventas.yaml"),
+            model(&policy, ""),
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("policies/members.yaml"),
+            "version: 1\ngroups:\n  analysts: [viewer]\n",
+        )
+        .unwrap();
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
+        assert!(db.wait_until_ready().await);
+        let mut state = AppState::new(db.clone());
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        state.models = crate::models::Models::new(Some(project.path().to_owned()));
+        state.analytics = analytics().await;
+        let app = crate::router(state.clone());
+        let session = signed_in(&app).await;
+        let explain = |app: Router| {
+            let session = session.clone();
+            async move {
+                let body = serde_json::json!({
+                    "model": "metrics/ventas.yaml",
+                    "query": { "selections": [
+                        { "kind": "metric", "id": "t", "name": "importe_total" }
+                    ] }
+                });
+                let request = Request::post("/api/v1/semantic/explain")
+                    .header(header::COOKIE, &session)
+                    .header(header::ORIGIN, "http://127.0.0.1:8080")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                (status, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+        let events = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT payload::text FROM bi_meta.audit_events ORDER BY sequence",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        // What `main` published before #204 for this context.
+        let mut old = sha2::Sha256::new();
+        for part in ["department", r#"Utf8("finance")"#] {
+            old.update((part.len() as u64).to_be_bytes());
+            old.update(part.as_bytes());
+        }
+        let old = old.finalize().iter().fold(String::new(), |mut text, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(text, "{byte:02x}");
+            text
+        });
+        let before = events().await.len();
+        let (status, text) = explain(app.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let answer: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let context = answer["receipt"]["context"].as_str().unwrap().to_owned();
+        assert!(context.starts_with("ctx-hmac-sha256-v1:"), "{context}");
+        assert!(!text.contains("finance") && !text.contains(&old), "{text}");
+        // Recorded, and the audit carries neither the value nor a fingerprint.
+        let recorded = events().await;
+        assert!(recorded.len() > before);
+        for event in &recorded {
+            assert!(
+                !event.contains("finance") && !event.contains(&old),
+                "{event}"
+            );
+            assert!(!event.contains(&context[19..]), "{event}");
+        }
+        // The same session, project and key: the same fingerprint.
+        let (_, again) = explain(app.clone()).await;
+        let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(again["receipt"], answer["receipt"]);
+        // Without the key: unavailable, and nothing more is recorded.
+        let recorded = events().await.len();
+        let keyless = crate::router(AppState {
+            context_key: crate::semantic::context::ContextKey::from_entropy(|_| {
+                Err(getrandom::Error::UNSUPPORTED)
+            }),
+            ..state
+        });
+        let (status, text) = explain(keyless).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+        assert!(text.contains("explain_unavailable"), "{text}");
+        assert_eq!(events().await.len(), recorded);
         db.close().await;
     }
 
