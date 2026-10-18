@@ -26,7 +26,11 @@ use crate::{auth, health, models, oidc, query, semantic};
         models::list,
         semantic::explain
     ),
-    components(schemas(crate::problem::Problem)),
+    components(schemas(
+        crate::problem::Problem,
+        // The exact result body (#136); the route that returns it is #138.
+        semantic::result::SemanticResult
+    )),
     security(),
     modifiers(&SessionSecurity)
 )]
