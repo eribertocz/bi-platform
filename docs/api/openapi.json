@@ -1509,6 +1509,132 @@
           }
         }
       },
+      "SemanticBlock": {
+        "type": "object",
+        "required": [
+          "block_id",
+          "columns",
+          "rows",
+          "row_count",
+          "limit"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticColumn"
+            }
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The row limit the plan applied, when the query set one.",
+            "minimum": 0
+          },
+          "row_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SemanticCell"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "description": "One array per row, one cell per column; `null` is a missing value,\nor any value of a masked column."
+          }
+        }
+      },
+      "SemanticCell": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "boolean"
+          }
+        ],
+        "description": "One present value: exact decimal text for DECIMAL and INT64, the text\nof a VARCHAR, `YYYY-MM-DD` for a DATE and an RFC 3339 instant in UTC for\na TIMESTAMPTZ; a BOOLEAN as `true` or `false`."
+      },
+      "SemanticColumn": {
+        "type": "object",
+        "required": [
+          "selection_id",
+          "kind",
+          "id",
+          "type",
+          "nullable",
+          "unit",
+          "timezone",
+          "masked"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The stable identifier of the metric or dimension."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/SemanticColumnKind"
+          },
+          "masked": {
+            "type": "boolean",
+            "description": "Values withheld by the decision: every cell is `null`, unlike a\ncolumn whose `null` cells are missing values."
+          },
+          "nullable": {
+            "type": "boolean",
+            "description": "Always `true` today: a metric or a dimension may yield `null`."
+          },
+          "selection_id": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The governed IANA zone of a time bucket: where its days begin. An\ninstant needs none, it travels in UTC."
+          },
+          "type": {
+            "type": "string",
+            "description": "`DECIMAL(p,s)`, `INT64`, `VARCHAR`, `BOOLEAN`, `DATE` or `TIMESTAMPTZ`."
+          },
+          "unit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SemanticUnit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "SemanticColumnKind": {
+        "type": "string",
+        "description": "What a column selects.",
+        "enum": [
+          "metric",
+          "dimension",
+          "time_dimension"
+        ]
+      },
       "SemanticComparison": {
         "type": "string",
         "enum": [
@@ -1952,6 +2078,21 @@
         ],
         "description": "A query the engine cannot answer as asked, with stable diagnostics."
       },
+      "SemanticResult": {
+        "type": "object",
+        "description": "The rows of every block of a query, with their exact column contract.",
+        "required": [
+          "blocks"
+        ],
+        "properties": {
+          "blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SemanticBlock"
+            }
+          }
+        }
+      },
       "SemanticSelection": {
         "oneOf": [
           {
@@ -2118,6 +2259,114 @@
             }
           }
         ]
+      },
+      "SemanticUnit": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "An ISO 4217 currency (`USD`).",
+            "required": [
+              "code",
+              "kind"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "currency"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A UCUM unit (`kg`).",
+            "required": [
+              "code",
+              "kind"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "physical"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "ratio"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "percent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "count"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A unit of the model's own namespace.",
+            "required": [
+              "namespace",
+              "code",
+              "kind"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "custom"
+                ]
+              },
+              "namespace": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "The declared unit of a column's values."
       },
       "SemanticValue": {
         "oneOf": [

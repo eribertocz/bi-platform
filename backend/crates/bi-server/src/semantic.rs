@@ -11,6 +11,7 @@
 pub mod access;
 pub mod prepare;
 pub mod request;
+pub mod result;
 
 use std::collections::BTreeMap;
 use std::time::Instant;

@@ -463,6 +463,54 @@ export interface components {
       scale?: number | null;
       type: components['schemas']['ColumnType'];
     };
+    SemanticBlock: {
+      block_id: string;
+      columns: components['schemas']['SemanticColumn'][];
+      /**
+       * Format: int64
+       * @description The row limit the plan applied, when the query set one.
+       */
+      limit: number | null;
+      /** Format: int64 */
+      row_count: number;
+      /**
+       * @description One array per row, one cell per column; `null` is a missing value,
+       *     or any value of a masked column.
+       */
+      rows: (components['schemas']['SemanticCell'] | null)[][];
+    };
+    /**
+     * @description One present value: exact decimal text for DECIMAL and INT64, the text
+     *     of a VARCHAR, `YYYY-MM-DD` for a DATE and an RFC 3339 instant in UTC for
+     *     a TIMESTAMPTZ; a BOOLEAN as `true` or `false`.
+     */
+    SemanticCell: string | boolean;
+    SemanticColumn: {
+      /** @description The stable identifier of the metric or dimension. */
+      id: string;
+      kind: components['schemas']['SemanticColumnKind'];
+      /**
+       * @description Values withheld by the decision: every cell is `null`, unlike a
+       *     column whose `null` cells are missing values.
+       */
+      masked: boolean;
+      /** @description Always `true` today: a metric or a dimension may yield `null`. */
+      nullable: boolean;
+      selection_id: string;
+      /**
+       * @description The governed IANA zone of a time bucket: where its days begin. An
+       *     instant needs none, it travels in UTC.
+       */
+      timezone: string | null;
+      /** @description `DECIMAL(p,s)`, `INT64`, `VARCHAR`, `BOOLEAN`, `DATE` or `TIMESTAMPTZ`. */
+      type: string;
+      unit: components['schemas']['SemanticUnit'] | null;
+    };
+    /**
+     * @description What a column selects.
+     * @enum {string}
+     */
+    SemanticColumnKind: 'metric' | 'dimension' | 'time_dimension';
     /** @enum {string} */
     SemanticComparison: '=' | '<>' | '<' | '<=' | '>' | '>=';
     /** @description A use the session's roles do not allow. */
@@ -576,6 +624,10 @@ export interface components {
     SemanticRejection: components['schemas']['Problem'] & {
       diagnostics: components['schemas']['SemanticDiagnostic'][];
     };
+    /** @description The rows of every block of a query, with their exact column contract. */
+    SemanticResult: {
+      blocks: components['schemas']['SemanticBlock'][];
+    };
     SemanticSelection:
       | {
           /** @description Query-local name of the column; ordering and `having` use it. */
@@ -618,6 +670,36 @@ export interface components {
           /** @enum {string} */
           kind: 'metric';
           selection: string;
+        };
+    /** @description The declared unit of a column's values. */
+    SemanticUnit:
+      | {
+          code: string;
+          /** @enum {string} */
+          kind: 'currency';
+        }
+      | {
+          code: string;
+          /** @enum {string} */
+          kind: 'physical';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'ratio';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'percent';
+        }
+      | {
+          /** @enum {string} */
+          kind: 'count';
+        }
+      | {
+          code: string;
+          /** @enum {string} */
+          kind: 'custom';
+          namespace: string;
         };
     /** @description A literal as written; binding types it after its target. */
     SemanticValue:

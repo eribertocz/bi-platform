@@ -201,7 +201,7 @@ users:
     assert!(denial.1.is_some_and(|denied| denied.name.is_none()));
 }
 
-mod composition;
+pub(crate) mod composition;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn whatever_consumes_the_preparation_stays_within_its_permit_and_deadline() {

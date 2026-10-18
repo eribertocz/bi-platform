@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use bi_runtime::duckdb::arrow::array::{Array, Decimal128Array, Int64Array, StringArray};
 use bi_runtime::duckdb::arrow::datatypes::DataType;
-use sef_adapter_duckdb::execution::{ExecutionLimits, PhysicalRelation, SourceCatalog};
+use sef_adapter_duckdb::execution::{
+    BlockResult, ExecutionLimits, PhysicalRelation, SourceCatalog,
+};
 use serde_json::{Value, json};
 
 use super::super::*;
@@ -38,7 +40,7 @@ fn field(name: &str, extra: &str) -> String {
 }
 
 /// `nota` is restricted: a dimension the viewer may not see.
-fn model(extensions: &str, metrics: &str) -> String {
+pub(crate) fn model(extensions: &str, metrics: &str) -> String {
     let restricted = "        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n";
     format!(
         "version: '0.2.0.dev0'\nname: Ventas\n{extensions}datasets:\n  - name: ventas\n    source: lake.main.ventas\n    primary_key: [id]\n    fields:\n{}{}{}{}{}{}metrics:\n  - name: importe_total\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n  - name: filas\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: COUNT(ventas.id)\n  - name: margen\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{{\"version\": 1, \"sensitivity\": \"confidential\"}}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n{metrics}",
@@ -57,7 +59,7 @@ fn model(extensions: &str, metrics: &str) -> String {
 /// Rows of each session visible only through the policy on `region`.
 const ROW_POLICY: &str = "custom_extensions:\n  - vendor_name: bi-platform\n    data: '{\"version\": 1, \"semantic_version\": \"0.1.0\", \"policies\": [{\"name\": \"zona\", \"dataset\": \"ventas\", \"enforcement\": \"mandatory\", \"predicate\": \"region = :region\", \"context\": [{\"name\": \"region\", \"type\": \"string\", \"sensitivity\": \"sensitive\"}]}]}'\n";
 
-fn project(model: &str, members: &str) -> tempfile::TempDir {
+pub(crate) fn project(model: &str, members: &str) -> tempfile::TempDir {
     let p = tempfile::tempdir().unwrap();
     std::fs::create_dir(p.path().join("metrics")).unwrap();
     std::fs::create_dir(p.path().join("policies")).unwrap();
@@ -66,7 +68,7 @@ fn project(model: &str, members: &str) -> tempfile::TempDir {
     p
 }
 
-async fn analytics() -> Analytics {
+pub(crate) async fn analytics() -> Analytics {
     let runtime = tokio::task::spawn_blocking(|| {
         bi_runtime::Bootstrap::open(bi_runtime::RuntimeConfig::in_memory(2))
             .unwrap()
@@ -88,7 +90,7 @@ async fn analytics() -> Analytics {
     Analytics::ready(runtime)
 }
 
-fn state(project: &Path, analytics: Analytics) -> AppState {
+pub(crate) fn state(project: &Path, analytics: Analytics) -> AppState {
     AppState {
         models: Models::new(Some(project.to_owned())),
         analytics,
@@ -99,23 +101,23 @@ fn state(project: &Path, analytics: Analytics) -> AppState {
     }
 }
 
-fn request(query: &Value) -> ExplainRequest {
+pub(crate) fn request(query: &Value) -> ExplainRequest {
     serde_json::from_value(json!({ "model": "metrics/ventas.yaml", "query": query })).unwrap()
 }
 
-fn selections(selections: &Value) -> ExplainRequest {
+pub(crate) fn selections(selections: &Value) -> ExplainRequest {
     request(&json!({ "selections": selections }))
 }
 
-fn metric(id: &str, name: &str) -> Value {
+pub(crate) fn metric(id: &str, name: &str) -> Value {
     json!({ "kind": "metric", "id": id, "name": name })
 }
 
-fn dimension(id: &str, name: &str) -> Value {
+pub(crate) fn dimension(id: &str, name: &str) -> Value {
     json!({ "kind": "dimension", "id": id, "name": name })
 }
 
-fn session(user: &str, attributes: &[(&str, Value)]) -> Session {
+pub(crate) fn session(user: &str, attributes: &[(&str, Value)]) -> Session {
     Session::verified(
         user.to_owned(),
         Vec::new(),
@@ -126,7 +128,11 @@ fn session(user: &str, attributes: &[(&str, Value)]) -> Session {
     )
 }
 
-async fn ready(state: &AppState, session: Session, request: &ExplainRequest) -> Prepared {
+pub(crate) async fn ready(
+    state: &AppState,
+    session: Session,
+    request: &ExplainRequest,
+) -> Prepared {
     let Ok(prepared) = prepare(state, session, request).await else {
         panic!("the query must be prepared");
     };
@@ -141,9 +147,9 @@ async fn refusal(state: &AppState, session: Session, request: &ExplainRequest) -
     *outcome
 }
 
-/// Lowers the preparation onto the sources it captured and runs it: rows of
-/// `(region or "", importe_total in hundredths, filas)`.
-async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i64)> {
+/// Lowers the preparation onto the sources it captured and runs it: the
+/// blocks the executor delivers, as they arrive.
+pub(crate) async fn execute(analytics: &Analytics, prepared: &Prepared) -> Vec<BlockResult> {
     let execution = prepared.execution().expect("nothing masked");
     let catalog: SourceCatalog = execution
         .sources()
@@ -187,49 +193,56 @@ async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i
             2,
         )
         .unwrap();
-    let mut rows = Vec::new();
+    let mut blocks = Vec::new();
     let mut complete = 0;
     while let Some(event) = stream.next().await {
         match event {
-            Event::Batch(block) => {
-                for batch in block.batches {
-                    let column = |id: &str| {
-                        let index = batch
-                            .schema()
-                            .fields()
-                            .iter()
-                            .position(|f| f.metadata().values().any(|v| v.ends_with(id)))
-                            .unwrap_or_else(|| panic!("{id}: {:?}", batch.schema()));
-                        batch.column(index).clone()
-                    };
-                    let amounts = column("importe_total");
-                    let amounts = amounts.as_any().downcast_ref::<Decimal128Array>().unwrap();
-                    let counts = column("filas");
-                    let counts = counts.as_any().downcast_ref::<Int64Array>().unwrap();
-                    let regions = batch
-                        .schema()
-                        .fields()
-                        .iter()
-                        .position(|f| f.data_type() == &DataType::Utf8)
-                        .map(|i| batch.column(i).clone());
-                    for i in 0..batch.num_rows() {
-                        let region = regions.as_ref().map_or_else(String::new, |r| {
-                            r.as_any()
-                                .downcast_ref::<StringArray>()
-                                .unwrap()
-                                .value(i)
-                                .to_owned()
-                        });
-                        assert_eq!(amounts.scale(), 2);
-                        rows.push((region, amounts.value(i), counts.value(i)));
-                    }
-                }
-            }
+            Event::Batch(block) => blocks.push(block),
             Event::Complete(_) => complete += 1,
             Event::Failed(failure) => panic!("{failure:?}"),
         }
     }
     assert_eq!(complete, 1);
+    blocks
+}
+
+/// The executed rows: `(region or "", importe_total in hundredths, filas)`.
+async fn run(analytics: &Analytics, prepared: &Prepared) -> Vec<(String, i128, i64)> {
+    let mut rows = Vec::new();
+    for block in execute(analytics, prepared).await {
+        for batch in block.batches {
+            let column = |id: &str| {
+                let index = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .position(|f| f.metadata().values().any(|v| v.ends_with(id)))
+                    .unwrap_or_else(|| panic!("{id}: {:?}", batch.schema()));
+                batch.column(index).clone()
+            };
+            let amounts = column("importe_total");
+            let amounts = amounts.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let counts = column("filas");
+            let counts = counts.as_any().downcast_ref::<Int64Array>().unwrap();
+            let regions = batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|f| f.data_type() == &DataType::Utf8)
+                .map(|i| batch.column(i).clone());
+            for i in 0..batch.num_rows() {
+                let region = regions.as_ref().map_or_else(String::new, |r| {
+                    r.as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap()
+                        .value(i)
+                        .to_owned()
+                });
+                assert_eq!(amounts.scale(), 2);
+                rows.push((region, amounts.value(i), counts.value(i)));
+            }
+        }
+    }
     rows.sort();
     rows
 }
