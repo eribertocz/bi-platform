@@ -29,6 +29,9 @@ pub enum ResourceKind {
     Source,
     User,
     Role,
+    /// The platform's audit trail, as one object: reading it is
+    /// [`Action::ViewAudit`], never a semantic `view`.
+    AuditLog,
 }
 
 impl ResourceKind {
@@ -44,6 +47,7 @@ impl ResourceKind {
             Self::Source => "Source",
             Self::User => "User",
             Self::Role => "Role",
+            Self::AuditLog => "AuditLog",
         }
     }
 }
@@ -63,10 +67,13 @@ pub enum Action {
     Connect,
     Configure,
     Manage,
+    /// Reading the audit trail. Its own action, so that no rule written for
+    /// the semantic ones (a modeler's `view` on any resource) reaches it.
+    ViewAudit,
 }
 
 impl Action {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::View,
         Self::ViewMasked,
         Self::UseInDashboard,
@@ -79,6 +86,7 @@ impl Action {
         Self::Connect,
         Self::Configure,
         Self::Manage,
+        Self::ViewAudit,
     ];
 
     /// The Cedar action identifier.
@@ -97,6 +105,7 @@ impl Action {
             Self::Connect => "connect",
             Self::Configure => "configure",
             Self::Manage => "manage",
+            Self::ViewAudit => "view_audit",
         }
     }
 }
