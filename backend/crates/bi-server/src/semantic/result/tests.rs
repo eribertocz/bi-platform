@@ -697,14 +697,46 @@ async fn a_time_dimension_is_its_bucket_and_a_mismatched_one_is_refused() {
             vec![json!("2026-01-01"), json!("2")],
         ]
     );
-    // Days of the raw instant: the adapter declares TIMESTAMPTZ and delivers
-    // dates. Refused whole, never presented as what it is not.
+    // Days of the raw instant: the adapter declares TIMESTAMPTZ and its
+    // bucket delivers dates. Refused whole, never presented as what it is
+    // not. The block is the one it declares, built here: running it depends
+    // on the engine's ICU build (see the PR).
     let mut day = time_dimension("t", "ventas.instante", "day");
     day["timezone"] = json!("America/La_Paz");
-    let query = json!({ "selections": [day, metric("f", "filas")] });
-    let (prepared, blocks, _p) = executed(&query).await;
+    let p = project(&model("", ""), MEMBERS);
+    let state = state(p.path(), analytics().await);
+    let query = request(&json!({ "selections": [day, metric("f", "filas")] }));
+    let prepared = ready(&state, session("ana", &[]), &query).await;
+    let regions = json!({ "selections": [dimension("r", "ventas.region"), metric("f", "filas")] });
+    let (_, real, _q) = executed(&regions).await;
+    let filas = real[0].batches[0].schema().field(1).clone();
+    let SelectionItem::TimeDimension(time) =
+        &prepared.validated().query.blocks[0].selections[0].item
+    else {
+        panic!("a time dimension");
+    };
+    let declared = Field::new("t", DataType::Date32, true).with_metadata(HashMap::from([
+        ("sef.selection_id".to_owned(), "t".to_owned()),
+        (
+            "sef.dimension_id".to_owned(),
+            time.dimension.dimension.as_str().to_owned(),
+        ),
+        ("sef.value_type".to_owned(), "TIMESTAMPTZ".to_owned()),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![declared, filas])),
+        vec![
+            Arc::new(Date32Array::from(vec![20_454])),
+            Arc::new(Int64Array::from(vec![2])),
+        ],
+    )
+    .unwrap();
+    let block = BlockResult {
+        block_id: prepared.validated().query.blocks[0].block_id.clone(),
+        batches: vec![batch],
+    };
     assert_eq!(
-        encode(&prepared, &blocks),
+        encode(&prepared, &[block]),
         Err(CodecError::SchemaMismatch("type"))
     );
 }
