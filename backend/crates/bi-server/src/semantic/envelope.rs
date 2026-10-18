@@ -80,14 +80,22 @@ pub struct SemanticRunQuery {
     pub sqir: String,
 }
 
+/// The query's fingerprint, which anyone can derive from `query.sqir`, and
+/// the others protected under this instance's key and for this principal:
+/// the plain ones cover what this session may not see (hidden policies and
+/// definitions, the policy files, the principal and its roles), and a
+/// dictionary of guesses would reproduce them. Comparable within one
+/// instance and for one principal, never across restarts.
 #[derive(Debug, PartialEq, Eq, Serialize, ToSchema)]
 pub struct SemanticRunFingerprints {
     pub query: String,
+    /// `model-hmac-sha256-v1:` and 64 hexadecimal digits.
     pub model: String,
+    /// `plan-hmac-sha256-v1:` and 64 hexadecimal digits.
     pub plan: String,
-    /// The decision's fingerprint, protected like `context`: the plain one
-    /// covers the principal and its roles.
+    /// `decision-hmac-sha256-v1:` and 64 hexadecimal digits.
     pub decision: String,
+    /// `policies-hmac-sha256-v1:` and 64 hexadecimal digits.
     pub policies: String,
     /// The protected fingerprint of the row-policy values (#204).
     pub context: String,
@@ -307,15 +315,21 @@ fn receipt(
     let context = key
         .fingerprint(scope, prepared.context())
         .ok_or(RunError::Unavailable)?;
-    let decision = prepared.decision().fingerprint.to_string();
-    let protected_decision = key
-        .decision(scope, &decision)
-        .ok_or(RunError::Unavailable)?;
+    let plain = Plain {
+        model: prepared.model().content_hash().to_string(),
+        plan: prepared.plan_fingerprint().to_owned(),
+        decision: prepared.decision().fingerprint.to_string(),
+        policies: prepared.policies().to_owned(),
+    };
+    let protect = |of: &str, fingerprint: &str| {
+        key.protect(scope, of, fingerprint)
+            .ok_or(RunError::Unavailable)
+    };
     let shows = |id: &StableId| prepared.shows(id);
     let definitions = shown_definitions(provenance, shows);
     let sources = shown_sources(provenance, datasets, shows);
     let evidence = key
-        .commit(scope, private_evidence(provenance, &decision))
+        .commit(scope, private_evidence(provenance, &plain))
         .ok_or(RunError::Unavailable)?;
     let mut receipt = SemanticRunReceipt {
         id: String::new(),
@@ -326,10 +340,10 @@ fn receipt(
         },
         fingerprints: SemanticRunFingerprints {
             query: prepared.query_fingerprint().to_owned(),
-            model: prepared.model().content_hash().to_string(),
-            plan: prepared.plan_fingerprint().to_owned(),
-            decision: protected_decision,
-            policies: prepared.policies().to_owned(),
+            model: protect("model", &plain.model)?,
+            plan: protect("plan", &plain.plan)?,
+            decision: protect("decision", &plain.decision)?,
+            policies: protect("policies", &plain.policies)?,
             context,
         },
         definitions,
@@ -393,10 +407,18 @@ fn shown_sources(
     sources
 }
 
+/// The fingerprints the receipt shows only protected.
+struct Plain {
+    model: String,
+    plan: String,
+    decision: String,
+    policies: String,
+}
+
 /// Everything the execution proved that the receipt does not show: every
 /// definition, every source with its relation, schema and snapshot, the
-/// certificate, the output grains and the plain decision fingerprint.
-fn private_evidence(provenance: &ResultProvenance, decision: &str) -> C {
+/// certificate, the output grains and the plain fingerprints.
+fn private_evidence(provenance: &ResultProvenance, plain: &Plain) -> C {
     let definitions = provenance
         .definitions
         .iter()
@@ -461,7 +483,10 @@ fn private_evidence(provenance: &ResultProvenance, decision: &str) -> C {
             "schema_version".to_owned(),
             C::text(provenance.schema_version),
         ),
-        ("decision".to_owned(), C::text(decision)),
+        ("model".to_owned(), C::text(&plain.model)),
+        ("plan".to_owned(), C::text(&plain.plan)),
+        ("decision".to_owned(), C::text(&plain.decision)),
+        ("policies".to_owned(), C::text(&plain.policies)),
     ])
 }
 

@@ -85,15 +85,19 @@ impl ContextKey {
         )
     }
 
-    /// The public form of a decision's fingerprint (#146): that one covers
-    /// the principal and its roles, and a guess of them would reproduce it.
+    /// The public form of a fingerprint `of` one kind (#146): `model`,
+    /// `plan`, `policies` or `decision`. Each plain fingerprint covers what
+    /// a session may not see (the model's and the plan's hidden policies,
+    /// the policy files, the principal and its roles), and a dictionary of
+    /// guesses would reproduce it; this one needs the key. Each kind has its
+    /// own domain, so no two kinds ever yield the same value.
     #[must_use]
-    pub(crate) fn decision(&self, scope: &Scope<'_>, fingerprint: &str) -> Option<String> {
+    pub(crate) fn protect(&self, scope: &Scope<'_>, of: &str, fingerprint: &str) -> Option<String> {
         self.mac(
-            b"bi-run-decision-v1",
-            "dec-hmac-sha256-v1:",
+            format!("bi-run-{of}-v1").as_bytes(),
+            &format!("{of}-hmac-sha256-v1:"),
             scope,
-            ("decision", C::text(fingerprint)),
+            ("fingerprint", C::text(fingerprint)),
         )
     }
 

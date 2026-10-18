@@ -2133,6 +2133,7 @@
       },
       "SemanticRunFingerprints": {
         "type": "object",
+        "description": "The query's fingerprint, which anyone can derive from `query.sqir`, and\nthe others protected under this instance's key and for this principal:\nthe plain ones cover what this session may not see (hidden policies and\ndefinitions, the policy files, the principal and its roles), and a\ndictionary of guesses would reproduce them. Comparable within one\ninstance and for one principal, never across restarts.",
         "required": [
           "query",
           "model",
@@ -2148,16 +2149,19 @@
           },
           "decision": {
             "type": "string",
-            "description": "The decision's fingerprint, protected like `context`: the plain one\ncovers the principal and its roles."
+            "description": "`decision-hmac-sha256-v1:` and 64 hexadecimal digits."
           },
           "model": {
-            "type": "string"
+            "type": "string",
+            "description": "`model-hmac-sha256-v1:` and 64 hexadecimal digits."
           },
           "plan": {
-            "type": "string"
+            "type": "string",
+            "description": "`plan-hmac-sha256-v1:` and 64 hexadecimal digits."
           },
           "policies": {
-            "type": "string"
+            "type": "string",
+            "description": "`policies-hmac-sha256-v1:` and 64 hexadecimal digits."
           },
           "query": {
             "type": "string"

@@ -646,16 +646,24 @@ export interface components {
       content: string;
       id: string;
     };
+    /**
+     * @description The query's fingerprint, which anyone can derive from `query.sqir`, and
+     *     the others protected under this instance's key and for this principal:
+     *     the plain ones cover what this session may not see (hidden policies and
+     *     definitions, the policy files, the principal and its roles), and a
+     *     dictionary of guesses would reproduce them. Comparable within one
+     *     instance and for one principal, never across restarts.
+     */
     SemanticRunFingerprints: {
       /** @description The protected fingerprint of the row-policy values (#204). */
       context: string;
-      /**
-       * @description The decision's fingerprint, protected like `context`: the plain one
-       *     covers the principal and its roles.
-       */
+      /** @description `decision-hmac-sha256-v1:` and 64 hexadecimal digits. */
       decision: string;
+      /** @description `model-hmac-sha256-v1:` and 64 hexadecimal digits. */
       model: string;
+      /** @description `plan-hmac-sha256-v1:` and 64 hexadecimal digits. */
       plan: string;
+      /** @description `policies-hmac-sha256-v1:` and 64 hexadecimal digits. */
       policies: string;
       query: string;
     };

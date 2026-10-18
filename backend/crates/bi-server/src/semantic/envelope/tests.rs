@@ -15,6 +15,15 @@ use crate::semantic_execution::Failure;
 const MEMBERS: &str = "version: 1\nusers:\n  ana: [viewer]\n";
 const KEY: [u8; 32] = [7; 32];
 
+fn plain() -> Plain {
+    Plain {
+        model: "m".to_owned(),
+        plan: "p".to_owned(),
+        decision: "d".to_owned(),
+        policies: "s".to_owned(),
+    }
+}
+
 fn scope() -> Scope<'static> {
     Scope {
         project: "p",
@@ -110,25 +119,33 @@ async fn a_complete_execution_answers_with_a_recomputable_receipt() {
     let receipt = serde_json::to_value(&answer.receipt).unwrap();
     // A third party recomputes the ID from what was returned.
     assert_eq!(recomputed_id(&receipt), answer.receipt.id);
-    // The fingerprints are the preparation's; the context, the protected one.
+    // The query's fingerprint is the preparation's (anyone derives it from
+    // the SQIR shown); every other one only in its protected form, and no
+    // plain one anywhere in the answer.
     let p = &prepared;
     let f = &answer.receipt.fingerprints;
     assert_eq!(f.query, p.query_fingerprint());
-    assert_eq!(f.plan, p.plan_fingerprint());
-    assert_eq!(f.policies, p.policies());
-    // The decision's plain fingerprint covers the principal: only its
-    // protected form is shown.
-    let plain = p.decision().fingerprint.to_string();
-    assert!(
-        f.decision.starts_with("dec-hmac-sha256-v1:"),
-        "{}",
-        f.decision
-    );
-    assert!(
-        !receipt
-            .to_string()
-            .contains(plain.split(':').next_back().unwrap())
-    );
+    let whole = serde_json::to_string(&answer).unwrap();
+    for (shown, of, plain) in [
+        (&f.model, "model", p.model().content_hash().to_string()),
+        (&f.plan, "plan", p.plan_fingerprint().to_owned()),
+        (
+            &f.decision,
+            "decision",
+            p.decision().fingerprint.to_string(),
+        ),
+        (&f.policies, "policies", p.policies().to_owned()),
+    ] {
+        assert!(
+            shown.starts_with(&format!("{of}-hmac-sha256-v1:")),
+            "{shown}"
+        );
+        let digest = plain.rsplit(':').next().unwrap();
+        assert!(
+            !whole.contains(digest),
+            "the plain {of} fingerprint is shown"
+        );
+    }
     assert!(f.context.starts_with("ctx-hmac-sha256-v1:"));
     assert!(answer.receipt.evidence.starts_with("ev-hmac-sha256-v1:"));
     // The canonical intent, with its typed literals: the very bytes.
@@ -339,8 +356,8 @@ async fn what_is_not_shown_leaves_no_trace_in_the_public_form() {
     other.definitions[index].content =
         other.definitions[(index + 1) % other.definitions.len()].content;
     assert_ne!(
-        key.commit(&scope(), private_evidence(&provenance, "d")),
-        key.commit(&scope(), private_evidence(&other, "d"))
+        key.commit(&scope(), private_evidence(&provenance, &plain())),
+        key.commit(&scope(), private_evidence(&other, &plain()))
     );
 }
 
@@ -829,4 +846,76 @@ async fn the_public_receipt_reveals_no_context_value_or_identity() {
         beto["fingerprints"]["decision"],
         receipts[0]["fingerprints"]["decision"]
     );
+}
+
+/// Codex's acceptance regression for #207, extended: whoever knows the
+/// rest of the model and compiles and plans every guess offline (no key,
+/// no row-policy value) finds none of their fingerprints anywhere in the
+/// public answer. Guesses: the hidden policy's operator, and whether a
+/// restricted metric exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_dictionary_of_hidden_definitions_finds_its_fingerprints_in_the_answer() {
+    use crate::semantic::prepare::tests::composition::ROW_POLICY;
+    use sef_model_ir::expressions::{ComparisonOp, ScalarExprKind};
+    use sef_model_ir::model::{CompiledSemanticModel, ModelDefinition};
+    use sef_model_ir::types::Literal;
+
+    let restricted = "  - name: reserva_centinela\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: SUM(ventas.importe)\n";
+    let p = project(&model(ROW_POLICY, restricted), MEMBERS);
+    let analytics = analytics().await;
+    let state = state(p.path(), analytics.clone());
+    let query = json!({ "selections": [metric("f", "filas")] });
+    let prepared = ready(
+        &state,
+        session("ana", &[("region", json!("Norte"))]),
+        &request(&query),
+    )
+    .await;
+    let definition = prepared.model().definition();
+    assert!(!prepared.shows(definition.policies[0].metadata.id()));
+    let answer = assemble(
+        &prepared,
+        events(&analytics, &prepared).await,
+        &ContextKey::generate(),
+        &scope(),
+    )
+    .unwrap();
+    let whole = serde_json::to_string(&answer).unwrap();
+    assert!(!whole.contains("reserva_centinela"));
+
+    let mut context = sef_correctness::SemanticContext::default();
+    context
+        .slots
+        .insert("region".to_owned(), Literal::Utf8("unused".to_owned()));
+    let mut candidates: Vec<(&str, ModelDefinition)> = Vec::new();
+    for (name, guess) in [("=", ComparisonOp::Equal), ("<>", ComparisonOp::NotEqual)] {
+        let mut candidate = definition.clone();
+        let ScalarExprKind::Comparison { op, .. } = &mut candidate.policies[0].predicate.kind
+        else {
+            panic!("comparison fixture");
+        };
+        *op = guess;
+        candidates.push((name, candidate));
+    }
+    let mut without = definition.clone();
+    without
+        .metrics
+        .retain(|m| !m.metadata.id().as_str().ends_with("reserva_centinela"));
+    assert_eq!(without.metrics.len() + 1, definition.metrics.len());
+    candidates.push(("no restricted metric", without));
+    let mut tried = 0;
+    for (guess, candidate) in candidates {
+        let candidate = CompiledSemanticModel::compile(candidate).unwrap();
+        let validated = sef_correctness::validate(&candidate, prepared.query(), &context).unwrap();
+        let planned = sef_planner::plan(&candidate, &validated).unwrap();
+        for fingerprint in [
+            candidate.content_hash().to_string(),
+            planned.plan.fingerprint().unwrap().to_string(),
+        ] {
+            let digest = fingerprint.rsplit(':').next().unwrap().to_owned();
+            assert!(!whole.contains(&digest), "{guess}: {fingerprint} is public");
+            tried += 1;
+        }
+    }
+    assert_eq!(tried, 6);
 }
