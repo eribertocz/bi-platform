@@ -34,7 +34,8 @@ fn with(problem: ReaderProblem) -> ReaderRole {
         ReaderProblem::OwnsAuditFunctions => &mut role.owns_audit_functions,
         ReaderProblem::OwnsSessions => &mut role.owns_sessions,
         ReaderProblem::OwnsMigrations => &mut role.owns_migrations,
-        ReaderProblem::CreatesInMetadataSchema => &mut role.creates_in_metadata_schema,
+        ReaderProblem::CreatesInDatabase => &mut role.creates_in_database,
+        ReaderProblem::CreatesInSchema => &mut role.creates_in_schema,
         ReaderProblem::WritesAuditStorage => &mut role.writes_audit_storage,
         ReaderProblem::GrantsAuditStorage => &mut role.grants_audit_storage,
         ReaderProblem::ExecutesAuditAppend => &mut role.executes_audit_append,
@@ -113,7 +114,7 @@ fn the_connection_string_is_never_printed() {
 }
 
 fn role() -> impl Strategy<Value = ReaderRole> {
-    prop::array::uniform18(any::<bool>()).prop_map(|b| ReaderRole {
+    prop::array::uniform19(any::<bool>()).prop_map(|b| ReaderRole {
         other_role: b[0],
         superuser: b[1],
         create_role: b[2],
@@ -126,12 +127,13 @@ fn role() -> impl Strategy<Value = ReaderRole> {
         owns_audit_functions: b[9],
         owns_sessions: b[10],
         owns_migrations: b[11],
-        creates_in_metadata_schema: b[12],
-        writes_audit_storage: b[13],
-        grants_audit_storage: b[14],
-        executes_audit_append: b[15],
-        accesses_sessions: b[16],
-        writes_migrations: b[17],
+        creates_in_database: b[12],
+        creates_in_schema: b[13],
+        writes_audit_storage: b[14],
+        grants_audit_storage: b[15],
+        executes_audit_append: b[16],
+        accesses_sessions: b[17],
+        writes_migrations: b[18],
     })
 }
 

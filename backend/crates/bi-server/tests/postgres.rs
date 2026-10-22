@@ -1496,7 +1496,14 @@ mod restricted {
             ("ALTER FUNCTION bi_meta.audit_reject_mutation() OWNER TO {reader}", "ALTER FUNCTION bi_meta.audit_reject_mutation() OWNER TO {admin}", "owns_audit_functions"),
             ("ALTER TABLE bi_meta.sessions OWNER TO {reader}", "ALTER TABLE bi_meta.sessions OWNER TO {admin}", "owns_sessions"),
             ("ALTER TABLE public._sqlx_migrations OWNER TO {reader}", "ALTER TABLE public._sqlx_migrations OWNER TO {admin}", "owns_migrations"),
-            ("GRANT CREATE ON SCHEMA bi_meta TO {reader}", "REVOKE CREATE ON SCHEMA bi_meta FROM {reader}", "creates_in_metadata_schema"),
+            // Persistent DDL anywhere: on any schema, on the database, by
+            // grant or through PUBLIC.
+            ("GRANT CREATE ON SCHEMA bi_meta TO {reader}", "REVOKE CREATE ON SCHEMA bi_meta FROM {reader}", "creates_in_schema"),
+            ("GRANT CREATE ON SCHEMA public TO {reader}", "REVOKE CREATE ON SCHEMA public FROM {reader}", "creates_in_schema"),
+            ("GRANT CREATE ON SCHEMA public TO PUBLIC", "REVOKE CREATE ON SCHEMA public FROM PUBLIC", "creates_in_schema"),
+            ("CREATE SCHEMA ajeno; GRANT CREATE ON SCHEMA ajeno TO {reader}", "DROP SCHEMA ajeno", "creates_in_schema"),
+            ("GRANT CREATE ON DATABASE {database} TO {reader}", "REVOKE CREATE ON DATABASE {database} FROM {reader}", "creates_in_database"),
+            ("GRANT CREATE ON DATABASE {database} TO PUBLIC", "REVOKE CREATE ON DATABASE {database} FROM PUBLIC", "creates_in_database"),
             // Writing the chain, by table, by column or through PUBLIC.
             ("GRANT UPDATE (payload) ON bi_meta.audit_events TO {reader}", "REVOKE UPDATE (payload) ON bi_meta.audit_events FROM {reader}", "writes_audit_storage"),
             ("GRANT INSERT (payload) ON bi_meta.audit_events TO {reader}", "REVOKE INSERT (payload) ON bi_meta.audit_events FROM {reader}", "writes_audit_storage"),
@@ -1580,35 +1587,94 @@ mod restricted {
         roles.drop().await;
     }
 
+    /// Codex's acceptance probe for #208: a reader with persistent DDL rights
+    /// (CREATE on a schema or on the database) is never admitted.
+    #[sqlx::test(migrations = false)]
+    async fn persistent_ddl_rights_refuse_the_reader(pool: PgPool) {
+        let (roles, db) = with_chain(&pool).await;
+        let mut admitted = Vec::new();
+        for (grant, revoke, ddl, undo) in [
+            (
+                "GRANT CREATE ON SCHEMA public TO {reader}",
+                "REVOKE CREATE ON SCHEMA public FROM {reader}",
+                "CREATE TABLE public.codex_reader_probe (x integer)",
+                "DROP TABLE public.codex_reader_probe",
+            ),
+            (
+                "GRANT CREATE ON DATABASE {database} TO {reader}",
+                "REVOKE CREATE ON DATABASE {database} FROM {reader}",
+                "CREATE SCHEMA codex_reader_probe",
+                "DROP SCHEMA codex_reader_probe",
+            ),
+        ] {
+            roles.sql(grant).await;
+            let reader = audit::reader::AuditReader::start(&roles.options(&roles.reader));
+            if let Ok(mut connection) = reader.acquire().await {
+                sqlx::raw_sql("SET default_transaction_read_only = off")
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+                let result = sqlx::raw_sql(AssertSqlSafe(ddl))
+                    .execute(&mut *connection)
+                    .await;
+                let ddl_succeeded = result.is_ok();
+                println!("ADMITTED: {grant}; {ddl}; DDL succeeded={ddl_succeeded}");
+                if ddl_succeeded {
+                    sqlx::raw_sql(AssertSqlSafe(undo))
+                        .execute(&mut *connection)
+                        .await
+                        .unwrap();
+                }
+                admitted.push((grant, ddl_succeeded));
+                drop(connection);
+            }
+            reader.close().await;
+            roles.sql(revoke).await;
+        }
+        db.close().await;
+        roles.drop().await;
+        assert!(
+            admitted.is_empty(),
+            "reader with DDL was admitted: {admitted:?}"
+        );
+    }
+
     /// A connection that passed when it opened is checked again when it is
     /// handed out: a later grant refuses it, and any replacement too.
     #[sqlx::test(migrations = false)]
     async fn a_connection_is_checked_again_each_time_it_is_used(pool: PgPool) {
         let (roles, db) = with_chain(&pool).await;
-        let reader = audit::reader::AuditReader::start(&roles.options(&roles.reader));
-        // Opened and checked while the role only reads, then back in the
-        // pool, idle.
-        drop(reader.acquire().await.unwrap());
-        let deadline = Instant::now() + READY;
-        while reader.idle() != 1 {
-            assert!(
-                Instant::now() < deadline,
-                "the connection returns to the pool"
-            );
-            tokio::task::yield_now().await;
+        for (grant, revoke) in [
+            (
+                "GRANT INSERT ON bi_meta.audit_events TO {reader}",
+                "REVOKE INSERT ON bi_meta.audit_events FROM {reader}",
+            ),
+            (
+                "GRANT CREATE ON DATABASE {database} TO {reader}",
+                "REVOKE CREATE ON DATABASE {database} FROM {reader}",
+            ),
+        ] {
+            let reader = audit::reader::AuditReader::start(&roles.options(&roles.reader));
+            // Opened and checked while the role only reads, then back in the
+            // pool, idle.
+            drop(reader.acquire().await.unwrap());
+            let deadline = Instant::now() + READY;
+            while reader.idle() != 1 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the connection returns to the pool"
+                );
+                tokio::task::yield_now().await;
+            }
+            // Then a grant: the idle connection is refused on its next use,
+            // and the new physical connection that would replace it as well.
+            roles.sql(grant).await;
+            assert!(reader.acquire().await.is_err(), "{grant}");
+            assert_eq!(reader.idle(), 0, "the refused connection is discarded");
+            roles.sql(revoke).await;
+            assert!(reader.acquire().await.is_ok(), "{revoke}");
+            reader.close().await;
         }
-        // Then a grant: the idle connection is refused on its next use, and
-        // the new physical connection that would replace it as well.
-        roles
-            .sql("GRANT INSERT ON bi_meta.audit_events TO {reader}")
-            .await;
-        assert!(reader.acquire().await.is_err());
-        assert_eq!(reader.idle(), 0, "the refused connection is discarded");
-        roles
-            .sql("REVOKE INSERT ON bi_meta.audit_events FROM {reader}")
-            .await;
-        assert!(reader.acquire().await.is_ok());
-        reader.close().await;
         db.close().await;
         roles.drop().await;
     }

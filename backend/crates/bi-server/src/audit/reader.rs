@@ -58,7 +58,10 @@ pub struct ReaderRole {
     /// Owns `sessions` or `oidc_attempts`.
     pub owns_sessions: bool,
     pub owns_migrations: bool,
-    pub creates_in_metadata_schema: bool,
+    /// `CREATE` on the database: new schemas.
+    pub creates_in_database: bool,
+    /// `CREATE` on any persistent schema, `bi_meta` and `public` included.
+    pub creates_in_schema: bool,
     /// Any privilege on the audit storage but `SELECT`, column grants
     /// included.
     pub writes_audit_storage: bool,
@@ -106,7 +109,8 @@ pub enum ReaderProblem {
     OwnsAuditFunctions,
     OwnsSessions,
     OwnsMigrations,
-    CreatesInMetadataSchema,
+    CreatesInDatabase,
+    CreatesInSchema,
     WritesAuditStorage,
     GrantsAuditStorage,
     ExecutesAuditAppend,
@@ -122,7 +126,7 @@ pub enum ReaderProblem {
 
 impl ReaderProblem {
     /// The capabilities no reachable role may hold.
-    pub const FORBIDDEN: [Self; 18] = [
+    pub const FORBIDDEN: [Self; 19] = [
         Self::OtherRole,
         Self::Superuser,
         Self::CreateRole,
@@ -135,7 +139,8 @@ impl ReaderProblem {
         Self::OwnsAuditFunctions,
         Self::OwnsSessions,
         Self::OwnsMigrations,
-        Self::CreatesInMetadataSchema,
+        Self::CreatesInDatabase,
+        Self::CreatesInSchema,
         Self::WritesAuditStorage,
         Self::GrantsAuditStorage,
         Self::ExecutesAuditAppend,
@@ -159,7 +164,8 @@ impl ReaderProblem {
             Self::OwnsAuditFunctions => role.owns_audit_functions,
             Self::OwnsSessions => role.owns_sessions,
             Self::OwnsMigrations => role.owns_migrations,
-            Self::CreatesInMetadataSchema => role.creates_in_metadata_schema,
+            Self::CreatesInDatabase => role.creates_in_database,
+            Self::CreatesInSchema => role.creates_in_schema,
             Self::WritesAuditStorage => role.writes_audit_storage,
             Self::GrantsAuditStorage => role.grants_audit_storage,
             Self::ExecutesAuditAppend => role.executes_audit_append,
@@ -190,7 +196,8 @@ impl fmt::Display for ReaderProblem {
             Self::OwnsAuditFunctions => "owns_audit_functions",
             Self::OwnsSessions => "owns_sessions",
             Self::OwnsMigrations => "owns_migrations",
-            Self::CreatesInMetadataSchema => "creates_in_metadata_schema",
+            Self::CreatesInDatabase => "creates_in_database",
+            Self::CreatesInSchema => "creates_in_schema",
             Self::WritesAuditStorage => "writes_audit_storage",
             Self::GrantsAuditStorage => "grants_audit_storage",
             Self::ExecutesAuditAppend => "executes_audit_append",

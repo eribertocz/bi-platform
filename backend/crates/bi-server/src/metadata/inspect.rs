@@ -124,8 +124,9 @@ const EFFECTIVE: &str = concat!(
 /// row says everything it must not do: any privilege on the audit storage but
 /// `SELECT`, column grants and grants to `PUBLIC` included, `SELECT` with
 /// its grant option, `EXECUTE` on `audit_append`, any privilege on the
-/// sessions, writing the migrations, creating in `bi_meta`, or owning any
-/// of them.
+/// sessions, writing the migrations, owning any of them, or `CREATE` on the
+/// database or on any schema but a session's temporary ones: persistent DDL
+/// anywhere, whatever the session's read-only default says.
 const READER_REACHABLE: &str = concat!(
     "WITH ",
     target!(),
@@ -155,8 +156,12 @@ const READER_REACHABLE: &str = concat!(
                AS owns_sessions,
            COALESCE(r.oid = (SELECT c.relowner FROM pg_catalog.pg_class c
                              WHERE c.oid = t.migrations), false) AS owns_migrations,
-           COALESCE(pg_catalog.has_schema_privilege(r.oid, t.metadata_schema, 'CREATE'), false)
-               AS creates_in_metadata_schema,
+           pg_catalog.has_database_privilege(r.oid, t.database_oid, 'CREATE')
+               AS creates_in_database,
+           EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n
+                   WHERE n.nspname !~ '^pg_(toast_)?temp_'
+                     AND pg_catalog.has_schema_privilege(r.oid, n.oid, 'CREATE'))
+               AS creates_in_schema,
            COALESCE(pg_catalog.has_table_privilege(r.oid, t.audit_events,
                         'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN'), false)
            OR COALESCE(pg_catalog.has_table_privilege(r.oid, t.audit_head,
@@ -244,7 +249,8 @@ pub async fn reader_facts(
                 owns_audit_functions: row.try_get("owns_audit_functions")?,
                 owns_sessions: row.try_get("owns_sessions")?,
                 owns_migrations: row.try_get("owns_migrations")?,
-                creates_in_metadata_schema: row.try_get("creates_in_metadata_schema")?,
+                creates_in_database: row.try_get("creates_in_database")?,
+                creates_in_schema: row.try_get("creates_in_schema")?,
                 writes_audit_storage: row.try_get("writes_audit_storage")?,
                 grants_audit_storage: row.try_get("grants_audit_storage")?,
                 executes_audit_append: row.try_get("executes_audit_append")?,
