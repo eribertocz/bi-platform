@@ -1,6 +1,7 @@
 //! PostgreSQL adapter for the independent audit contract. No HTTP routes yet.
 
 pub mod access;
+pub mod reader;
 
 use std::fmt;
 use std::time::Instant;

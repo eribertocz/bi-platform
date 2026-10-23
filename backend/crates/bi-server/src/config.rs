@@ -44,6 +44,9 @@ pub struct Config {
     pub dev_fixture: Option<FixtureSpec>,
     /// Deadline after which a query is cancelled (`BI_QUERY_TIMEOUT_MS`).
     pub query_timeout: Duration,
+    /// The audit reader's own connection (`BI_AUDIT_READER_DATABASE_URL`,
+    /// #159); unset or empty, audit reading stays disabled.
+    pub audit_reader: Option<crate::audit::reader::ReaderUrl>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -173,6 +176,9 @@ impl Config {
                 .map(|rows| FixtureSpec { seed: 42, rows }),
             query_timeout: positive("BI_QUERY_TIMEOUT_MS")?
                 .map_or(DEFAULT_QUERY_TIMEOUT, Duration::from_millis),
+            audit_reader: lookup("BI_AUDIT_READER_DATABASE_URL")
+                .filter(|url| !url.is_empty())
+                .map(crate::audit::reader::ReaderUrl::new),
         })
     }
 }

@@ -119,6 +119,7 @@ mod restricted {
     use tower::ServiceExt;
 
     const GRANTS: &str = include_str!("../admin/runtime-grants.sql");
+    const READER_GRANTS: &str = include_str!("../admin/audit-reader-grants.sql");
     /// A decoy, never a real secret: no log line may ever contain it.
     const PASSWORD: &str = "decoy-password-7f3a";
     const ORIGIN: &str = "http://127.0.0.1:8080";
@@ -130,6 +131,7 @@ mod restricted {
         admin: String,
         runtime: String,
         helper: String,
+        reader: String,
     }
 
     impl Roles {
@@ -157,6 +159,7 @@ mod restricted {
                 admin: format!("t{tag}_admin"),
                 runtime: format!("t{tag}_runtime"),
                 helper: format!("t{tag}_helper"),
+                reader: format!("t{tag}_reader"),
                 database,
             };
             // Test database names are deterministic; a run that panicked may
@@ -164,9 +167,10 @@ mod restricted {
             roles
                 .sql(
                     "DROP ROLE IF EXISTS {runtime}; DROP ROLE IF EXISTS {helper}; \
-                     DROP ROLE IF EXISTS {admin}; \
+                     DROP ROLE IF EXISTS {reader}; DROP ROLE IF EXISTS {admin}; \
                      CREATE ROLE {admin} LOGIN PASSWORD '{password}'; \
                      CREATE ROLE {runtime} LOGIN PASSWORD '{password}'; \
+                     CREATE ROLE {reader} LOGIN PASSWORD '{password}'; \
                      CREATE ROLE {helper} NOLOGIN; \
                      ALTER DATABASE {database} OWNER TO {admin};",
                 )
@@ -178,6 +182,7 @@ mod restricted {
             sql.replace("{admin}", &self.admin)
                 .replace("{runtime}", &self.runtime)
                 .replace("{helper}", &self.helper)
+                .replace("{reader}", &self.reader)
                 // Quoted: generated database names are mixed case.
                 .replace("{database}", &format!("\"{}\"", self.database))
                 .replace("{password}", PASSWORD)
@@ -217,6 +222,18 @@ mod restricted {
             owner.close().await;
         }
 
+        /// The documented reader procedure, verbatim, run by the owner.
+        async fn grant_reader(&self) {
+            let owner = PgPool::connect_lazy_with(self.options(&self.admin));
+            sqlx::raw_sql(AssertSqlSafe(
+                READER_GRANTS.replace("bi_audit_reader", &self.reader),
+            ))
+            .execute(&owner)
+            .await
+            .unwrap();
+            owner.close().await;
+        }
+
         fn runtime(&self, mode: MetadataMode) -> Database {
             Database::start(&self.options(&self.runtime), mode)
         }
@@ -224,9 +241,9 @@ mod restricted {
         async fn drop(self) {
             self.sql(
                 "ALTER DATABASE {database} OWNER TO CURRENT_USER; \
-                 REASSIGN OWNED BY {admin}, {runtime}, {helper} TO CURRENT_USER; \
-                 DROP OWNED BY {admin}, {runtime}, {helper}; \
-                 DROP ROLE {runtime}; DROP ROLE {helper}; DROP ROLE {admin};",
+                 REASSIGN OWNED BY {admin}, {runtime}, {helper}, {reader} TO CURRENT_USER; \
+                 DROP OWNED BY {admin}, {runtime}, {helper}, {reader}; \
+                 DROP ROLE {runtime}; DROP ROLE {helper}; DROP ROLE {reader}; DROP ROLE {admin};",
             )
             .await;
         }
@@ -1360,5 +1377,430 @@ mod restricted {
             assert!(!logs.contains(sql), "{sql} leaked into:\n{logs}");
         }
         roles.drop().await;
+    }
+
+    /// A reader connection for `role` (#159), or why none.
+    async fn reader_as(
+        roles: &Roles,
+        role: &str,
+    ) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, audit::reader::ReaderError> {
+        audit::reader::AuditReader::start(&roles.options(role))
+            .acquire()
+            .await
+    }
+
+    /// Migrated, both roles granted, and a known chain of three events
+    /// appended through the runtime's own function.
+    async fn with_chain(pool: &PgPool) -> (Roles, Database) {
+        let roles = Roles::create(pool).await;
+        roles.migrate().await;
+        roles.grant().await;
+        roles.grant_reader().await;
+        let db = roles.runtime(MetadataMode::Restricted);
+        ready(&db).await;
+        for id in ["event-1", "event-2", "event-3"] {
+            let mut transaction = db.pool().begin().await.unwrap();
+            audit::append(&mut transaction, &event(id)).await.unwrap();
+            transaction.commit().await.unwrap();
+        }
+        (roles, db)
+    }
+
+    /// The documented reader reads the chain and its head, on a read-only
+    /// session, and can do nothing else; the runtime still cannot read it.
+    #[sqlx::test(migrations = false)]
+    async fn the_audit_reader_reads_the_chain_and_nothing_else(pool: PgPool) {
+        let (roles, db) = with_chain(&pool).await;
+        let mut reader = reader_as(&roles, &roles.reader).await.unwrap();
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.audit_events")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        assert_eq!(events, 3);
+        let heads: i64 = sqlx::query_scalar("SELECT count(*) FROM bi_meta.audit_head")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        assert_eq!(heads, 1);
+        let read_only: String = sqlx::query_scalar("SHOW default_transaction_read_only")
+            .fetch_one(&mut *reader)
+            .await
+            .unwrap();
+        assert_eq!(read_only, "on");
+        // Not even with the session's read-only default lifted: privileges,
+        // not the session flag, are the boundary.
+        sqlx::raw_sql("SET default_transaction_read_only = off")
+            .execute(&mut *reader)
+            .await
+            .unwrap();
+        for sql in [
+            "INSERT INTO bi_meta.audit_events SELECT * FROM bi_meta.audit_events LIMIT 1",
+            "UPDATE bi_meta.audit_events SET payload = payload",
+            "DELETE FROM bi_meta.audit_events",
+            "TRUNCATE bi_meta.audit_events",
+            "DELETE FROM bi_meta.audit_head",
+            "SELECT bi_meta.audit_append('{}')",
+            "CREATE TABLE bi_meta.intruso (x integer)",
+            "SELECT count(*) FROM bi_meta.sessions",
+            "SELECT count(*) FROM bi_meta.oidc_attempts",
+            "DELETE FROM public._sqlx_migrations",
+        ] {
+            assert!(
+                sqlx::raw_sql(AssertSqlSafe(sql))
+                    .execute(&mut *reader)
+                    .await
+                    .is_err(),
+                "{sql}"
+            );
+        }
+        drop(reader);
+        // The runtime is untouched: still admitted, still without SELECT.
+        assert!(assessed(&db).await.secure());
+        assert!(
+            sqlx::query("SELECT count(*) FROM bi_meta.audit_events")
+                .fetch_one(db.pool())
+                .await
+                .is_err()
+        );
+        // Nor the owner nor the runtime serve as a reader.
+        for role in [&roles.admin, &roles.runtime] {
+            assert!(reader_as(&roles, role).await.is_err(), "{role}");
+        }
+        db.close().await;
+        roles.drop().await;
+    }
+
+    /// Each capability beyond reading, held directly, through a role it
+    /// reaches or by `PUBLIC`, and each missing one, refuses every new
+    /// connection with its stable code; undone, the reader works again.
+    #[sqlx::test(migrations = false)]
+    async fn each_excess_or_missing_capability_refuses_the_reader(pool: PgPool) {
+        let (roles, db) = with_chain(&pool).await;
+        assert!(reader_as(&roles, &roles.reader).await.is_ok());
+        let mut cases: Vec<(String, String, &str)> = [
+            ("ALTER ROLE {reader} SUPERUSER", "ALTER ROLE {reader} NOSUPERUSER", "superuser"),
+            ("ALTER ROLE {reader} CREATEROLE", "ALTER ROLE {reader} NOCREATEROLE", "create_role"),
+            ("ALTER ROLE {reader} CREATEDB", "ALTER ROLE {reader} NOCREATEDB", "create_database"),
+            ("ALTER ROLE {reader} REPLICATION", "ALTER ROLE {reader} NOREPLICATION", "replication"),
+            ("ALTER ROLE {reader} BYPASSRLS", "ALTER ROLE {reader} NOBYPASSRLS", "bypass_rls"),
+            // Owning anything it relies on. Owning absorbs a role's own grant:
+            // undoing it grants it again.
+            ("ALTER DATABASE {database} OWNER TO {reader}", "ALTER DATABASE {database} OWNER TO {admin}", "owns_database"),
+            ("ALTER SCHEMA bi_meta OWNER TO {reader}", "ALTER SCHEMA bi_meta OWNER TO {admin}; GRANT USAGE ON SCHEMA bi_meta TO {reader}", "owns_schema"),
+            ("ALTER SCHEMA public OWNER TO {reader}", "ALTER SCHEMA public OWNER TO pg_database_owner", "owns_schema"),
+            ("ALTER TABLE bi_meta.audit_events OWNER TO {reader}", "ALTER TABLE bi_meta.audit_events OWNER TO {admin}; GRANT SELECT ON bi_meta.audit_events TO {reader}", "owns_audit_storage"),
+            ("ALTER TABLE bi_meta.audit_head OWNER TO {reader}", "ALTER TABLE bi_meta.audit_head OWNER TO {admin}; GRANT SELECT ON bi_meta.audit_head TO {reader}", "owns_audit_storage"),
+            ("ALTER FUNCTION bi_meta.audit_append(text) OWNER TO {reader}", "ALTER FUNCTION bi_meta.audit_append(text) OWNER TO {admin}", "owns_audit_functions"),
+            // The trigger that keeps the chain append-only: its owner could
+            // drop it, and the protection with it.
+            ("ALTER FUNCTION bi_meta.audit_reject_mutation() OWNER TO {reader}", "ALTER FUNCTION bi_meta.audit_reject_mutation() OWNER TO {admin}", "owns_audit_functions"),
+            ("ALTER TABLE bi_meta.sessions OWNER TO {reader}", "ALTER TABLE bi_meta.sessions OWNER TO {admin}", "owns_sessions"),
+            ("ALTER TABLE public._sqlx_migrations OWNER TO {reader}", "ALTER TABLE public._sqlx_migrations OWNER TO {admin}", "owns_migrations"),
+            // Persistent DDL anywhere: on any schema, on the database, by
+            // grant or through PUBLIC.
+            ("GRANT CREATE ON SCHEMA bi_meta TO {reader}", "REVOKE CREATE ON SCHEMA bi_meta FROM {reader}", "creates_in_schema"),
+            ("GRANT CREATE ON SCHEMA public TO {reader}", "REVOKE CREATE ON SCHEMA public FROM {reader}", "creates_in_schema"),
+            ("GRANT CREATE ON SCHEMA public TO PUBLIC", "REVOKE CREATE ON SCHEMA public FROM PUBLIC", "creates_in_schema"),
+            ("CREATE SCHEMA ajeno; GRANT CREATE ON SCHEMA ajeno TO {reader}", "DROP SCHEMA ajeno", "creates_in_schema"),
+            ("GRANT CREATE ON DATABASE {database} TO {reader}", "REVOKE CREATE ON DATABASE {database} FROM {reader}", "creates_in_database"),
+            ("GRANT CREATE ON DATABASE {database} TO PUBLIC", "REVOKE CREATE ON DATABASE {database} FROM PUBLIC", "creates_in_database"),
+            // Writing the chain, by table, by column or through PUBLIC.
+            ("GRANT UPDATE (payload) ON bi_meta.audit_events TO {reader}", "REVOKE UPDATE (payload) ON bi_meta.audit_events FROM {reader}", "writes_audit_storage"),
+            ("GRANT INSERT (payload) ON bi_meta.audit_events TO {reader}", "REVOKE INSERT (payload) ON bi_meta.audit_events FROM {reader}", "writes_audit_storage"),
+            ("GRANT DELETE ON bi_meta.audit_events TO PUBLIC", "REVOKE DELETE ON bi_meta.audit_events FROM PUBLIC", "writes_audit_storage"),
+            ("GRANT SELECT ON bi_meta.audit_events TO {reader} WITH GRANT OPTION", "REVOKE GRANT OPTION FOR SELECT ON bi_meta.audit_events FROM {reader}", "grants_audit_storage"),
+            ("GRANT SELECT (hash) ON bi_meta.audit_head TO {reader} WITH GRANT OPTION", "REVOKE SELECT (hash) ON bi_meta.audit_head FROM {reader}", "grants_audit_storage"),
+            ("GRANT EXECUTE ON FUNCTION bi_meta.audit_append(text) TO {reader}", "REVOKE EXECUTE ON FUNCTION bi_meta.audit_append(text) FROM {reader}", "executes_audit_append"),
+            ("GRANT SELECT ON bi_meta.sessions TO {reader}", "REVOKE SELECT ON bi_meta.sessions FROM {reader}", "accesses_sessions"),
+            ("GRANT SELECT ON bi_meta.oidc_attempts TO {reader}", "REVOKE SELECT ON bi_meta.oidc_attempts FROM {reader}", "accesses_sessions"),
+            ("GRANT INSERT ON public._sqlx_migrations TO {reader}", "REVOKE INSERT ON public._sqlx_migrations FROM {reader}", "writes_migrations"),
+            // A member of no other role: the runtime, the owner (only through
+            // SET ROLE), an intermediate one, or a predefined role whose
+            // powers no read-only session stops.
+            ("GRANT {runtime} TO {reader}", "REVOKE {runtime} FROM {reader}", "other_role"),
+            ("GRANT {admin} TO {reader} WITH INHERIT FALSE, SET TRUE", "REVOKE {admin} FROM {reader}", "other_role"),
+            ("GRANT {helper} TO {reader}", "REVOKE {helper} FROM {reader}", "other_role"),
+            ("GRANT pg_execute_server_program TO {reader}", "REVOKE pg_execute_server_program FROM {reader}", "other_role"),
+            ("GRANT pg_read_server_files TO {reader}", "REVOKE pg_read_server_files FROM {reader}", "other_role"),
+            ("GRANT pg_signal_backend TO {reader}", "REVOKE pg_signal_backend FROM {reader}", "other_role"),
+            ("GRANT pg_write_all_data TO {reader}", "REVOKE pg_write_all_data FROM {reader}", "other_role"),
+            // Too little is refused too.
+            ("REVOKE SELECT ON bi_meta.audit_events FROM {reader}", "GRANT SELECT ON bi_meta.audit_events TO {reader}", "missing_events_select"),
+            ("REVOKE SELECT ON bi_meta.audit_head FROM {reader}", "GRANT SELECT ON bi_meta.audit_head TO {reader}", "missing_head_select"),
+            ("REVOKE USAGE ON SCHEMA bi_meta FROM {reader}", "GRANT USAGE ON SCHEMA bi_meta TO {reader}", "missing_schema_usage"),
+        ]
+        .into_iter()
+        .map(|(grant, revoke, code)| (grant.to_owned(), revoke.to_owned(), code))
+        .collect();
+        for privilege in [
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "TRUNCATE",
+            "REFERENCES",
+            "TRIGGER",
+            "MAINTAIN",
+        ] {
+            for table in ["audit_events", "audit_head"] {
+                cases.push((
+                    format!("GRANT {privilege} ON bi_meta.{table} TO {{reader}}"),
+                    format!("REVOKE {privilege} ON bi_meta.{table} FROM {{reader}}"),
+                    "writes_audit_storage",
+                ));
+            }
+        }
+        for (grant, revoke, code) in &cases {
+            roles.sql(grant).await;
+            let (logs, refused) = logged(reader_as(&roles, &roles.reader)).await;
+            assert!(refused.is_err(), "{grant}");
+            assert!(
+                logs.contains("audit_reader_refused") && logs.contains(code),
+                "{grant}: {logs}"
+            );
+            assert!(
+                !logs.contains(PASSWORD) && !logs.contains(&roles.reader),
+                "{logs}"
+            );
+            // The code, observed on a connection of its own, as the pool does.
+            let mut direct = <sqlx::PgConnection as sqlx::Connection>::connect_with(
+                &roles.options(&roles.reader),
+            )
+            .await
+            .unwrap();
+            sqlx::raw_sql("SET default_transaction_read_only = on")
+                .execute(&mut direct)
+                .await
+                .unwrap();
+            let facts = bi_server::metadata::inspect::reader_facts(&mut direct)
+                .await
+                .unwrap();
+            let problems: Vec<String> = audit::reader::assess(&facts)
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            assert!(problems.iter().any(|p| p == code), "{grant}: {problems:?}");
+            sqlx::Connection::close(direct).await.unwrap();
+            roles.sql(revoke).await;
+            assert!(reader_as(&roles, &roles.reader).await.is_ok(), "{revoke}");
+        }
+        db.close().await;
+        roles.drop().await;
+    }
+
+    /// Codex's acceptance probe for #208: a reader with persistent DDL rights
+    /// (CREATE on a schema or on the database) is never admitted.
+    #[sqlx::test(migrations = false)]
+    async fn persistent_ddl_rights_refuse_the_reader(pool: PgPool) {
+        let (roles, db) = with_chain(&pool).await;
+        let mut admitted = Vec::new();
+        for (grant, revoke, ddl, undo) in [
+            (
+                "GRANT CREATE ON SCHEMA public TO {reader}",
+                "REVOKE CREATE ON SCHEMA public FROM {reader}",
+                "CREATE TABLE public.codex_reader_probe (x integer)",
+                "DROP TABLE public.codex_reader_probe",
+            ),
+            (
+                "GRANT CREATE ON DATABASE {database} TO {reader}",
+                "REVOKE CREATE ON DATABASE {database} FROM {reader}",
+                "CREATE SCHEMA codex_reader_probe",
+                "DROP SCHEMA codex_reader_probe",
+            ),
+        ] {
+            roles.sql(grant).await;
+            let reader = audit::reader::AuditReader::start(&roles.options(&roles.reader));
+            if let Ok(mut connection) = reader.acquire().await {
+                sqlx::raw_sql("SET default_transaction_read_only = off")
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+                let result = sqlx::raw_sql(AssertSqlSafe(ddl))
+                    .execute(&mut *connection)
+                    .await;
+                let ddl_succeeded = result.is_ok();
+                println!("ADMITTED: {grant}; {ddl}; DDL succeeded={ddl_succeeded}");
+                if ddl_succeeded {
+                    sqlx::raw_sql(AssertSqlSafe(undo))
+                        .execute(&mut *connection)
+                        .await
+                        .unwrap();
+                }
+                admitted.push((grant, ddl_succeeded));
+                drop(connection);
+            }
+            reader.close().await;
+            roles.sql(revoke).await;
+        }
+        db.close().await;
+        roles.drop().await;
+        assert!(
+            admitted.is_empty(),
+            "reader with DDL was admitted: {admitted:?}"
+        );
+    }
+
+    /// A connection that passed when it opened is checked again when it is
+    /// handed out: a later grant refuses it, and any replacement too.
+    #[sqlx::test(migrations = false)]
+    async fn a_connection_is_checked_again_each_time_it_is_used(pool: PgPool) {
+        let (roles, db) = with_chain(&pool).await;
+        for (grant, revoke) in [
+            (
+                "GRANT INSERT ON bi_meta.audit_events TO {reader}",
+                "REVOKE INSERT ON bi_meta.audit_events FROM {reader}",
+            ),
+            (
+                "GRANT CREATE ON DATABASE {database} TO {reader}",
+                "REVOKE CREATE ON DATABASE {database} FROM {reader}",
+            ),
+        ] {
+            let reader = audit::reader::AuditReader::start(&roles.options(&roles.reader));
+            // Opened and checked while the role only reads, then back in the
+            // pool, idle.
+            drop(reader.acquire().await.unwrap());
+            let deadline = Instant::now() + READY;
+            while reader.idle() != 1 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the connection returns to the pool"
+                );
+                tokio::task::yield_now().await;
+            }
+            // Then a grant: the idle connection is refused on its next use,
+            // and the new physical connection that would replace it as well.
+            roles.sql(grant).await;
+            assert!(reader.acquire().await.is_err(), "{grant}");
+            assert_eq!(reader.idle(), 0, "the refused connection is discarded");
+            roles.sql(revoke).await;
+            assert!(reader.acquire().await.is_ok(), "{revoke}");
+            reader.close().await;
+        }
+        db.close().await;
+        roles.drop().await;
+    }
+
+    /// Whatever the last user changed of a session's bounds, its next
+    /// hand-out restores them.
+    #[sqlx::test(migrations = false)]
+    async fn a_connection_handed_out_again_has_its_bounds_back(pool: PgPool) {
+        let (roles, db) = with_chain(&pool).await;
+        let reader = audit::reader::AuditReader::start(&roles.options(&roles.reader));
+        let idle_again = |reader: &audit::reader::AuditReader| {
+            let deadline = Instant::now() + READY;
+            let reader = reader.clone();
+            async move {
+                while reader.idle() != 1 {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the connection returns to the pool"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
+        // A bound the check does not inspect: the same connection comes back
+        // with it restored, not merely replaced.
+        let mut connection = reader.acquire().await.unwrap();
+        let first = backend_pid(&mut connection).await;
+        sqlx::raw_sql("SET statement_timeout = 0")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        idle_again(&reader).await;
+        let mut connection = reader.acquire().await.unwrap();
+        assert_eq!(
+            backend_pid(&mut connection).await,
+            first,
+            "the same connection"
+        );
+        let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+        assert_eq!(timeout, "5s", "restored on the same connection");
+        // And read-only too, whichever connection serves.
+        sqlx::raw_sql("SET default_transaction_read_only = off")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        idle_again(&reader).await;
+        let mut connection = reader.acquire().await.unwrap();
+        for (setting, expected) in [
+            ("default_transaction_read_only", "on"),
+            ("statement_timeout", "5s"),
+        ] {
+            let value: String = sqlx::query_scalar(AssertSqlSafe(format!("SHOW {setting}")))
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+            assert_eq!(value, expected, "{setting}");
+        }
+        drop(connection);
+        reader.close().await;
+        db.close().await;
+        roles.drop().await;
+    }
+
+    /// The server process behind a connection: the same one, the same
+    /// physical connection.
+    async fn backend_pid(connection: &mut sqlx::PgConnection) -> i32 {
+        sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(connection)
+            .await
+            .unwrap()
+    }
+
+    /// What every task logs in this process, from the first call on. The
+    /// pool opens connections in tasks of its own, which no per-future
+    /// subscriber follows; this one is global, installed once.
+    fn process_logs() -> &'static std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+        use std::io;
+        use std::sync::{Arc, Mutex, OnceLock};
+        use tracing_subscriber::layer::SubscriberExt as _;
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+        LOGS.get_or_init(|| {
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            let output = Capture(bytes.clone());
+            // Everything, down to the driver's own traces, but the statement
+            // log: the reader's pool disables it, and the fixtures of tests
+            // running alongside write their decoy credentials in theirs.
+            let subscriber = tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .without_time()
+                        .with_ansi(false)
+                        .with_writer(move || output.clone()),
+                )
+                .with(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_default(tracing::Level::TRACE)
+                        .with_target("sqlx::query", tracing_subscriber::filter::LevelFilter::OFF),
+                );
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global subscriber in this binary");
+            bytes
+        })
+    }
+
+    /// What was logged while `work` ran, and its result.
+    async fn logged<T>(work: impl std::future::Future<Output = T>) -> (String, T) {
+        let logs = process_logs();
+        let from = logs.lock().unwrap().len();
+        let result = work.await;
+        let text = String::from_utf8_lossy(&logs.lock().unwrap()[from..]).into_owned();
+        (text, result)
     }
 }
