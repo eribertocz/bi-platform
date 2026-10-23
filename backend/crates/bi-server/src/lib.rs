@@ -48,6 +48,8 @@ pub struct AppState {
     pub models: models::Models,
     /// The secret of this instance for public context fingerprints.
     pub context_key: semantic::context::ContextKey,
+    /// The budgets of semantic execution, validated at startup.
+    pub semantic_runs: semantic::run::Runs,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
             metrics: metrics::QueryMetrics::default(),
             models: models::Models::default(),
             context_key: semantic::context::ContextKey::generate(),
+            semantic_runs: semantic::run::Runs::default(),
         }
     }
 }

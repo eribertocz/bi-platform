@@ -10,9 +10,7 @@ use std::time::{Duration, Instant};
 
 use bi_runtime::duckdb::arrow::array::{Array, Decimal128Array, Int64Array, StringArray};
 use bi_runtime::duckdb::arrow::datatypes::DataType;
-use sef_adapter_duckdb::execution::{
-    BlockResult, ExecutionLimits, PhysicalRelation, SourceCatalog,
-};
+use sef_adapter_duckdb::execution::{BlockResult, ExecutionLimits};
 use serde_json::{Value, json};
 
 use super::super::*;
@@ -23,7 +21,7 @@ use crate::models::Models;
 use crate::semantic_execution::{Event, SemanticExecutor};
 
 /// The rows of the Issue: id, region, city, amount, instant, note.
-const ROWS: &str = "(1, 'Norte', 'La Paz', 100.10, '2026-01-01T00:00:00Z', NULL),
+pub(crate) const ROWS: &str = "(1, 'Norte', 'La Paz', 100.10, '2026-01-01T00:00:00Z', NULL),
     (2, 'Norte', 'El Alto', 0.20, '2026-01-02T00:00:00Z', 'n'),
     (3, 'Sur', 'Tarija', 200.20, '2026-01-01T00:00:00Z', 's'),
     (4, 'Sur', 'Sucre', -0.20, '2026-01-02T00:00:00Z', NULL)";
@@ -56,6 +54,58 @@ pub(crate) fn model(extensions: &str, metrics: &str) -> String {
     )
 }
 
+/// `instante` on the event timeline, and its month in La Paz (UTC-4).
+pub(crate) fn zoned_model() -> String {
+    let extension = |data: &str| {
+        format!(
+            "        custom_extensions:
+          - vendor_name: bi-platform
+            data: '{data}'
+"
+        )
+    };
+    let instant = "        datatype: DateTimeTz
+        dimension: {}
+";
+    let month = format!(
+        "      - name: mes
+        dimension: {{}}
+{}        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: DATE_TRUNC('MONTH', instante)
+",
+        extension(r#"{"version": 1, "time": {"timezone": "America/La_Paz"}}"#)
+    );
+    let text = model("", "");
+    assert_eq!(text.matches(instant).count(), 1);
+    let text = text.replacen(
+        instant,
+        &format!(
+            "{instant}{}",
+            extension(r#"{"version": 1, "time_role": "event"}"#)
+        ),
+        1,
+    );
+    assert_eq!(
+        text.matches(
+            "metrics:
+"
+        )
+        .count(),
+        1
+    );
+    text.replacen(
+        "metrics:
+",
+        &format!(
+            "{month}metrics:
+"
+        ),
+        1,
+    )
+}
+
 /// Rows of each session visible only through the policy on `region`.
 pub(crate) const ROW_POLICY: &str = "custom_extensions:\n  - vendor_name: bi-platform\n    data: '{\"version\": 1, \"semantic_version\": \"0.1.0\", \"policies\": [{\"name\": \"zona\", \"dataset\": \"ventas\", \"enforcement\": \"mandatory\", \"predicate\": \"region = :region\", \"context\": [{\"name\": \"region\", \"type\": \"string\", \"sensitivity\": \"sensitive\"}]}]}'\n";
 
@@ -69,8 +119,13 @@ pub(crate) fn project(model: &str, members: &str) -> tempfile::TempDir {
 }
 
 pub(crate) async fn analytics() -> Analytics {
-    let runtime = tokio::task::spawn_blocking(|| {
-        bi_runtime::Bootstrap::open(bi_runtime::RuntimeConfig::in_memory(2))
+    analytics_on(bi_runtime::RuntimeConfig::in_memory(2)).await
+}
+
+/// The rows of the Issue, on a runtime of `config`.
+pub(crate) async fn analytics_on(config: bi_runtime::RuntimeConfig) -> Analytics {
+    let runtime = tokio::task::spawn_blocking(move || {
+        bi_runtime::Bootstrap::open(config)
             .unwrap()
             .finish()
             .unwrap()
@@ -182,24 +237,7 @@ pub(crate) fn stream(
     capacity: usize,
 ) -> crate::semantic_execution::SemanticStream {
     let execution = prepared.execution().expect("nothing masked");
-    let catalog: SourceCatalog = execution
-        .sources()
-        .relations
-        .iter()
-        .map(|(source, relation)| {
-            (
-                (relation.source.clone(), relation.relation.clone()),
-                PhysicalRelation {
-                    name: source.split('.').map(str::to_owned).collect(),
-                    columns: relation
-                        .columns
-                        .iter()
-                        .map(|c| (c.handle.clone(), c.name.clone()))
-                        .collect(),
-                },
-            )
-        })
-        .collect();
+    let catalog = execution.catalog();
     let plan = sef_adapter_duckdb::execution::lower(
         execution.model(),
         execution.validated(),

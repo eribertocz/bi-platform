@@ -171,7 +171,7 @@ pub enum RunError {
 /// # Errors
 /// A [`RunError`] for anything but a complete, coherent execution whose
 /// answer fits the body's budget.
-pub fn assemble(
+pub(super) fn assemble(
     prepared: &Prepared,
     events: impl IntoIterator<Item = Event>,
     key: &ContextKey,

@@ -14,6 +14,7 @@ pub mod envelope;
 pub mod prepare;
 pub mod request;
 pub mod result;
+pub mod run;
 
 use std::collections::BTreeMap;
 use std::time::Instant;
