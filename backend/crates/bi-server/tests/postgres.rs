@@ -500,6 +500,22 @@ mod restricted {
             ("GRANT INSERT ON public._sqlx_migrations TO {runtime}", "REVOKE INSERT ON public._sqlx_migrations FROM {runtime}", Forbidden::WritesMigrations),
             ("GRANT UPDATE (checksum) ON public._sqlx_migrations TO {runtime}", "REVOKE UPDATE (checksum) ON public._sqlx_migrations FROM {runtime}", Forbidden::WritesMigrations),
             ("GRANT EXECUTE ON FUNCTION bi_meta.audit_append(text) TO {runtime} WITH GRANT OPTION", "REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION bi_meta.audit_append(text) FROM {runtime}", Forbidden::GrantsAuditAppend),
+            // Reserved roles (#209): powers over the server's programs and
+            // files, signals, settings and all data, granted on nothing in
+            // bi_meta. Each alone, directly, through one and two
+            // intermediaries, and without inheritance, even without SET.
+            ("GRANT pg_execute_server_program TO {runtime}", "REVOKE pg_execute_server_program FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_read_server_files TO {runtime}", "REVOKE pg_read_server_files FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_write_server_files TO {runtime}", "REVOKE pg_write_server_files FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_signal_backend TO {runtime}", "REVOKE pg_signal_backend FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_monitor TO {runtime}", "REVOKE pg_monitor FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_read_all_settings TO {runtime}", "REVOKE pg_read_all_settings FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_read_all_data TO {runtime}", "REVOKE pg_read_all_data FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_write_all_data TO {runtime}", "REVOKE pg_write_all_data FROM {runtime}", Forbidden::ReservedRole),
+            ("GRANT pg_execute_server_program TO {helper}; GRANT {helper} TO {runtime}", "REVOKE {helper} FROM {runtime}; REVOKE pg_execute_server_program FROM {helper}", Forbidden::ReservedRole),
+            ("CREATE ROLE {helper}_b NOLOGIN; GRANT pg_read_server_files TO {helper}_b; GRANT {helper}_b TO {helper}; GRANT {helper} TO {runtime}", "REVOKE {helper} FROM {runtime}; REVOKE {helper}_b FROM {helper}; DROP ROLE {helper}_b", Forbidden::ReservedRole),
+            ("GRANT pg_execute_server_program TO {helper}; GRANT {helper} TO {runtime} WITH INHERIT FALSE, SET TRUE", "REVOKE {helper} FROM {runtime}; REVOKE pg_execute_server_program FROM {helper}", Forbidden::ReservedRole),
+            ("GRANT pg_execute_server_program TO {helper}; GRANT {helper} TO {runtime} WITH INHERIT FALSE, SET FALSE", "REVOKE {helper} FROM {runtime}; REVOKE pg_execute_server_program FROM {helper}", Forbidden::ReservedRole),
         ]
         .into_iter()
         .map(|(grant, revoke, expected)| (grant.to_owned(), revoke.to_owned(), expected))
@@ -545,6 +561,42 @@ mod restricted {
             // Ownership round trips rewrite ACLs: restore the documented grants.
             roles.grant().await;
         }
+        // The prefix is literal: a harmless group of our own named `pgx_…`
+        // keeps the runtime admitted.
+        roles
+            .sql("CREATE ROLE pgx_{helper} NOLOGIN; GRANT pgx_{helper} TO {runtime}")
+            .await;
+        let db = roles.runtime(MetadataMode::Restricted);
+        ready(&db).await;
+        assert!(assessed(&db).await.secure());
+        db.close().await;
+        roles
+            .sql("REVOKE pgx_{helper} FROM {runtime}; DROP ROLE pgx_{helper}")
+            .await;
+        // A dangerous login that starts as the limited role is still the
+        // dangerous login: refused by what session_user reaches.
+        roles
+            .sql(
+                "CREATE ROLE {helper}_login LOGIN PASSWORD '{password}'; \
+                 GRANT pg_execute_server_program TO {helper}_login; \
+                 GRANT {runtime} TO {helper}_login",
+            )
+            .await;
+        let disguised = roles
+            .options(&format!("{}_login", roles.helper))
+            .options([("role", roles.runtime.as_str())]);
+        let db = Database::start(&disguised, MetadataMode::Restricted);
+        let assessment = assessed(&db).await;
+        assert!(
+            assessment.forbidden.contains(&Forbidden::ReservedRole),
+            "{:?}",
+            assessment.forbidden
+        );
+        assert!(!db.admits());
+        db.close().await;
+        roles
+            .sql("DROP OWNED BY {helper}_login; DROP ROLE {helper}_login")
+            .await;
         let db = roles.runtime(MetadataMode::Restricted);
         ready(&db).await;
         db.close().await;
@@ -809,6 +861,39 @@ mod restricted {
         );
         roles
             .sql("REVOKE SELECT ON bi_meta.audit_events FROM {runtime}")
+            .await;
+        ready(&db).await;
+        assert_eq!(
+            send(&app, "GET", "/api/v1/session", Some(&cookie)).await.0,
+            StatusCode::OK
+        );
+        // Again with a reserved role (#209): granted while unreachable, it
+        // refuses the replacement connection; revoked, the server recovers.
+        proxy.cut().await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while db.admits() {
+            assert!(Instant::now() < deadline, "the lost connection is noticed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        roles
+            .sql("GRANT pg_execute_server_program TO {runtime}")
+            .await;
+        proxy.restore().await;
+        let deadline = Instant::now() + READY;
+        let assessment = loop {
+            if let MetadataStatus::Assessed(assessment) = db.status() {
+                break assessment;
+            }
+            assert!(Instant::now() < deadline, "revalidated after reconnecting");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert!(assessment.forbidden.contains(&Forbidden::ReservedRole));
+        assert_eq!(
+            send(&app, "GET", "/api/v1/session", Some(&cookie)).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        roles
+            .sql("REVOKE pg_execute_server_program FROM {runtime}")
             .await;
         ready(&db).await;
         assert_eq!(

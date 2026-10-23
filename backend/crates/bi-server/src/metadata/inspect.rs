@@ -47,7 +47,8 @@ macro_rules! target {
 /// One row per role reachable from `session_user` or `current_user`: a
 /// login that can `SET ROLE` back to a privileged role is as privileged as
 /// that role, and `MEMBER` covers direct and indirect membership regardless
-/// of INHERIT or SET options.
+/// of INHERIT or SET options. A reserved role (literal `pg_` prefix, #209)
+/// among them is refused by name: its powers show in no grant.
 const REACHABLE: &str = concat!(
     "WITH ",
     target!(),
@@ -86,7 +87,8 @@ const REACHABLE: &str = concat!(
            OR COALESCE(pg_catalog.has_any_column_privilege(r.oid, t.migrations,
                         'INSERT, UPDATE, REFERENCES'), false) AS writes_migrations,
            COALESCE(pg_catalog.has_function_privilege(r.oid, t.audit_append,
-                        'EXECUTE WITH GRANT OPTION'), false) AS grants_audit_append
+                        'EXECUTE WITH GRANT OPTION'), false) AS grants_audit_append,
+           pg_catalog.starts_with(r.rolname, 'pg_') AS reserved_role
     FROM pg_catalog.pg_roles r CROSS JOIN target t
     WHERE EXISTS (SELECT 1 FROM principal p WHERE pg_catalog.pg_has_role(p.oid, r.oid, 'MEMBER'))"
 );
@@ -307,6 +309,7 @@ pub async fn facts(connection: &mut PgConnection) -> Result<Facts, sqlx::Error> 
                 accesses_audit_storage: row.try_get("accesses_audit_storage")?,
                 writes_migrations: row.try_get("writes_migrations")?,
                 grants_audit_append: row.try_get("grants_audit_append")?,
+                reserved_role: row.try_get("reserved_role")?,
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
