@@ -6,6 +6,9 @@
   "groups": [
     {
       "name": "analysts"
+    },
+    {
+      "name": "outsiders"
     }
   ],
   "users": [
@@ -29,6 +32,75 @@
       "attributes": {
         "department": [
           "finance"
+        ]
+      }
+    },
+    {
+      "username": "oidc-norte",
+      "enabled": true,
+      "firstName": "Norte",
+      "lastName": "Analyst",
+      "email": "oidc-norte@example.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "oidc-test-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/analysts"
+      ],
+      "attributes": {
+        "department": [
+          "Norte"
+        ]
+      }
+    },
+    {
+      "username": "oidc-sur",
+      "enabled": true,
+      "firstName": "Sur",
+      "lastName": "Analyst",
+      "email": "oidc-sur@example.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "oidc-test-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/analysts"
+      ],
+      "attributes": {
+        "department": [
+          "Sur"
+        ]
+      }
+    },
+    {
+      "username": "oidc-outsider",
+      "enabled": true,
+      "firstName": "Outside",
+      "lastName": "Analyst",
+      "email": "oidc-outsider@example.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "oidc-test-only",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/outsiders"
+      ],
+      "attributes": {
+        "department": [
+          "Norte"
         ]
       }
     }

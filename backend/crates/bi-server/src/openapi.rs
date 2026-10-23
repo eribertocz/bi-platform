@@ -24,15 +24,10 @@ use crate::{auth, health, models, oidc, query, semantic};
         auth::dev_users,
         query::run,
         models::list,
-        semantic::explain
+        semantic::explain,
+        semantic::query
     ),
-    components(schemas(
-        crate::problem::Problem,
-        // The exact result body (#136) and the whole answer with its receipt
-        // (#146); the route that returns it is #138.
-        semantic::result::SemanticResult,
-        semantic::envelope::SemanticRun
-    )),
+    components(schemas(crate::problem::Problem)),
     security(),
     modifiers(&SessionSecurity)
 )]

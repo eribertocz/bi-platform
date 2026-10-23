@@ -50,9 +50,11 @@ pub(crate) struct HttpRecord<'a> {
     pub action: bi_audit::Action,
     pub result: bi_audit::ResultCode,
     pub resource_type: &'static str,
-    pub resource_id: &'static str,
+    pub resource_id: &'a str,
     /// The decision's fingerprint; `None` when no decision was taken.
     pub policy_decision_id: Option<String>,
+    /// The redacted shape of a query, when the route answers one.
+    pub query_shape: Option<bi_audit::QueryShape>,
 }
 
 /// Appends `record` within `budget`, all of it: connection, transaction,
@@ -86,7 +88,9 @@ pub(crate) async fn record_within(
         trace_id,
         policy_decision_id: record.policy_decision_id,
         source: bi_audit::Source::Http,
-        metadata_redacted: bi_audit::MetadataRedacted { query_shape: None },
+        metadata_redacted: bi_audit::MetadataRedacted {
+            query_shape: record.query_shape,
+        },
         schema_version: bi_audit::SCHEMA_VERSION,
     };
     let write = async {
