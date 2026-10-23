@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use axum::http::StatusCode;
+use sef_adapter_duckdb::execution::{PhysicalRelation, SourceCatalog};
 use sef_authz::{QueryDecision, authorize_query};
 use sef_correctness::{SemanticContext, ValidatedQuery};
 use sef_exec_ir::SemanticPlan;
@@ -250,6 +251,29 @@ impl Execution<'_> {
         &self.prepared.compiled.catalog
     }
 
+    /// The physical relations the plan lowers onto, as [`Self::sources`]
+    /// described them: nothing is read again.
+    #[must_use]
+    pub fn catalog(&self) -> SourceCatalog {
+        self.sources()
+            .relations
+            .iter()
+            .map(|(source, relation)| {
+                (
+                    (relation.source.clone(), relation.relation.clone()),
+                    PhysicalRelation {
+                        name: source.split('.').map(str::to_owned).collect(),
+                        columns: relation
+                            .columns
+                            .iter()
+                            .map(|c| (c.handle.clone(), c.name.clone()))
+                            .collect(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// The verified context the row policies bind.
     #[must_use]
     pub const fn context(&self) -> &SemanticContext {
@@ -409,6 +433,45 @@ pub(super) async fn prepare_loaded<T: Send + 'static>(
     loaded: Loaded,
     finish: impl FnOnce(Prepared) -> T + Send + 'static,
 ) -> Result<T, Refusal> {
+    let prepared = tokio::time::timeout(
+        state.query_timeout,
+        prepare_until(state, loaded, None, finish),
+    )
+    .await;
+    match prepared {
+        Ok(Ok(prepared)) => Ok(prepared),
+        Ok(Err(Stop::Refused(refusal))) => Err(refusal),
+        Err(_) | Ok(Err(Stop::Deadline)) => Err(Refusal(Box::new(Outcome::Failed(
+            StatusCode::GATEWAY_TIMEOUT,
+            "explain_timeout",
+            "La explicación superó el tiempo máximo. Simplifica la consulta y reintenta.",
+        )))),
+        Ok(Err(Stop::Engine(_))) => Err(Refusal(Box::new(Outcome::Failed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "analytics_unavailable",
+            "No se pudo consultar el catálogo analítico. Reintenta.",
+        )))),
+    }
+}
+
+/// Why the second phase stopped without a preparation.
+pub(super) enum Stop {
+    /// An answer for the client.
+    Refused(Refusal),
+    /// `deadline` passed, waiting for the engine or working on it.
+    Deadline,
+    /// The engine refused or lost the work: a full queue among others.
+    Engine(bi_runtime::RuntimeError),
+}
+
+/// [`prepare_loaded`] within `deadline`, when the caller set one: the work
+/// is dropped, and interrupted, when it passes.
+pub(super) async fn prepare_until<T: Send + 'static>(
+    state: &AppState,
+    loaded: Loaded,
+    deadline: Option<tokio::time::Instant>,
+    finish: impl FnOnce(Prepared) -> T + Send + 'static,
+) -> Result<T, Stop> {
     let Loaded {
         project,
         access,
@@ -422,23 +485,27 @@ pub(super) async fn prepare_loaded<T: Send + 'static>(
     // An engine that is down answers before the file is looked up, the same
     // whether it exists or not.
     let Some(runtime) = state.analytics.runtime() else {
-        return Err(Refusal(Box::new(Outcome::Failed(
+        return Err(Stop::Refused(Refusal(Box::new(Outcome::Failed(
             StatusCode::SERVICE_UNAVAILABLE,
             "analytics_unavailable",
             "El motor analítico no está listo. Reintenta en unos segundos.",
-        ))));
+        )))));
     };
     let Some(file) = project
         .ok()
         .and_then(|files| files.into_iter().find(|f| f.name == name))
     else {
         if !disclosure.inspects() {
-            return Err(Refusal(Box::new(Outcome::Undisclosed { audit: None })));
+            return Err(Stop::Refused(Refusal(Box::new(Outcome::Undisclosed {
+                audit: None,
+            }))));
         }
-        return Err(Refusal(Box::new(disclosure.inspected(Outcome::Failed(
-            StatusCode::NOT_FOUND,
-            "model_not_found",
-            "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
+        return Err(Stop::Refused(Refusal(Box::new(disclosure.inspected(
+            Outcome::Failed(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                "El modelo no existe en el proyecto. Usa el archivo que lista /api/v1/models.",
+            ),
         )))));
     };
     let span = tracing::Span::current();
@@ -454,18 +521,15 @@ pub(super) async fn prepare_loaded<T: Send + 'static>(
         };
         Ok(prepare_file(file, conn, &input).map(finish))
     });
-    match tokio::time::timeout(state.query_timeout, work).await {
-        Err(_) => Err(Refusal(Box::new(Outcome::Failed(
-            StatusCode::GATEWAY_TIMEOUT,
-            "explain_timeout",
-            "La explicación superó el tiempo máximo. Simplifica la consulta y reintenta.",
-        )))),
-        Ok(Err(_)) => Err(Refusal(Box::new(Outcome::Failed(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "analytics_unavailable",
-            "No se pudo consultar el catálogo analítico. Reintenta.",
-        )))),
-        Ok(Ok(prepared)) => prepared.map_err(Refusal),
+    let worked = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, work)
+            .await
+            .map_err(|_| Stop::Deadline)?,
+        None => work.await,
+    };
+    match worked {
+        Err(error) => Err(Stop::Engine(error)),
+        Ok(prepared) => prepared.map_err(|outcome| Stop::Refused(Refusal(outcome))),
     }
 }
 

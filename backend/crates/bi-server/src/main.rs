@@ -284,6 +284,9 @@ async fn run() -> ExitCode {
             "no entropy for the context key: explain stays unavailable"
         );
     }
+    let Some(semantic_runs) = semantic_runs(config.query_timeout, metrics_provider.as_ref()) else {
+        return ExitCode::FAILURE;
+    };
     let audit_reader = audit_reader(config.audit_reader.as_ref());
     let state = AppState {
         db: db.clone(),
@@ -293,6 +296,7 @@ async fn run() -> ExitCode {
         metrics,
         models,
         context_key,
+        semantic_runs,
     };
     let app = router_with_static(state, config.static_dir);
     let result = serve(listener, app, shutdown_signal()).await;
@@ -329,6 +333,24 @@ async fn run() -> ExitCode {
 /// so the operator learns its state, never with the credential in a log.
 /// Unset, malformed or refused, audit reading stays disabled and nothing
 /// falls back to another role.
+/// The semantic execution service, validated before serving: an invalid
+/// profile stops the startup.
+fn semantic_runs(
+    timeout: std::time::Duration,
+    provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
+) -> Option<bi_server::semantic::run::Runs> {
+    use bi_server::semantic::run::{Budgets, INITIAL, Profile, Runs};
+    use opentelemetry::metrics::MeterProvider as _;
+    let profile = Profile::new(Budgets { timeout, ..INITIAL })
+        .inspect_err(|error| tracing::error!(%error, "the semantic execution profile is invalid"))
+        .ok()?;
+    let runs = Runs::new(profile);
+    Some(match provider {
+        Some(provider) => runs.with_meter(&provider.meter("bi-server")),
+        None => runs,
+    })
+}
+
 fn audit_reader(
     url: Option<&bi_server::audit::reader::ReaderUrl>,
 ) -> Option<bi_server::audit::reader::AuditReader> {

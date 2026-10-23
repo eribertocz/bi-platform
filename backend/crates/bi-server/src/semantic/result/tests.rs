@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::semantic::prepare::tests::composition::{
     analytics, dimension, execute, metric, model, project, ready, request, session, state,
+    zoned_model,
 };
 
 const MEMBERS: &str = "version: 1\nusers:\n  ana: [viewer]\n";
@@ -282,58 +283,6 @@ async fn instants_keep_their_moment_in_utc_across_a_daylight_saving_change() {
         encode(&prepared, &[naive]),
         Err(CodecError::SchemaMismatch("type"))
     );
-}
-
-/// `instante` on the event timeline, and its month in La Paz (UTC-4).
-fn zoned_model() -> String {
-    let extension = |data: &str| {
-        format!(
-            "        custom_extensions:
-          - vendor_name: bi-platform
-            data: '{data}'
-"
-        )
-    };
-    let instant = "        datatype: DateTimeTz
-        dimension: {}
-";
-    let month = format!(
-        "      - name: mes
-        dimension: {{}}
-{}        expression:
-          dialects:
-            - dialect: OSSIE_SQL_2026
-              expression: DATE_TRUNC('MONTH', instante)
-",
-        extension(r#"{"version": 1, "time": {"timezone": "America/La_Paz"}}"#)
-    );
-    let text = model("", "");
-    assert_eq!(text.matches(instant).count(), 1);
-    let text = text.replacen(
-        instant,
-        &format!(
-            "{instant}{}",
-            extension(r#"{"version": 1, "time_role": "event"}"#)
-        ),
-        1,
-    );
-    assert_eq!(
-        text.matches(
-            "metrics:
-"
-        )
-        .count(),
-        1
-    );
-    text.replacen(
-        "metrics:
-",
-        &format!(
-            "{month}metrics:
-"
-        ),
-        1,
-    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
