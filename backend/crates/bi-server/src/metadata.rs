@@ -54,6 +54,10 @@ pub struct ReachableRole {
     pub accesses_audit_storage: bool,
     pub writes_migrations: bool,
     pub grants_audit_append: bool,
+    /// A role reserved by PostgreSQL (`pg_` prefix), such as
+    /// `pg_execute_server_program` or `pg_read_server_files`: powers over
+    /// the server's programs and files that no grant on `bi_meta` shows.
+    pub reserved_role: bool,
 }
 
 /// What the connection's current user can actually do, for today's handlers.
@@ -114,10 +118,11 @@ pub enum Forbidden {
     AccessesAuditStorage,
     WritesMigrations,
     GrantsAuditAppend,
+    ReservedRole,
 }
 
 impl Forbidden {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Superuser,
         Self::CreateRole,
         Self::CreateDatabase,
@@ -132,6 +137,7 @@ impl Forbidden {
         Self::AccessesAuditStorage,
         Self::WritesMigrations,
         Self::GrantsAuditAppend,
+        Self::ReservedRole,
     ];
 
     /// Whether `role` holds this capability.
@@ -152,6 +158,7 @@ impl Forbidden {
             Self::AccessesAuditStorage => role.accesses_audit_storage,
             Self::WritesMigrations => role.writes_migrations,
             Self::GrantsAuditAppend => role.grants_audit_append,
+            Self::ReservedRole => role.reserved_role,
         }
     }
 }
@@ -173,6 +180,7 @@ impl fmt::Display for Forbidden {
             Self::AccessesAuditStorage => "accesses_audit_storage",
             Self::WritesMigrations => "writes_migrations",
             Self::GrantsAuditAppend => "grants_audit_append",
+            Self::ReservedRole => "reserved_role",
         })
     }
 }
@@ -395,6 +403,7 @@ mod tests {
             Forbidden::AccessesAuditStorage => role.accesses_audit_storage = true,
             Forbidden::WritesMigrations => role.writes_migrations = true,
             Forbidden::GrantsAuditAppend => role.grants_audit_append = true,
+            Forbidden::ReservedRole => role.reserved_role = true,
         }
         role
     }
@@ -508,6 +517,7 @@ mod tests {
             accesses_audit_storage: a.accesses_audit_storage || b.accesses_audit_storage,
             writes_migrations: a.writes_migrations || b.writes_migrations,
             grants_audit_append: a.grants_audit_append || b.grants_audit_append,
+            reserved_role: a.reserved_role || b.reserved_role,
         }
     }
 

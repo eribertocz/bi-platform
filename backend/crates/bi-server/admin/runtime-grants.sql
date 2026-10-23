@@ -10,6 +10,14 @@
 -- administrator, and must not be a member of the owner. No password is ever
 -- stored here. `bi_runtime` is the example name: replace it with yours.
 --
+-- Nor may it be a member, directly or through any other role, with or
+-- without INHERIT or SET, of a role PostgreSQL reserves (any name starting
+-- with `pg_`, such as pg_execute_server_program, pg_read_server_files or
+-- pg_monitor): their powers over the server's programs, files, signals and
+-- settings show in no grant on bi_meta. The server refuses to admit work
+-- while such a membership exists (code `reserved_role`); correcting it is
+-- an administrative REVOKE, which the server never runs itself.
+--
 -- The runtime role gets nothing else. In particular it cannot read or
 -- change bi_meta.audit_events or bi_meta.audit_head except through
 -- audit_append, cannot create objects in bi_meta and cannot modify the
