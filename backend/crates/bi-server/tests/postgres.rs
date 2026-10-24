@@ -3,6 +3,7 @@
 //! server where the user may create databases (each test gets a fresh one).
 #![cfg(feature = "postgres-tests")]
 
+mod audit_pages;
 mod common;
 
 use std::time::Duration;
