@@ -347,7 +347,10 @@ pub async fn list_catalog(
                 models: projection.catalog.models,
             }),
         ),
-        Err(catalog::CatalogError::NotConfigured) => (
+        Err(catalog::CatalogFailure {
+            error: catalog::CatalogError::NotConfigured,
+            ..
+        }) => (
             bi_audit::ResultCode::Success,
             None,
             Ok(SemanticCatalog {
@@ -355,7 +358,12 @@ pub async fn list_catalog(
                 models: Vec::new(),
             }),
         ),
-        Err(error) => (bi_audit::ResultCode::Failure, None, Err(error)),
+        // The decisions taken before the failure name its event.
+        Err(failure) => (
+            bi_audit::ResultCode::Failure,
+            failure.decision,
+            Err(failure.error),
+        ),
     };
     let (resource_type, resource_id) = SEMANTIC_CATALOG;
     let left = runs

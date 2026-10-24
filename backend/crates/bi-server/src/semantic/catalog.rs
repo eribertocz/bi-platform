@@ -20,6 +20,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use sef_authz::{Constraint, QueryDecision, Usage, Use, authorize_query};
@@ -145,27 +146,46 @@ pub struct Work {
     trail: Trail,
 }
 
+impl Work {
+    fn took(&mut self, decision: &QueryDecision) {
+        self.trail.took(decision);
+    }
+}
+
 /// The fingerprints of the decisions one projection took, in the order it
-/// took them, folded into one identifier for its audit event.
+/// took them, folded into one identifier for its audit event. Shared with
+/// whoever started the projection, so the decisions taken before a failure
+/// or a deadline still name its event, even while the native work it
+/// abandoned goes on.
 #[derive(Clone, Default)]
-struct Trail {
+struct Trail(Arc<Mutex<Taken>>);
+
+#[derive(Clone, Default)]
+struct Taken {
     digest: Sha256,
-    taken: usize,
+    count: usize,
 }
 
 impl Trail {
-    fn taken(&mut self, decision: &QueryDecision) {
-        self.digest.update(decision.fingerprint.to_string());
-        self.digest.update(b"\n");
-        self.taken += 1;
+    fn took(&self, decision: &QueryDecision) {
+        let mut taken = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        taken.digest.update(decision.fingerprint.to_string());
+        taken.digest.update(b"\n");
+        taken.count += 1;
     }
 
-    /// `None` when nothing was decided: no decision is invented.
-    fn id(self) -> Option<String> {
+    /// The decisions taken so far; `None` when nothing was decided: no
+    /// decision is invented.
+    fn id(&self) -> Option<String> {
         use fmt::Write as _;
-        (self.taken > 0).then(|| {
+        let taken = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        (taken.count > 0).then(|| {
             let mut id = String::from("catalog-decisions-sha256:");
-            for byte in self.digest.finalize() {
+            for byte in taken.digest.finalize() {
                 let _ = write!(id, "{byte:02x}");
             }
             id
@@ -176,7 +196,8 @@ impl Trail {
 /// How many, never which.
 impl fmt::Debug for Trail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Trail({})", self.taken)
+        let count = self.0.lock().map_or(0, |taken| taken.count);
+        write!(f, "Trail({count})")
     }
 }
 
@@ -186,6 +207,15 @@ pub struct Projection {
     pub catalog: SessionCatalog,
     /// Derived from every decision the projection took; `None` when it
     /// took none (a project without metrics).
+    pub decision: Option<String>,
+}
+
+/// Why there is no catalog, and the decisions taken before it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogFailure {
+    pub error: CatalogError,
+    /// Derived from the decisions taken before the failure; `None` when it
+    /// came before any (no project, policies, busy, before compiling).
     pub decision: Option<String>,
 }
 
@@ -204,21 +234,22 @@ pub async fn for_session(
 }
 
 /// [`for_session`] ending by `deadline`, with the identifier of the
-/// decisions it took.
+/// decisions it took, also when it fails after taking some.
 ///
 /// # Errors
-/// A neutral [`CatalogError`].
+/// A neutral [`CatalogFailure`].
 pub async fn within(
     state: &AppState,
     session: Session,
     deadline: Instant,
-) -> Result<Projection, CatalogError> {
-    observed(state, session, deadline)
-        .await
-        .map(|(catalog, work)| Projection {
-            catalog,
-            decision: work.trail.id(),
-        })
+) -> Result<Projection, CatalogFailure> {
+    let trail = Trail::default();
+    let projected = observed(state, session, deadline, &trail).await;
+    let decision = trail.id();
+    match projected {
+        Ok((catalog, _)) => Ok(Projection { catalog, decision }),
+        Err(error) => Err(CatalogFailure { error, decision }),
+    }
 }
 
 /// [`for_session`] with the work it did.
@@ -226,16 +257,18 @@ pub(super) async fn project_with_work(
     state: &AppState,
     session: Session,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
-    observed(state, session, Instant::now() + state.query_timeout).await
+    let deadline = Instant::now() + state.query_timeout;
+    observed(state, session, deadline, &Trail::default()).await
 }
 
 async fn observed(
     state: &AppState,
     session: Session,
     deadline: Instant,
+    trail: &Trail,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
     let started = Instant::now();
-    let projected = projected(state, session, deadline).await;
+    let projected = projected(state, session, deadline, trail).await;
     let (outcome, models, metrics, fields) = match &projected {
         Ok((catalog, _)) => (
             "projected",
@@ -279,6 +312,7 @@ async fn projected(
     state: &AppState,
     session: Session,
     deadline: Instant,
+    trail: &Trail,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
     let Some(directory) = state.models.directory.clone() else {
         return Err(CatalogError::NotConfigured);
@@ -316,10 +350,13 @@ async fn projected(
         return Err(CatalogError::Unavailable);
     };
     let span = tracing::Span::current();
+    let trail = trail.clone();
     let work = runtime.run(move |conn| {
         let _permit = permit;
         let _entered = span.enter();
-        Ok(project_files(files, conn, &access, &session, deadline))
+        Ok(project_files(
+            files, conn, &access, &session, deadline, trail,
+        ))
     });
     tokio::time::timeout_at(deadline.into(), work)
         .await
@@ -335,9 +372,11 @@ fn project_files(
     access: &Access,
     session: &Session,
     deadline: Instant,
+    trail: Trail,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
     let mut work = Work {
         files: files.len(),
+        trail,
         ..Work::default()
     };
     let mut compiled = Vec::with_capacity(files.len());
@@ -489,7 +528,7 @@ fn fields<'m>(
         work.decisions += 1;
         let request = sef_authz::Context::new();
         let decision = authorize_query(&scope.access.snapshot, scope.principal, &own, &request);
-        work.trail.taken(&decision);
+        work.took(&decision);
         if !decision.allowed {
             continue;
         }
@@ -553,15 +592,12 @@ fn govern(
     scope: &Scope<'_>,
     work: &mut Work,
 ) -> Result<Option<Governed>, CatalogError> {
-    if Instant::now() >= scope.deadline {
-        return Err(CatalogError::Timeout);
-    }
     work.governed += 1;
-    match prepare::govern(model, query, scope.access, decided, &scope.context) {
+    let governed = match prepare::govern(model, query, scope.access, decided, &scope.context) {
         Ok(governed) => {
             work.planned += 1;
-            work.trail.taken(&governed.decision);
-            Ok(Some(governed))
+            work.took(&governed.decision);
+            Some(governed)
         }
         Err(stopped) => {
             let decision = match &*stopped {
@@ -577,10 +613,16 @@ fn govern(
                     asked: decision, ..
                 } => decision,
             };
-            work.trail.taken(decision);
-            Ok(None)
+            work.took(decision);
+            None
         }
+    };
+    // Checked once the decision is in the trail: a decision taken is never
+    // lost, and past the deadline no further query is governed.
+    if Instant::now() >= scope.deadline {
+        return Err(CatalogError::Timeout);
     }
+    Ok(governed)
 }
 
 /// What a query may do with `id`, on the minimal query `governed` accepted:
@@ -611,7 +653,7 @@ fn capabilities(
         work.decisions += 1;
         let request = sef_authz::Context::new();
         let decision = authorize_query(&scope.access.snapshot, scope.principal, &uses, &request);
-        work.trail.taken(&decision);
+        work.took(&decision);
         decision.allowed
     };
     Capabilities {
