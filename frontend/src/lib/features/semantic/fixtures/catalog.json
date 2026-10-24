@@ -2,6 +2,114 @@
   "status": "ready",
   "models": [
     {
+      "model": "metrics/anchos.yaml",
+      "name": "Ventas",
+      "metrics": [
+        {
+          "name": "cubo",
+          "type": "DECIMAL(56,6)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "filas",
+          "type": "INT64",
+          "unit": {
+            "kind": "count"
+          },
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "importe_total",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "margen",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "masked",
+            "filter": false,
+            "group": false,
+            "order": false
+          }
+        }
+      ],
+      "fields": [
+        {
+          "name": "ventas.ciudad",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.instante",
+          "type": "TIMESTAMPTZ",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.region",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        }
+      ]
+    },
+    {
       "model": "metrics/extremos.yaml",
       "name": "Extremos",
       "metrics": [

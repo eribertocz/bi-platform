@@ -115,7 +115,9 @@ describe('a chart only when it can be honest', () => {
   it('omits other shapes, withheld or non-numeric metrics and too many bars', () => {
     const metric = column({});
     expect(bars(block([metric], [['4']]))).toBeNull();
-    expect(bars(block([region, region, metric], [['a', 'b', '1']]))).toBeNull();
+    expect(
+      bars(block([region, { ...region, selection_id: 'c' }, metric], [['a', 'b', '1']])),
+    ).toBeNull();
     expect(bars(block([region, metric], [['a', '1']]), 'absent')).toBeNull();
     expect(bars(block([region, column({ masked: true })], [['Norte', null]]))).toBeNull();
     expect(bars(block([region, column({ type: 'VARCHAR' })], [['Norte', 'x']]))).toBeNull();

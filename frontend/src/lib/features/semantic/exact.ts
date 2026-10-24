@@ -113,6 +113,10 @@ const inInt64 = (value: bigint) => value >= INT64_MIN && value <= INT64_MAX;
  */
 export function checkBlock(block: SemanticBlock): SemanticBlock {
   const types = block.columns.map((column) => valueType(column.type));
+  // Each column is addressed by its selection: two alike are no contract.
+  if (new Set(block.columns.map((c) => c.selection_id)).size !== block.columns.length) {
+    throw new IncompatibleResult();
+  }
   if (block.rows.length !== block.row_count) throw new IncompatibleResult();
   if (block.limit !== null && block.row_count > block.limit) throw new IncompatibleResult();
   for (const row of block.rows) {

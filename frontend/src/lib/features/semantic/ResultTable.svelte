@@ -18,7 +18,15 @@
 {#if !checked.ok}<p role="alert">{checked.message}</p>
 {:else}
   {@const result = checked.block}
-  <div class="overflow-x-auto">
+  <!-- A wide table scrolls: the keyboard reaches it, named by its caption
+       (WAI scrollable-region pattern, required by axe scrollable-region-focusable). -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="overflow-x-auto focus-visible:outline-2 focus-visible:outline-offset-2"
+    tabindex="0"
+    role="region"
+    aria-label={`${caption}, desplazable`}
+  >
     <table class="w-full">
       <caption class="mb-3 text-left font-semibold">{caption}</caption>
       <thead>
