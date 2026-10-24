@@ -759,7 +759,7 @@
             }
           },
           "422": {
-            "description": "Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported` o `result_too_large`",
+            "description": "Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported`, `result_too_large` o `result_out_of_range` (el resultado numérico exacto no cabe en su tipo certificado: SUM de DECIMAL(p,s) es DECIMAL(max(p,38),s) y SUM de INT64 es DECIMAL(38,0))",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -220,6 +220,8 @@ pub enum RunFailure {
     Cancelled,
     /// Rows, bytes, intermediates, a cell or the body over budget.
     Budget,
+    /// A numeric result outside the exact range certified for it (#261).
+    OutOfRange,
     /// The engine refused or failed the work, its sources included.
     Engine,
     /// The stream closed without its completion.
@@ -246,6 +248,7 @@ impl RunFailure {
             Self::Deadline => "deadline",
             Self::Cancelled => "cancelled",
             Self::Budget => "budget",
+            Self::OutOfRange => "out_of_range",
             Self::Engine => "engine",
             Self::Incomplete => "incomplete",
             Self::Evidence => "evidence",
@@ -614,6 +617,7 @@ fn failed(failure: &Failure, deadline: Instant) -> RunFailure {
             }
         }
         Failure::Rejected(ExecutionError::Budget) => RunFailure::Budget,
+        Failure::Rejected(ExecutionError::ResultOutOfRange) => RunFailure::OutOfRange,
         Failure::Rejected(_) | Failure::Worker | Failure::InvalidCapacity => RunFailure::Engine,
     }
 }

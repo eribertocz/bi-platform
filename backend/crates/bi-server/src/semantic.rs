@@ -227,7 +227,7 @@ pub async fn explain(
         (status = 401, description = "Sin sesión", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Un uso no permitido, con las mismas reglas de divulgación que explain", body = SemanticDenial, content_type = "application/problem+json"),
         (status = 404, description = "`model_not_found`: el modelo no existe o la consulta no se puede ejecutar para esta sesión. Sin permiso de inspección del catálogo, todo fallo que dependa del catálogo responde igual, con el detalle fijo «No se puede ejecutar la consulta solicitada.»", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported` o `result_too_large`", body = SemanticRejection, content_type = "application/problem+json"),
+        (status = 422, description = "Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported`, `result_too_large` o `result_out_of_range` (el resultado numérico exacto no cabe en su tipo certificado: SUM de DECIMAL(p,s) es DECIMAL(max(p,38),s) y SUM de INT64 es DECIMAL(38,0))", body = SemanticRejection, content_type = "application/problem+json"),
         (status = 429, description = "`models_busy` o `semantic_busy`: sin capacidad para preparar o ejecutar", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "Políticas no válidas, metadatos no listos, motor no disponible o fallido (`analytics_unavailable`, `analytics_failed`), resultado no verificable (`result_unverified`), `semantic_unavailable` o auditoría no confirmada (`audit_unavailable`): sin resultado ni recibo", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "`semantic_timeout`: la consulta superó el tiempo máximo, contado desde su admisión", body = Problem, content_type = "application/problem+json")
@@ -508,6 +508,11 @@ impl Settled {
                 "temporal_unsupported",
                 "Agrupar por periodo un instante sin semántica temporal gobernada todavía no se \
                  puede ejecutar.",
+            ),
+            run::RunFailure::OutOfRange => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "result_out_of_range",
+                "El resultado numérico está fuera del rango admitido por la consulta.",
             ),
             run::RunFailure::Budget => (
                 StatusCode::UNPROCESSABLE_ENTITY,

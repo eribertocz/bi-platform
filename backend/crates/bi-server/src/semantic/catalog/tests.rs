@@ -167,7 +167,8 @@ async fn a_viewer_is_announced_exactly_what_its_queries_accept() {
     // The oracle, written out by hand: the masked metric is selectable
     // masked only; what is restricted, derived from it, split out of a
     // metric by the compiler or masked-only as a field is absent.
-    let decimal = "DECIMAL(18,2)";
+    // Every announced metric sums `importe`: DECIMAL(38,2) (#261).
+    let decimal = "DECIMAL(38,2)";
     let mut vieja = member("vieja", decimal, "values", false, &bob());
     vieja["lifecycle"] =
         json!({ "state": "deprecated", "sunset": "2027-01-01", "replacement": "importe_total" });

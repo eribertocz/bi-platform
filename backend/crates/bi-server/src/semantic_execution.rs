@@ -27,6 +27,7 @@ impl Failure {
             Self::Deadline | Self::Rejected(ExecutionError::Deadline) => "deadline",
             Self::Cancelled | Self::Rejected(ExecutionError::Cancelled) => "cancelled",
             Self::Rejected(ExecutionError::Budget) => "budget",
+            Self::Rejected(ExecutionError::ResultOutOfRange) => "out_of_range",
             Self::Rejected(_) => "rejected",
             Self::Worker => "worker",
             Self::InvalidCapacity => "invalid_capacity",

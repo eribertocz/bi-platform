@@ -82,14 +82,14 @@ async fn real_blocks_are_encoded_exactly_against_the_oracle() {
         .iter()
         .map(|c| c.value_type.as_str())
         .collect();
-    assert_eq!(types, ["VARCHAR", "DECIMAL(18,2)", "INT64"]);
+    assert_eq!(types, ["VARCHAR", "DECIMAL(38,2)", "INT64"]);
     assert!(block.columns.iter().all(|c| !c.masked));
     // The column contract, as the client reads it.
     assert_eq!(
         serde_json::to_value(&block.columns[1]).unwrap(),
         json!({
             "selection_id": "t", "kind": "metric", "id": block.columns[1].id,
-            "type": "DECIMAL(18,2)", "nullable": true, "unit": null,
+            "type": "DECIMAL(38,2)", "nullable": true, "unit": null,
             "timezone": null, "masked": false
         })
     );
@@ -150,11 +150,12 @@ async fn extreme_integers_and_decimals_keep_every_digit() {
             vec![Value::Null, Value::Null],
         ]
     );
-    // Over the declared DECIMAL(18,2): refused, never rounded.
+    // Over the declared DECIMAL(38,2) (SUM's certified type, #261):
+    // refused, never rounded.
     let over = rebuilt(
         &blocks[0],
         vec![
-            decimal_column(&[Some(10_i128.pow(18))], precision, scale),
+            decimal_column(&[Some(10_i128.pow(38))], precision, scale),
             Arc::new(Int64Array::from(vec![Some(1)])),
         ],
     );
@@ -188,7 +189,7 @@ async fn a_masked_column_is_never_read_and_differs_from_null() {
         Field::new(selection, DataType::Decimal128(38, 2), true).with_metadata(HashMap::from([
             ("sef.selection_id".to_owned(), selection.to_owned()),
             ("sef.metric_id".to_owned(), id.to_owned()),
-            ("sef.value_type".to_owned(), "DECIMAL(18,2)".to_owned()),
+            ("sef.value_type".to_owned(), "DECIMAL(38,2)".to_owned()),
         ]))
     };
     let ids: Vec<String> = prepared.validated().query.blocks[0]
@@ -204,7 +205,7 @@ async fn a_masked_column_is_never_read_and_differs_from_null() {
     let batch = RecordBatch::try_new(
         Arc::new(Schema::new(vec![field("c", &ids[0]), field("t", &ids[1])])),
         vec![
-            decimal_column(&[Some(10_i128.pow(20)), Some(777)], 38, 2),
+            decimal_column(&[Some(10_i128.pow(38)), Some(777)], 38, 2),
             decimal_column(&[None, Some(1)], 38, 2),
         ],
     )
