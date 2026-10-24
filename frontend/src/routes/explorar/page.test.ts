@@ -249,3 +249,31 @@ describe('catalog states', () => {
     expect(screen.getByRole('button', { name: 'Reintentar' })).toBeTruthy();
   });
 });
+
+describe('found by the adversarial review before delivery', () => {
+  it('marks and disables a metric seen only withheld: it is never sent', async () => {
+    const api = server(realAnswer);
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    const margen = screen.getByRole('checkbox', { name: /margen/ }) as HTMLInputElement;
+    expect(margen.disabled).toBe(true);
+    expect(api.calls.some((c) => c.body?.query.selections.some((s) => s.name === 'margen'))).toBe(
+      false,
+    );
+  });
+
+  it('shows a malformed receipt as an invalid answer instead of breaking the page', async () => {
+    server((call) => {
+      if (call.url.endsWith('/catalog')) return catalog();
+      const broken = structuredClone(total) as Record<string, unknown>;
+      delete (broken.receipt as Record<string, unknown>).read_started_at;
+      return Response.json(broken);
+    });
+    render(Page);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('no corresponde a su contrato');
+    expect(alert.textContent).not.toContain('conexión');
+    expect(screen.queryByRole('button', { name: 'Reintentar' })).toBeNull();
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+  });
+});

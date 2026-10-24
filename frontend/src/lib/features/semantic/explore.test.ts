@@ -162,3 +162,64 @@ describe('failures', () => {
     expect(failed).toMatchObject({ ...expected, status, code, requestId: 'req-9' });
   });
 });
+
+describe('found by the adversarial review before delivery', () => {
+  const masked = (name: string) => member(name, 'masked');
+  it('never starts on, nor keeps, a metric seen only withheld', () => {
+    const onlyMasked = { ...model('a', [], []), metrics: [masked('oculta')] };
+    const next = model('b', ['visible'], []);
+    expect(initialChoice(ready(onlyMasked, next))).toEqual({
+      model: 'metrics/b',
+      metrics: ['visible'],
+      dimensions: [],
+    });
+    expect(initialChoice(ready(onlyMasked))).toBeNull();
+    const mixed = {
+      ...model('m', ['visible'], []),
+      metrics: [masked('oculta'), member('visible')],
+    };
+    const kept = reconcile(
+      { model: 'metrics/m', metrics: ['oculta', 'visible'], dimensions: [] },
+      ready(mixed),
+    );
+    expect(kept?.metrics).toEqual(['visible']);
+  });
+
+  it('keeps the model after a selection was retired, when the model is still there', () => {
+    const catalog = ready(model('first', ['x'], []), model('mine', ['y', 'z'], []));
+    expect(reconcile({ model: 'metrics/mine', metrics: [], dimensions: [] }, catalog)).toEqual({
+      model: 'metrics/mine',
+      metrics: ['y'],
+      dimensions: [],
+    });
+  });
+
+  it('calls two reads under another model or other policies diverged', () => {
+    const base = structuredClone(total) as unknown as SemanticRun;
+    for (const key of ['model', 'policies'] as const) {
+      const other = structuredClone(total) as unknown as SemanticRun;
+      other.receipt.fingerprints[key] = `${key}-hmac-sha256-v1:${'f'.repeat(64)}`;
+      expect(consistency({ kpi: base, table: other })).toBe('diverged');
+    }
+  });
+
+  it('refuses an answer with other than one block, and says why without a retry loop', async () => {
+    const twoBlocks = structuredClone(total) as unknown as SemanticRun;
+    twoBlocks.result.blocks.push(twoBlocks.result.blocks[0]!);
+    const run = vi.fn(async () => twoBlocks);
+    const error = await answer(
+      { model: 'm', metrics: ['a'], dimensions: [] },
+      new AbortController().signal,
+      run,
+    ).catch((e: unknown) => e);
+    expect(failure(error)).toMatchObject({ retry: false, gone: false });
+    expect(failure(error).message).toContain('no se muestra ninguna cifra');
+  });
+
+  it("tells a client timeout apart from a network failure, and a busy server from one's own query", () => {
+    expect(failure(new DOMException('late', 'TimeoutError')).message).toContain(
+      'no respondió a tiempo',
+    );
+    expect(failure(new ApiError(429, 'r', 'semantic_busy')).message).not.toContain('tuya');
+  });
+});

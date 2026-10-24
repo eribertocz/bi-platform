@@ -158,12 +158,13 @@
             <input
               type="checkbox"
               checked={on}
-              disabled={!on && choice.metrics.length >= MAX_METRICS}
+              disabled={metric.capabilities.select === 'masked' ||
+                (!on && choice.metrics.length >= MAX_METRICS)}
               onchange={(event) => toggle('metrics', metric.name, event.currentTarget.checked)}
             />
             {metric.name}
             {#if metric.capabilities.select === 'masked'}<span class="text-sm text-slate-600"
-                >(solo valores ocultos)</span
+                >(solo valores ocultos: todavía no se puede consultar)</span
               >{/if}
             {#if metric.lifecycle.state === 'deprecated'}<span class="text-sm text-slate-600"
                 >(obsoleta)</span
@@ -210,25 +211,24 @@
         <KpiStrip run={result.kpi} labels={view.labels} />
       </section>
       {#if result.table}
-        {@const block = result.table.result.blocks[0]}
+        {@const block = result.table.result.blocks[0]!}
         {#if consistency(result) === 'diverged'}
           <p class="panel mb-6" role="note">
-            Los totales y el desglose leyeron versiones distintas de los datos: pueden no coincidir.
+            Los totales y el desglose leyeron versiones distintas de los datos, del modelo o de las
+            políticas: pueden no coincidir.
           </p>
         {:else}
           <p class="mb-6 text-sm text-slate-700" role="note">
             Los totales y el desglose son dos lecturas, cada una con su recibo.
           </p>
         {/if}
-        {#if block}
-          <section class="panel mb-6" aria-labelledby="chart-title">
-            <h2 id="chart-title">Gráfico</h2>
-            <ResultChart {block} labels={view.labels} />
-          </section>
-          <section class="panel mb-6" aria-label="Desglose">
-            <ResultTable {block} caption="Desglose" labels={view.labels} />
-          </section>
-        {/if}
+        <section class="panel mb-6" aria-labelledby="chart-title">
+          <h2 id="chart-title">Gráfico</h2>
+          <ResultChart {block} labels={view.labels} />
+        </section>
+        <section class="panel mb-6" aria-label="Desglose">
+          <ResultTable {block} caption="Desglose" labels={view.labels} />
+        </section>
         <ReceiptPanel
           receipt={result.table.receipt}
           notices={result.table.notices}

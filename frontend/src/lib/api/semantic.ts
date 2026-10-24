@@ -7,8 +7,19 @@ export type CatalogMember = components['schemas']['CatalogMember'];
 export type SemanticRequest = components['schemas']['ExplainRequest'];
 export type SemanticRun = components['schemas']['SemanticRun'];
 
-/** The server's own budget plus a margin: the client never gives up first. */
-const QUERY_TIMEOUT_MS = 15_000;
+/** An answer that arrived but does not fit its contract. */
+export class InvalidAnswer extends Error {
+  constructor() {
+    super('La API devolvió una respuesta que no corresponde a su contrato.');
+    this.name = 'InvalidAnswer';
+  }
+}
+
+/**
+ * A ceiling for a request the server never answered; the server ends every
+ * query within its own configurable budget long before.
+ */
+const QUERY_TIMEOUT_MS = 60_000;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
@@ -42,13 +53,44 @@ function isCatalog(value: unknown): value is SemanticCatalog {
   );
 }
 
+const strings = (value: unknown, keys: string[]) =>
+  isObject(value) && keys.every((key) => typeof value[key] === 'string');
+
+/** The receipt as the page shows it, field by field: nothing is read unchecked. */
+function isReceipt(value: unknown): boolean {
+  return (
+    strings(value, ['id', 'version', 'evidence', 'read_started_at', 'read_finished_at']) &&
+    isObject(value) &&
+    strings(value.fingerprints, ['query', 'model', 'plan', 'decision', 'policies', 'context']) &&
+    strings(value.query, ['encoding', 'sqir']) &&
+    strings(value.versions, ['engine', 'adapter', 'capability_profile', 'tzdb']) &&
+    Array.isArray(value.definitions) &&
+    value.definitions.every((d: unknown) => strings(d, ['id', 'content'])) &&
+    Array.isArray(value.sources) &&
+    value.sources.every(
+      (s: unknown) =>
+        strings(s, ['dataset']) &&
+        isObject(s) &&
+        (s.data_snapshot === null || typeof s.data_snapshot === 'string') &&
+        (s.source_refreshed_at === null || typeof s.source_refreshed_at === 'string'),
+    )
+  );
+}
+
 function isRun(value: unknown): value is SemanticRun {
   return (
     isObject(value) &&
     isObject(value.result) &&
     Array.isArray(value.result.blocks) &&
-    isObject(value.receipt) &&
-    Array.isArray(value.notices)
+    isReceipt(value.receipt) &&
+    Array.isArray(value.notices) &&
+    value.notices.every(
+      (n: unknown) =>
+        strings(n, ['metric']) &&
+        isObject(n) &&
+        (n.sunset === null || typeof n.sunset === 'string') &&
+        (n.replacement === null || typeof n.replacement === 'string'),
+    )
   );
 }
 
@@ -64,7 +106,7 @@ export async function listCatalog(
     QUERY_TIMEOUT_MS,
   );
   const body: unknown = await response.json();
-  if (!isCatalog(body)) throw new Error('La API devolvió un catálogo inválido.');
+  if (!isCatalog(body)) throw new InvalidAnswer();
   return body;
 }
 
@@ -89,6 +131,6 @@ export async function runSemantic(
     QUERY_TIMEOUT_MS,
   );
   const body: unknown = await response.json();
-  if (!isRun(body)) throw new Error('La API devolvió una respuesta semántica inválida.');
+  if (!isRun(body)) throw new InvalidAnswer();
   return body;
 }

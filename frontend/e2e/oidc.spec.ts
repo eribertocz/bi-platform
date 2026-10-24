@@ -81,18 +81,12 @@ test('after corporate login, Explore asks only the semantic catalog and shows wh
   const answered = await catalog;
   expect(answered.status()).toBe(200);
   const body = await answered.json();
-  // Without a project (the dedicated CI job) the page says so; with the
-  // governed project of explore.spec.ts it offers the models it lists.
-  if (body.status === 'not_configured') {
-    await expect(page.getByRole('status')).toHaveText(
-      'Esta instancia todavía no tiene un proyecto configurado.',
-    );
-    await expect(page.getByLabel('Modelo')).toHaveCount(0);
-  } else {
-    await expect(page.getByLabel('Modelo').getByRole('option')).toHaveText(
-      body.models.map((model: { name: string }) => model.name),
-    );
-  }
+  // The CI job serves the governed project of explore.spec.ts: the page
+  // offers exactly the models the catalog lists, each with its file.
+  expect(body.status).toBe('ready');
+  await expect(page.getByLabel('Modelo').getByRole('option')).toHaveText(
+    body.models.map((model: { name: string; model: string }) => `${model.name} · ${model.model}`),
+  );
   await expect(page.getByRole('alert')).toHaveCount(0);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   // The G1 routes are gone from this page: no query or model inspection.

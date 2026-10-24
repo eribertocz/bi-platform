@@ -1,5 +1,7 @@
 import { ApiError } from '#lib/api/session.ts';
+import { IncompatibleResult } from './exact';
 import {
+  InvalidAnswer,
   runSemantic,
   type CatalogModel,
   type SemanticCatalog,
@@ -18,28 +20,43 @@ export const groupable = (model: CatalogModel) =>
   model.fields.filter((field) => field.capabilities.group);
 
 /**
- * A first question on the catalog: its first model and first metric whose
- * values the session may see (else its first metric), no breakdown.
+ * The metrics a question may select: those whose values the session may
+ * see. A metric seen only withheld is announced and marked, but execution
+ * refuses it whole (`masked_unsupported`), so it is never sent.
  */
+export const selectable = (model: CatalogModel) =>
+  model.metrics.filter((metric) => metric.capabilities.select === 'values');
+
+/** A first question on `model`: its first selectable metric, no breakdown. */
+function startOn(model: CatalogModel): Choice | null {
+  const metric = selectable(model)[0];
+  return metric ? { model: model.model, metrics: [metric.name], dimensions: [] } : null;
+}
+
+/** A first question on the catalog: the first model with a selectable metric. */
 export function initialChoice(catalog: SemanticCatalog): Choice | null {
-  const model = catalog.models[0];
-  const metric =
-    model?.metrics.find((m) => m.capabilities.select === 'values') ?? model?.metrics[0];
-  return model && metric ? { model: model.model, metrics: [metric.name], dimensions: [] } : null;
+  for (const model of catalog.models) {
+    const choice = startOn(model);
+    if (choice) return choice;
+  }
+  return null;
 }
 
 /**
- * `choice` on a refreshed catalog: what is no longer announced is dropped, and
- * a model that is gone, or left without metrics, starts over.
+ * `choice` on a refreshed catalog: what is no longer selectable is dropped;
+ * a model left without metrics starts over on itself, and only a model that
+ * is gone starts over on the catalog.
  */
 export function reconcile(choice: Choice | null, catalog: SemanticCatalog): Choice | null {
   const model = catalog.models.find((m) => m.model === choice?.model);
   if (!choice || !model) return initialChoice(catalog);
-  const metrics = choice.metrics.filter((name) => model.metrics.some((m) => m.name === name));
+  const metrics = choice.metrics.filter((name) => selectable(model).some((m) => m.name === name));
   const dimensions = choice.dimensions.filter((name) =>
     groupable(model).some((f) => f.name === name),
   );
-  return metrics.length > 0 ? { model: model.model, metrics, dimensions } : initialChoice(catalog);
+  return metrics.length > 0
+    ? { model: model.model, metrics, dimensions }
+    : (startOn(model) ?? initialChoice(catalog));
 }
 
 /** Whether `choice` is a question the page may send. */
@@ -90,6 +107,10 @@ export async function answer(
   signal.throwIfAborted();
   const grouped = table && (await run(table, signal));
   signal.throwIfAborted();
+  // One question, one block each: anything else is shown nowhere.
+  if (total.result.blocks.length !== 1 || (grouped && grouped.result.blocks.length !== 1)) {
+    throw new IncompatibleResult();
+  }
   return { kpi: total, table: grouped };
 }
 
@@ -99,12 +120,15 @@ export async function answer(
  */
 export function consistency(answer: Answer): 'single' | 'separate' | 'diverged' {
   if (!answer.table) return 'single';
-  const seen = new Map(answer.kpi.receipt.sources.map((s) => [s.dataset, s.data_snapshot]));
+  const [kpi, table] = [answer.kpi.receipt, answer.table.receipt];
+  const seen = new Map(kpi.sources.map((s) => [s.dataset, s.data_snapshot]));
+  // The model's and the policies' fingerprints are comparable within one
+  // instance and one principal: exactly the two reads of one page.
   const differs =
-    answer.kpi.receipt.versions.engine !== answer.table.receipt.versions.engine ||
-    answer.table.receipt.sources.some(
-      (s) => seen.has(s.dataset) && seen.get(s.dataset) !== s.data_snapshot,
-    );
+    kpi.versions.engine !== table.versions.engine ||
+    kpi.fingerprints.model !== table.fingerprints.model ||
+    kpi.fingerprints.policies !== table.fingerprints.policies ||
+    table.sources.some((s) => seen.has(s.dataset) && seen.get(s.dataset) !== s.data_snapshot);
   return differs ? 'diverged' : 'separate';
 }
 
@@ -121,6 +145,16 @@ export type Failure = {
 };
 
 export function failure(error: unknown): Failure {
+  if (error instanceof IncompatibleResult || error instanceof InvalidAnswer) {
+    return { message: error.message, retry: false, gone: false };
+  }
+  if (error instanceof DOMException && error.name === 'TimeoutError') {
+    return {
+      message: 'La consulta no respondió a tiempo. Reintenta en unos segundos.',
+      retry: true,
+      gone: false,
+    };
+  }
   if (!(error instanceof ApiError)) {
     return {
       message: 'No se pudo consultar la API. Revisa la conexión.',
@@ -161,7 +195,7 @@ export function failure(error: unknown): Failure {
     case 429:
       return {
         ...known,
-        message: 'El servidor está ocupado con otra consulta tuya. Reintenta en unos segundos.',
+        message: 'El servidor está ocupado. Reintenta en unos segundos.',
         retry: true,
         gone: false,
       };
