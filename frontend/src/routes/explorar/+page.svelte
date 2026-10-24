@@ -8,6 +8,7 @@
     failure,
     groupable,
     initialChoice,
+    MANY_METRICS,
     MAX_DIMENSIONS,
     MAX_METRICS,
     reconcile,
@@ -95,10 +96,15 @@
     if (view.kind === 'error') view = { kind: 'idle' };
     choice = next;
   }
-  function toggle(list: 'metrics' | 'dimensions', name: string, on: boolean) {
-    if (!choice) return;
+  /** Whether the change was taken; a refused one leaves the box as it was. */
+  function toggle(list: 'metrics' | 'dimensions', name: string, on: boolean): boolean {
+    if (!choice) return false;
     const names = choice[list].filter((n) => n !== name);
+    // The same limits as the controls, held by the state itself.
+    const limit = list === 'metrics' ? MAX_METRICS : MAX_DIMENSIONS;
+    if (on && names.length >= limit) return false;
     pick({ ...choice, [list]: on ? [...names, name] : names });
+    return true;
   }
 </script>
 
@@ -150,7 +156,7 @@
       <button type="button" onclick={() => catalogRevision++}>Actualizar catálogo</button>
     </div>
     {#if model && choice}
-      <fieldset>
+      <fieldset aria-describedby="metrics-limit">
         <legend class="font-semibold">Métricas (1 a {MAX_METRICS})</legend>
         {#each model.metrics as metric (metric.name)}
           {@const on = choice.metrics.includes(metric.name)}
@@ -160,7 +166,10 @@
               checked={on}
               disabled={metric.capabilities.select === 'masked' ||
                 (!on && choice.metrics.length >= MAX_METRICS)}
-              onchange={(event) => toggle('metrics', metric.name, event.currentTarget.checked)}
+              onchange={(event) => {
+                const box = event.currentTarget;
+                if (!toggle('metrics', metric.name, box.checked)) box.checked = !box.checked;
+              }}
             />
             {metric.name}
             {#if metric.capabilities.select === 'masked'}<span class="text-sm text-slate-600"
@@ -172,6 +181,22 @@
           </label>
         {/each}
       </fieldset>
+      <div id="metrics-limit">
+        {#if choice.metrics.length >= MAX_METRICS}
+          <p class="text-sm text-slate-700">
+            Máximo {MAX_METRICS} métricas: quita una para agregar otra.
+          </p>
+        {/if}
+        <!-- Announced once when crossing the threshold: the region stays mounted. -->
+        <div role="status">
+          {#if choice.metrics.length >= MANY_METRICS}
+            <p class="text-sm text-slate-700">
+              Muchas métricas pueden dificultar la lectura. Puedes quitar algunas para comparar
+              mejor.
+            </p>
+          {/if}
+        </div>
+      </div>
       <fieldset>
         <legend class="font-semibold">Desglosar por (0 a {MAX_DIMENSIONS})</legend>
         {#each groupable(model) as field (field.name)}
@@ -181,7 +206,10 @@
               type="checkbox"
               checked={on}
               disabled={!on && choice.dimensions.length >= MAX_DIMENSIONS}
-              onchange={(event) => toggle('dimensions', field.name, event.currentTarget.checked)}
+              onchange={(event) => {
+                const box = event.currentTarget;
+                if (!toggle('dimensions', field.name, box.checked)) box.checked = !box.checked;
+              }}
             />
             {field.name}
           </label>

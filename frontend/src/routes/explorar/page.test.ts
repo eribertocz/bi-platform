@@ -277,3 +277,81 @@ describe('found by the adversarial review before delivery', () => {
     expect(screen.queryByTestId('kpi-t')).toBeNull();
   });
 });
+
+describe('up to 20 metrics per question (#147, decided by Codex)', () => {
+  const HELP =
+    'Muchas métricas pueden dificultar la lectura. Puedes quitar algunas para comparar mejor.';
+  const MAX = 'Máximo 20 métricas: quita una para agregar otra.';
+  const wide = {
+    ...ventas,
+    metrics: Array.from({ length: 21 }, (_, i) => member(`m${String(i + 1).padStart(2, '0')}`)),
+  };
+  const metricBoxes = () =>
+    screen
+      .getAllByRole('checkbox')
+      .filter((c) =>
+        /^m\d\d$/.test(c.getAttribute('aria-label') ?? c.parentElement!.textContent!.trim()),
+      ) as HTMLInputElement[];
+  async function tick(count: number) {
+    for (const box of metricBoxes()) {
+      const want = metricBoxes().indexOf(box) < count;
+      if (box.checked !== want && !box.disabled) await fireEvent.click(box);
+    }
+  }
+
+  it('asks 0, 1, 9, 10 and 20 in the order chosen, helps from 10 and stops the 21st', async () => {
+    const api = server((call) =>
+      call.url.endsWith('/catalog') ? catalog([wide]) : Response.json(total),
+    );
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    const asked = () => api.calls.at(-1)!.body?.query.selections.map((s) => s.name);
+    // 0: nothing is sent.
+    await fireEvent.click(metricBoxes()[0]!);
+    expect(await screen.findByText('Elige al menos una métrica.')).toBeTruthy();
+    const before = api.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(api.calls.length).toBe(before);
+    // 1, then 9: no help yet.
+    await tick(1);
+    await waitFor(() => expect(asked()).toEqual(['m01']));
+    await tick(9);
+    await waitFor(() => expect(asked()).toHaveLength(9));
+    expect(screen.queryByText(HELP)).toBeNull();
+    // 10: help, not blocking.
+    await tick(10);
+    await waitFor(() => expect(asked()).toHaveLength(10));
+    expect(screen.getByText(HELP)).toBeTruthy();
+    // 20: the 21st cannot be added; any one can be removed.
+    await tick(20);
+    await waitFor(() =>
+      expect(asked()).toEqual(
+        Array.from({ length: 20 }, (_, i) => `m${String(i + 1).padStart(2, '0')}`),
+      ),
+    );
+    expect(screen.getByText(MAX)).toBeTruthy();
+    expect(metricBoxes()[20]!.disabled).toBe(true);
+    expect(
+      metricBoxes()
+        .slice(0, 20)
+        .every((b) => !b.disabled),
+    ).toBe(true);
+    await fireEvent.click(metricBoxes()[20]!);
+    expect(asked()).toHaveLength(20);
+    expect(metricBoxes()[20]!.checked).toBe(false);
+    // Removing one frees the max and keeps the order of the rest.
+    await fireEvent.click(metricBoxes()[4]!);
+    await waitFor(() => expect(asked()).toHaveLength(19));
+    expect(asked()).not.toContain('m05');
+    expect(screen.queryByText(MAX)).toBeNull();
+    expect(metricBoxes()[20]!.disabled).toBe(false);
+    // Back to 9: the help goes away.
+    for (const box of metricBoxes()
+      .filter((b) => b.checked)
+      .slice(9))
+      await fireEvent.click(box);
+    await waitFor(() => expect(asked()).toHaveLength(9));
+    expect(screen.queryByText(HELP)).toBeNull();
+    expect(api.overlapped()).toBe(false);
+  });
+});

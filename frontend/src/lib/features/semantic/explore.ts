@@ -9,10 +9,13 @@ import {
   type SemanticRun,
 } from '#lib/api/semantic.ts';
 
-export const MAX_METRICS = 8;
+/** An interaction limit of this page (#147); the server keeps its own budgets. */
+export const MAX_METRICS = 20;
+/** From how many metrics on the page suggests removing some, without blocking. */
+export const MANY_METRICS = 10;
 export const MAX_DIMENSIONS = 2;
 
-/** What the person asks: one model, 1 to 8 metrics, 0 to 2 fields to break them down by. */
+/** What the person asks: one model, 1 to 20 metrics, 0 to 2 fields to break them down by. */
 export type Choice = { model: string; metrics: string[]; dimensions: string[] };
 
 /** The fields a question may break down by: those the session may group. */
