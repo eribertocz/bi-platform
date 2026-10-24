@@ -1,4 +1,6 @@
-import { expect, test, type Page, type Request } from '@playwright/test';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { expect, test, type Page, type Request, type Response } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
 // The semantic Explorar (#147) against a real production server: corporate
@@ -11,7 +13,7 @@ import AxeBuilder from '@axe-core/playwright';
 // (no BI_ANALYTICS=off) and BI_OIDC_ATTRIBUTE_CLAIMS=department,
 // BI_PROJECT_DIR=<abs>/frontend/e2e/semantic/project and BI_LAKE_*; the
 // rows are written once with DuckDB 1.5.6 attaching the same lake and
-// running semantic/ventas.sql. With oidc.spec.ts a run signs in eight times: the server's
+// running semantic/ventas.sql. With oidc.spec.ts a run signs in nine times: the server's
 // OIDC admission (20 per IP, one more every 3 s) asks for a pause between
 // consecutive runs.
 //
@@ -477,6 +479,172 @@ test('20 metrics and 2 breakdowns: exact Norte values, the help from 10, the lim
 
   onlySemantic(network.sent);
   // Each question: the total, then the breakdown; never two answered at once.
+  expect(network.concurrent()).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+/** A direct query of the same session (its cookie), as the page would send it. */
+async function askDirectly(page: Page, origin: string, metric: string) {
+  const response = await page.request.post('/api/v1/semantic/query', {
+    headers: { Origin: origin, Accept: 'application/json' },
+    data: {
+      model: 'metrics/ventas.yaml',
+      query: { selections: [{ id: 'm0', kind: 'metric', name: metric }] },
+    },
+  });
+  return { response, body: await response.json() };
+}
+
+/**
+ * The neutral 404: its code, its fixed detail and its correlation, nothing
+ * that names what was asked. Returns the body without the correlation.
+ */
+function neutral({ response, body }: { response: Response; body: Record<string, unknown> }) {
+  expect(response.status()).toBe(404);
+  expect(Object.keys(body).sort()).toEqual([
+    'code',
+    'detail',
+    'request_id',
+    'status',
+    'title',
+    'type',
+  ]);
+  expect(body.code).toBe('model_not_found');
+  expect(body.request_id).toBe(response.headers()['x-request-id']);
+  expect(JSON.stringify(body)).not.toMatch(
+    /centinela|reserva|inexistente|importe|filas|ventas|recuento|metrics\//i,
+  );
+  const rest = { ...body };
+  delete rest.request_id;
+  return rest;
+}
+
+test('membership revoked with the page open: neutral 404, nothing kept, refresh, recovery', async ({
+  page,
+  baseURL,
+}) => {
+  test.setTimeout(150_000);
+  // The project file the server reads on every request; restored whatever happens.
+  const members = fileURLToPath(
+    new URL('./semantic/project/policies/members.yaml', import.meta.url),
+  );
+  const original = readFileSync(members);
+  // Norte's provider group loses its mapping, as in the #138/#140 revocation tests.
+  const revoked = original
+    .toString('utf8')
+    .replace(/^ {2}analysts: \[viewer\]$/m, '  catalog_authors: [viewer]');
+  expect(revoked).not.toBe(original.toString('utf8'));
+  const network = watch(page);
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const isQuery = (response: Response) =>
+    new URL(response.url()).pathname === '/api/v1/semantic/query' &&
+    response.request().method() === 'POST';
+  const isCatalog = (response: Response) =>
+    new URL(response.url()).pathname === '/api/v1/semantic/catalog';
+  const metric = (name: string) => page.getByRole('checkbox', { name, exact: true });
+
+  try {
+    // 1. The selection is on screen with its exact answer and its receipt.
+    await signIn(page, NORTE.user, NORTE.name);
+    await openExplore(page);
+    await chooseVentas(page);
+    await metric('importe_total').check();
+    await expect(kpi(page, 'importe_total')).toHaveText(NORTE.shown);
+    await settled(page, 2);
+    await expect(page.getByRole('heading', { name: 'Recibo de los totales' })).toBeVisible();
+    const receipts = await page.locator('dt:text-is("Identificador") + dd code').allTextContents();
+    expect(receipts).toHaveLength(1);
+    const receipt = receipts[0]!;
+
+    // 2. Revoked while the page stays open; the session cookie itself stays valid.
+    writeFileSync(members, revoked);
+    expect((await page.request.get('/api/v1/session')).status()).toBe(200);
+
+    // 3. The same model asked again: the real authorizer refuses it with the neutral 404.
+    const refusal = page.waitForResponse(isQuery);
+    // A click, not check(): the page unticks it as soon as the refusal arrives.
+    await metric('importe_minimo').click();
+    const refused = await refusal;
+    const fromPage = neutral({ response: refused, body: await refused.json() });
+    const requestId = refused.headers()['x-request-id']!;
+    const alert = page.getByRole('alert');
+    await expect(alert).toContainText(
+      'Esta consulta ya no está disponible para tu sesión. Actualiza el catálogo.',
+    );
+    await expect(alert).toContainText('HTTP 404 · Código: model_not_found');
+    await expect(alert).toContainText(`Solicitud: ${requestId}`);
+    // The selection goes with its answer: nothing ticked, no figure, table or receipt.
+    await expect(page.getByRole('checkbox', { checked: true })).toHaveCount(0);
+    await expect(page.locator('dl.kpis')).toHaveCount(0);
+    await expect(page.getByRole('table')).toHaveCount(0);
+    await expect(page.getByRole('img')).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /^Recibo/ })).toHaveCount(0);
+    await expect(page.locator('dt:text-is("Identificador")')).toHaveCount(0);
+    const withdrawn = await page.content();
+    expect(withdrawn).not.toContain(NORTE.shown);
+    expect(withdrawn).not.toContain(NORTE.amount);
+    expect(withdrawn).not.toContain(receipt);
+    await noLeaks(page, SUR);
+    await axe(page);
+
+    // 4. Only an explicit refresh asks again, and the catalog no longer offers it.
+    const sinceRefusal = network.sent.length;
+    const emptied = page.waitForResponse(isCatalog);
+    await page
+      .locator('[aria-live="polite"]')
+      .getByRole('button', { name: 'Actualizar catálogo' })
+      .click();
+    const empty = await emptied;
+    expect(empty.status()).toBe(200);
+    expect(await empty.json()).toEqual({ status: 'ready', models: [] });
+    await expect(page.getByRole('status')).toHaveText(
+      'Tu sesión no tiene métricas disponibles para consultar.',
+    );
+    await expect(page.getByLabel('Modelo')).toHaveCount(0);
+    await expect(metric('importe_total')).toHaveCount(0);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.locator('dl.kpis')).toHaveCount(0);
+    // No retry of its own: between the refusal and the refresh, only the catalog.
+    expect(network.sent.slice(sinceRefusal)).toEqual(['GET /api/v1/semantic/catalog']);
+    await axe(page);
+
+    // 5a. While revoked, the metric it saw, one that does not exist and one it
+    // may never see answer alike: the page's body, apart from the correlation.
+    for (const name of ['importe_total', 'metrica_inexistente', 'reserva_centinela'])
+      expect(neutral(await askDirectly(page, baseURL!, name))).toEqual(fromPage);
+
+    // 6. Restored: offered again, and only after the explicit refresh.
+    writeFileSync(members, original);
+    await expect(page.getByLabel('Modelo')).toHaveCount(0);
+    const recovered = page.waitForResponse(isCatalog);
+    await page.getByRole('button', { name: 'Actualizar catálogo' }).click();
+    expect((await recovered).status()).toBe(200);
+    await expect(page.getByLabel('Modelo')).toHaveValue('metrics/recuento.yaml');
+    await expect(kpi(page, 'filas')).toHaveText('2');
+    await chooseVentas(page);
+    await expect(metric('importe_total')).toBeEnabled();
+    await expect(metric('importe_total')).not.toBeChecked();
+    await metric('importe_total').check();
+    await expect(kpi(page, 'importe_total')).toHaveText(NORTE.shown);
+    await settled(page, 2);
+
+    // 5b. Absent vs hidden, mapped again: a metric the model does not declare
+    // and the restricted sentinel get the same neutral 404, naming neither,
+    // while the same session still reads what it may.
+    const absent = neutral(await askDirectly(page, baseURL!, 'metrica_inexistente'));
+    const hidden = neutral(await askDirectly(page, baseURL!, 'reserva_centinela'));
+    expect(hidden).toEqual(absent);
+    expect(absent).toEqual(fromPage);
+    const allowed = await askDirectly(page, baseURL!, 'importe_total');
+    expect(allowed.response.status()).toBe(200);
+    expect(JSON.stringify(allowed.body)).toContain(NORTE.amount);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await noLeaks(page, SUR);
+  } finally {
+    writeFileSync(members, original);
+  }
+  onlySemantic(network.sent);
   expect(network.concurrent()).toEqual([]);
   expect(errors).toEqual([]);
 });
