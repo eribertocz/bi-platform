@@ -184,6 +184,15 @@ const DEPRECATED: &str = r#"  - name: vieja
           expression: COUNT(ventas.id)
 "#;
 
+/// A metric beyond DECIMAL(38): `importe` cubed is DECIMAL(56,6), summed
+/// by the adapter's exact emulation (as in `semantic::run::tests`).
+const CUBED: &str = "  - name: cubo
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(ventas.importe * ventas.importe * ventas.importe)
+";
+
 const MEMBERS: &str = "
 version: 1
 users:
@@ -235,6 +244,7 @@ fn project() -> tempfile::TempDir {
         ("metrics/extremos.yaml", EXTREMES.to_owned()),
         ("metrics/instantes.yaml", instants_model()),
         ("metrics/obsoletas.yaml", format!("{MODEL}{DEPRECATED}")),
+        ("metrics/anchos.yaml", format!("{MODEL}{CUBED}")),
         ("policies/members.yaml", MEMBERS.to_owned()),
     ] {
         std::fs::write(p.path().join(file), text).unwrap();
@@ -730,6 +740,25 @@ async fn real_semantic_answers_match_the_frontend_fixtures(pool: sqlx::PgPool) {
         (&json!(1), &json!(1))
     );
     fixture("limited", &limited);
+
+    // Beyond DECIMAL(38): the cube of `importe`, aggregated without a grain
+    // (the emulation neither orders nor limits, so it answers no grouped
+    // block yet). Written out by hand: 100.10³ + 0.20³ + 200.20³ + (-0.20)³.
+    let wide = h
+        .query(
+            &ana,
+            &request(
+                "metrics/anchos.yaml",
+                json!({ "selections": [metric("c", "cubo")] }),
+            ),
+        )
+        .await;
+    assert_eq!(
+        wide["result"]["blocks"][0]["columns"][0]["type"],
+        "DECIMAL(56,6)"
+    );
+    assert_eq!(rows(&wide), &json!([["9027027.009000"]]));
+    fixture("wide", &wide);
 
     // A masked column is still refused whole: there is no `masked.json`
     // until the server can answer one.

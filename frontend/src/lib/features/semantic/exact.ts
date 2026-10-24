@@ -16,19 +16,24 @@ export class IncompatibleResult extends Error {
 }
 
 type ValueType =
-  | { kind: 'decimal'; scale: number }
+  | { kind: 'decimal'; precision: number; scale: number }
   | { kind: 'int64' }
   | { kind: 'varchar' }
   | { kind: 'boolean' }
   | { kind: 'date' }
   | { kind: 'timestamptz' };
 
+/** The widest DECIMAL the contract carries (Decimal256). */
+export const MAX_DECIMAL_PRECISION = 76;
+
 /** The declared type of a column, or a refusal for one this build does not know. */
 export function valueType(declared: string): ValueType {
-  const decimal = /^DECIMAL\((\d{1,2}),(\d{1,2})\)$/.exec(declared);
+  const decimal = /^DECIMAL\(([1-9]\d?),(0|[1-9]\d?)\)$/.exec(declared);
   if (decimal) {
     const [precision, scale] = [Number(decimal[1]), Number(decimal[2])];
-    if (precision >= 1 && precision <= 38 && scale <= precision) return { kind: 'decimal', scale };
+    if (precision <= MAX_DECIMAL_PRECISION && scale <= precision) {
+      return { kind: 'decimal', precision, scale };
+    }
   }
   switch (declared) {
     case 'INT64':
@@ -47,16 +52,45 @@ export function valueType(declared: string): ValueType {
 
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
-const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+const DECIMAL = /^-?(\d+)(?:\.(\d+))?$/;
+const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const INSTANT = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?Z$/;
+
+/** Whether `text` is a decimal of at most `precision` digits, `scale` of them fractional. */
+function fitsDecimal(text: string, precision: number, scale: number): boolean {
+  const match = DECIMAL.exec(text);
+  if (!match) return false;
+  const significant = match[1]!.replace(/^0+/, '').length;
+  return (match[2]?.length ?? 0) <= scale && significant <= precision - scale;
+}
+
+/** Days in `month` (1–12) of `year` in the proleptic Gregorian calendar. */
+function daysIn(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+}
+
+/** Whether `text` is a real calendar day written `YYYY-MM-DD`; nothing is normalized. */
+function isDay(text: string): boolean {
+  const match = DAY.exec(text);
+  if (!match) return false;
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysIn(year, month);
+}
+
+/** Whether `text` is a real UTC instant: a calendar day, 00–23 h, 00–59 min and s. */
+function isInstant(text: string): boolean {
+  const match = INSTANT.exec(text);
+  if (!match || !isDay(match[1]!)) return false;
+  const [hour, minute, second] = [Number(match[2]), Number(match[3]), Number(match[4])];
+  return hour <= 23 && minute <= 59 && second <= 59;
+}
 
 /** Whether `cell`, present, is a value of `type` exactly as the contract writes it. */
 function fits(type: ValueType, cell: SemanticCell): boolean {
   switch (type.kind) {
-    case 'decimal': {
-      if (typeof cell !== 'string') return false;
-      const match = /^-?\d+(?:\.(\d+))?$/.exec(cell);
-      return match !== null && (match[1]?.length ?? 0) <= type.scale;
-    }
+    case 'decimal':
+      return typeof cell === 'string' && fitsDecimal(cell, type.precision, type.scale);
     case 'int64':
       return typeof cell === 'string' && /^-?\d+$/.test(cell) && inInt64(BigInt(cell));
     case 'varchar':
@@ -64,9 +98,9 @@ function fits(type: ValueType, cell: SemanticCell): boolean {
     case 'boolean':
       return typeof cell === 'boolean';
     case 'date':
-      return typeof cell === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(cell);
+      return typeof cell === 'string' && isDay(cell);
     case 'timestamptz':
-      return typeof cell === 'string' && INSTANT.test(cell);
+      return typeof cell === 'string' && isInstant(cell);
   }
 }
 

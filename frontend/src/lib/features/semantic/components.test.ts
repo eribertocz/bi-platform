@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/svelte';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 import type { SemanticRun } from './exact';
 import KpiStrip from './KpiStrip.svelte';
@@ -13,6 +13,7 @@ import instant from './fixtures/instant.json';
 import limited from './fixtures/limited.json';
 import region from './fixtures/region.json';
 import total from './fixtures/total.json';
+import wide from './fixtures/wide.json';
 
 const mountBars = vi.hoisted(() => vi.fn());
 vi.mock('./bars', () => ({ mountBars }));
@@ -160,6 +161,68 @@ describe('chart', () => {
     await waitFor(() =>
       expect(screen.getByRole('alert').textContent).toContain('Consulta los valores en la tabla'),
     );
+  });
+});
+
+describe('beyond DECIMAL(38)', () => {
+  // The cube of `importe`: DECIMAL(56,6), summed by the adapter's exact emulation.
+  it('shows the real DECIMAL(56,6) total digit for digit in the table and as a KPI', () => {
+    render(ResultTable, { block: first(wide), caption: 'Cubo' });
+    expect(cells(screen.getByRole('table'))).toEqual([['9.027.027,009000']]);
+    render(KpiStrip, { run: real(wide) });
+    expect(screen.getByTestId('kpi-c').textContent!.trim()).toBe('9.027.027,009000');
+  });
+
+  it('omits the chart of the total, and charts its column by region with exact tooltips', async () => {
+    render(ResultChart, { block: first(wide) });
+    expect(screen.getByTestId('chart-omitted')).toBeTruthy();
+    // The server answers no grouped wide block yet: the wide column's own
+    // contract and value, on the grouped rows of the region answer.
+    const byRegion = first(region);
+    const [cube] = first(wide).columns;
+    byRegion.columns[1] = cube!;
+    byRegion.rows[0]![1] = first(wide).rows[0]![0]!;
+    mountBars.mockReturnValue(() => {});
+    render(ResultChart, { block: byRegion });
+    await waitFor(() => expect(mountBars).toHaveBeenCalledTimes(1));
+    const [, projection, axes] = mountBars.mock.calls[0]!;
+    expect(projection.exact).toEqual(['9.027.027,009000', '200,00']);
+    expect(projection.heights[0]).toBe(100);
+    expect(projection.heights[1]).toBeCloseTo((200 / 9027027.009) * 100, 6);
+    expect(axes).toEqual(['ventas.region', 'cubo']);
+  });
+});
+
+describe('a value that does not fit its declared type shows no figure anywhere', () => {
+  it.each([
+    ['DECIMAL(3,2)', '1234.56'],
+    ['DATE', '2026-02-30'],
+    ['TIMESTAMPTZ', '2026-13-40T25:61:61Z'],
+  ])('%s holding %s: no table, no KPI, no chart', (type, value) => {
+    // The review's reproduction: the region answer reduced to its first row.
+    const reduced = first(region);
+    reduced.columns[1]!.type = type;
+    reduced.rows = [reduced.rows[0]!];
+    reduced.row_count = 1;
+    reduced.rows[0]![1] = value;
+    render(ResultTable, { block: reduced, caption: 'Roto' });
+    expect(screen.getByRole('alert').textContent).toContain('no se muestra ninguna cifra');
+    expect(screen.queryByRole('table')).toBeNull();
+    cleanup();
+
+    const kpi = real(total);
+    kpi.result.blocks[0]!.columns[0]!.type = type;
+    kpi.result.blocks[0]!.rows[0]![0] = value;
+    render(KpiStrip, { run: kpi });
+    expect(screen.getByRole('alert').textContent).toContain('no se muestra ninguna cifra');
+    expect(screen.queryByTestId('kpi-f')).toBeNull();
+    cleanup();
+
+    // Charting the other metric: only the broken cell keeps the chart away.
+    render(ResultChart, { block: reduced, metric: 'f' });
+    expect(screen.getByTestId('chart-omitted')).toBeTruthy();
+    expect(mountBars).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toMatch(/1234|2026|Norte/);
   });
 });
 

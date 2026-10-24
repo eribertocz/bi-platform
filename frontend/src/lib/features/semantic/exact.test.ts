@@ -5,8 +5,10 @@ import {
   checkBlock,
   groupExact,
   IncompatibleResult,
+  instantText,
   kpis,
   MAX_BARS,
+  MAX_DECIMAL_PRECISION,
   shown,
   shownText,
   valueType,
@@ -14,6 +16,7 @@ import {
   type SemanticColumn,
   type SemanticRun,
 } from './exact';
+import regionAnswer from './fixtures/region.json';
 
 // Contract-shaped blocks for the refusals no real answer produces on purpose.
 const column = (over: Partial<SemanticColumn>): SemanticColumn => ({
@@ -142,5 +145,215 @@ describe('a chart only when it can be honest', () => {
       '-4.503.599.627.370.496,5',
       'Sin dato',
     ]);
+  });
+});
+
+/**
+ * Codex's reproduction on #255: the real region answer reduced to its first
+ * row, with column 1 retyped as `type` and holding `value`.
+ */
+function retyped(type: string, value: string): SemanticBlock {
+  const b = structuredClone(regionAnswer.result.blocks[0]) as SemanticBlock;
+  b.columns[1]!.type = type;
+  b.rows = [b.rows[0]!];
+  b.row_count = 1;
+  b.rows[0]![1] = value;
+  return b;
+}
+
+const accepts = (type: string, value: string) => {
+  try {
+    checkBlock(retyped(type, value));
+    return true;
+  } catch (error) {
+    if (error instanceof IncompatibleResult) return false;
+    throw error;
+  }
+};
+
+/** `length` decimal digits, the first one not zero when `lead`. */
+const digits = (length: number, lead: boolean) =>
+  fc
+    .array(fc.integer({ min: 0, max: 9 }), { minLength: length, maxLength: length })
+    .map((ds) => (lead && ds[0] === 0 ? [1, ...ds.slice(1)] : ds).join(''));
+
+/** A DECIMAL(p,s) with `p` up to the contract's limit. */
+const decimalType = fc
+  .integer({ min: 1, max: MAX_DECIMAL_PRECISION })
+  .chain((p) => fc.tuple(fc.constant(p), fc.integer({ min: 0, max: p })));
+
+/** `whole.fraction` with an optional sign, as the server writes it. */
+const decimalText = (negative: boolean, whole: string, fraction: string) =>
+  `${negative ? '-' : ''}${whole === '' ? '0' : whole}${fraction === '' ? '' : `.${fraction}`}`;
+
+const ungrouped = (text: string) => text.replace(/\./g, '').replace(',', '.');
+
+describe('DECIMAL up to the precision of the contract (Decimal256)', () => {
+  it('accepts every precision from 1 to 76 and refuses anything else', () => {
+    for (const declared of ['DECIMAL(1,0)', 'DECIMAL(38,10)', 'DECIMAL(56,6)', 'DECIMAL(76,2)']) {
+      expect(valueType(declared).kind).toBe('decimal');
+    }
+    expect(valueType('DECIMAL(76,76)')).toEqual({ kind: 'decimal', precision: 76, scale: 76 });
+    for (const declared of ['DECIMAL(77,2)', 'DECIMAL(0,0)', 'DECIMAL(5,6)', 'DECIMAL(07,2)']) {
+      expect(() => valueType(declared)).toThrow(IncompatibleResult);
+    }
+  });
+
+  it('keeps a DECIMAL(76,2) value at its edge digit for digit, in table and chart', () => {
+    const edge = `-${'9'.repeat(74)}.99`;
+    const b = retyped('DECIMAL(76,2)', edge);
+    expect(checkBlock(b)).toBe(b);
+    const text = shownText(shown(b.columns[1]!, edge));
+    expect(ungrouped(text)).toBe(edge);
+    expect(bars(b)!.exact).toEqual([text]);
+    expect(bars(b)!.heights).toEqual([-100]);
+  });
+
+  it('round-trips any DECIMAL(p,s) with p <= 76 digit for digit', () => {
+    fc.assert(
+      fc.property(
+        decimalType.chain(([p, s]) =>
+          fc.tuple(
+            fc.constant(p),
+            fc.constant(s),
+            fc.boolean(),
+            fc.integer({ min: 0, max: p - s }).chain((n) => digits(n, true)),
+            fc.integer({ min: 0, max: s }).chain((n) => digits(n, false)),
+          ),
+        ),
+        ([p, s, negative, whole, fraction]) => {
+          const value = decimalText(negative, whole, fraction);
+          const b = retyped(`DECIMAL(${p},${s})`, value);
+          expect(checkBlock(b)).toBe(b);
+          const text = shownText(shown(b.columns[1]!, value));
+          expect(ungrouped(text)).toBe(value);
+          expect(bars(b)!.exact).toEqual([text]);
+        },
+      ),
+    );
+  });
+
+  it('refuses any value with more integer or fractional digits than DECIMAL(p,s) holds', () => {
+    fc.assert(
+      fc.property(
+        decimalType.chain(([p, s]) =>
+          fc.tuple(
+            fc.constant(p),
+            fc.constant(s),
+            fc.boolean(),
+            fc.boolean(),
+            digits(p - s + 1, true),
+            digits(s + 1, false),
+          ),
+        ),
+        ([p, s, negative, inWhole, whole, fraction]) => {
+          // One digit too many in the integer part, or in the fraction.
+          const value = inWhole
+            ? decimalText(negative, whole, fraction.slice(1))
+            : decimalText(negative, '', fraction);
+          expect(accepts(`DECIMAL(${p},${s})`, value)).toBe(false);
+        },
+      ),
+    );
+  });
+
+  it.each([
+    ['DECIMAL(3,2)', '9.99', true],
+    ['DECIMAL(3,2)', '-9.99', true],
+    ['DECIMAL(3,2)', '0.01', true],
+    ['DECIMAL(3,2)', '10.00', false],
+    ['DECIMAL(3,2)', '-10.00', false],
+    ['DECIMAL(3,2)', '1.001', false],
+    ['DECIMAL(2,2)', '0.99', true],
+    ['DECIMAL(2,2)', '1.00', false],
+    ['DECIMAL(76,0)', '9'.repeat(76), true],
+    ['DECIMAL(76,0)', `1${'0'.repeat(76)}`, false],
+    ['DECIMAL(76,38)', `${'9'.repeat(38)}.${'9'.repeat(38)}`, true],
+    ['DECIMAL(76,38)', `1${'0'.repeat(38)}.5`, false],
+  ])('%s holding %s fits: %s', (type, value, fits) => {
+    expect(accepts(type, value)).toBe(fits);
+  });
+});
+
+/** The oracle of a calendar day, independent of the implementation. */
+function realDay(year: number, month: number, day: number): boolean {
+  const at = new Date(0);
+  at.setUTCFullYear(year, month - 1, day);
+  return at.getUTCFullYear() === year && at.getUTCMonth() === month - 1 && at.getUTCDate() === day;
+}
+
+const pad = (n: number, width: number) => String(n).padStart(width, '0');
+const dayText = (y: number, m: number, d: number) => `${pad(y, 4)}-${pad(m, 2)}-${pad(d, 2)}`;
+
+describe('dates and instants are real ones of the calendar and the clock', () => {
+  it.each([
+    ['DECIMAL(3,2)', '1234.56'],
+    ['DATE', '2026-02-30'],
+    ['TIMESTAMPTZ', '2026-13-40T25:61:61Z'],
+  ])('refuses the reproduction of the review: %s holding %s', (type, value) => {
+    expect(() => checkBlock(retyped(type, value))).toThrow(IncompatibleResult);
+  });
+
+  it.each([
+    ['2024-02-29', true],
+    ['2000-02-29', true],
+    ['2023-02-29', false],
+    ['1900-02-29', false],
+    ['2026-02-28', true],
+    ['2026-02-30', false],
+    ['2026-04-30', true],
+    ['2026-04-31', false],
+    ['2026-12-31', true],
+    ['2026-00-10', false],
+    ['2026-13-01', false],
+    ['2026-01-00', false],
+  ])('DATE %s fits: %s', (value, fits) => {
+    expect(accepts('DATE', value)).toBe(fits);
+  });
+
+  it.each([
+    ['2026-01-01T23:59:59.999999999Z', true],
+    ['2024-02-29T00:00:00Z', true],
+    ['2023-02-29T00:00:00Z', false],
+    ['2026-01-01T24:00:00Z', false],
+    ['2026-01-01T23:60:00Z', false],
+    ['2026-01-01T23:59:60Z', false],
+    ['2026-02-30T00:00:00Z', false],
+  ])('TIMESTAMPTZ %s fits: %s', (value, fits) => {
+    expect(accepts('TIMESTAMPTZ', value)).toBe(fits);
+  });
+
+  it('accepts exactly the real calendar days', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 9999 }),
+        fc.integer({ min: 0, max: 13 }),
+        fc.integer({ min: 0, max: 32 }),
+        (y, m, d) => {
+          expect(accepts('DATE', dayText(y, m, d))).toBe(realDay(y, m, d));
+        },
+      ),
+    );
+  });
+
+  it('accepts exactly the real UTC instants and shows their fraction as sent', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 9999 }),
+        fc.integer({ min: 1, max: 12 }),
+        fc.integer({ min: 1, max: 31 }),
+        fc.integer({ min: 0, max: 99 }),
+        fc.integer({ min: 0, max: 99 }),
+        fc.integer({ min: 0, max: 99 }),
+        fc.option(fc.integer({ min: 1, max: 9 }).chain((n) => digits(n, false))),
+        (y, mo, d, h, mi, s, fraction) => {
+          const clock = `${pad(h, 2)}:${pad(mi, 2)}:${pad(s, 2)}${fraction ? `.${fraction}` : ''}`;
+          const value = `${dayText(y, mo, d)}T${clock}Z`;
+          const real = realDay(y, mo, d) && h <= 23 && mi <= 59 && s <= 59;
+          expect(accepts('TIMESTAMPTZ', value)).toBe(real);
+          if (real) expect(instantText(value)).toBe(`${dayText(y, mo, d)} ${clock} UTC`);
+        },
+      ),
+    );
   });
 });
