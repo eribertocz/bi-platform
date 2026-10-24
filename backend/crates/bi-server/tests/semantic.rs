@@ -576,6 +576,62 @@ async fn showing_a_masked_metric_never_waives_deriving_from_it(pool: sqlx::PgPoo
     h.db.close().await;
 }
 
+/// Two ratios, one restricted and one confidential: each splits into the
+/// components `<ratio>.m1` (the sum) and `<ratio>.m2` (the count).
+const RATIOS: &str = "  - name: coste_ratio\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: CAST(SUM(sales.amount) / COUNT(sales.order_id) AS DECIMAL(18, 4))\n  - name: margen_ratio\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"confidential\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: CAST(SUM(sales.amount) / COUNT(sales.order_id) AS DECIMAL(18, 4))\n";
+
+#[sqlx::test(migrations = false)]
+async fn a_component_is_never_more_visible_than_its_metric(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    h.write("metrics/ventas.yaml", &with_derived(RATIOS));
+    let lector = h.login("lector").await;
+    let analista = h.login("analista").await;
+    let modelador = h.login("modelador").await;
+    for name in ["coste_ratio", "coste_ratio.m1", "coste_ratio.m2"] {
+        let asked = query(&json!([metric("x", name)]));
+        // The viewer never sees the restricted ratio nor any component.
+        let (status, body) = h.explain(Some(&lector), &asked).await;
+        assert_undisclosed(status, &body);
+        // The modeler sees all of them, unmasked.
+        let (status, body) = h.explain(Some(&modelador), &asked).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body:#}");
+        assert_eq!(body["decision"]["masked"], json!([]), "{name}");
+    }
+    for name in ["margen_ratio", "margen_ratio.m1", "margen_ratio.m2"] {
+        // The analyst sees the confidential ratio and its components unmasked.
+        let (status, body) = h
+            .explain(Some(&analista), &query(&json!([metric("x", name)])))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body:#}");
+        assert_eq!(body["decision"]["masked"], json!([]), "{name}");
+    }
+    // Whoever sees a ratio only masked sees each of its components masked
+    // too, never their values.
+    for (cookie, name) in [
+        (&analista, "coste_ratio.m1"),
+        (&analista, "coste_ratio.m2"),
+        (&lector, "margen_ratio.m1"),
+        (&lector, "margen_ratio.m2"),
+    ] {
+        let (status, body) = h
+            .explain(Some(cookie), &query(&json!([metric("x", name)])))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body:#}");
+        assert_eq!(body["decision"]["masked"], json!(["x"]), "{name}");
+    }
+    // The masked ratio derives from components it may not derive from:
+    // denied for that lineage, never named (it fails closed).
+    for (cookie, name) in [(&analista, "coste_ratio"), (&lector, "margen_ratio")] {
+        let (status, body) = h
+            .explain(Some(cookie), &query(&json!([metric("x", name)])))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{name}: {body:#}");
+        assert_eq!(body["denied"]["usage"], "lineage", "{name}: {body:#}");
+        assert!(body["denied"].get("name").is_none(), "{name}: {body:#}");
+    }
+    h.db.close().await;
+}
+
 #[sqlx::test(migrations = false)]
 async fn an_audit_failure_closes_both_answers_and_denials(pool: sqlx::PgPool) {
     let h = harness(pool).await;
