@@ -458,8 +458,15 @@ async fn global_conditions_fail_closed_and_bounded() {
         for_session(&down, session("lector", &[])).await,
         Err(CatalogError::Unavailable)
     );
-    // Every permit is back.
-    assert_eq!(busy.models.admission.available_permits(), 2);
+    // Every permit comes back: the work abandoned at its deadline releases
+    // its own when the native read it travels with ends, promptly.
+    let back = tokio::time::timeout(
+        Duration::from_secs(5),
+        busy.models.admission.acquire_many(2),
+    )
+    .await
+    .expect("every permit is released within the bound");
+    drop(back.unwrap());
 }
 
 /// The rows of the Issue behind a view that fails when anything reads a
@@ -667,4 +674,122 @@ async fn catalog_latency() {
         at(95),
         samples.len()
     );
+}
+
+/// Cut right after its first decision, deterministically (the deadline has
+/// already passed when the model is projected): the decision stays in the
+/// trail that names the failure's event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cut_after_a_decision_keeps_it_for_the_failure_event() {
+    let p = project(&sales(), MEMBERS);
+    let analytics = analytics().await;
+    let directory = p.path().to_owned();
+    let (outcome, governed, decision) = analytics
+        .runtime()
+        .unwrap()
+        .run(move |conn| {
+            let access = access::load(&directory).unwrap();
+            let file = models::read_project(&directory).unwrap().remove(0);
+            let reference = format!("metrics/{}", file.name);
+            let Ok(compiled) = models::compile(file, conn) else {
+                panic!("the project compiles");
+            };
+            let lector = session("lector", &[]);
+            let principal = access::principal(&access.members, &lector.user, &lector.groups);
+            let scope = Scope {
+                access: &access,
+                principal: &principal,
+                context: context_slots(compiled.document.semantic.definition(), &lector.attributes),
+                deadline: Instant::now(),
+            };
+            let mut work = Work::default();
+            let outcome =
+                project_model(reference, &compiled, &scope, &mut work).map(|m| m.is_some());
+            Ok((outcome, work.governed, work.trail.id()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(outcome, Err(CatalogError::Timeout));
+    assert_eq!(governed, 1, "nothing is governed past the deadline");
+    assert!(
+        decision.is_some_and(|id| id.starts_with("catalog-decisions-sha256:")),
+        "the decision taken names the failure"
+    );
+}
+
+/// Failing before anything is decided names no decision: none is invented.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_before_any_decision_names_none() {
+    let p = project(&sales(), MEMBERS);
+    let state = state(p.path(), analytics().await);
+    assert_eq!(
+        within(&state, session("lector", &[]), Instant::now())
+            .await
+            .unwrap_err(),
+        CatalogFailure {
+            error: CatalogError::Timeout,
+            decision: None
+        }
+    );
+    // The read abandoned at that deadline returns its permit first.
+    let held = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.models.admission.clone().acquire_many_owned(2),
+    )
+    .await
+    .expect("the abandoned read returns its permit")
+    .unwrap();
+    let busy = within(
+        &state,
+        session("lector", &[]),
+        Instant::now() + Duration::from_secs(5),
+    );
+    assert_eq!(
+        busy.await.unwrap_err(),
+        CatalogFailure {
+            error: CatalogError::Busy,
+            decision: None
+        }
+    );
+    drop(held);
+}
+
+/// Through the whole projection: a deadline that falls while the models are
+/// projected fails with the decisions already taken. Deadlines grow until
+/// one lands there; each attempt waits for the abandoned work's permits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deadline_during_the_projection_keeps_its_decisions() {
+    let many: String = (0..300)
+        .map(|i| metric(&format!("suma_{i}"), "", "SUM(ventas.importe)"))
+        .collect();
+    let p = project(&ventas("", "", &many), MEMBERS);
+    let state = state(p.path(), analytics().await);
+    let mut kept = false;
+    for ms in [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000] {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        let outcome = within(&state, session("lector", &[]), deadline).await;
+        let back = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.models.admission.acquire_many(2),
+        )
+        .await
+        .expect("the abandoned work returns its permits");
+        drop(back.unwrap());
+        match outcome {
+            Err(CatalogFailure {
+                error: CatalogError::Timeout,
+                decision: Some(id),
+            }) => {
+                assert!(id.starts_with("catalog-decisions-sha256:"));
+                kept = true;
+                break;
+            }
+            Err(CatalogFailure {
+                error: CatalogError::Timeout,
+                decision: None,
+            }) => {}
+            other => panic!("{ms} ms: {other:?}"),
+        }
+    }
+    assert!(kept, "no deadline fell during the projection");
 }

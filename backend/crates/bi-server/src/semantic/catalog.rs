@@ -19,9 +19,11 @@
 //! describes the sources while each file compiles.
 
 use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use sef_authz::{Constraint, Usage, Use, authorize_query};
+use sef_authz::{Constraint, QueryDecision, Usage, Use, authorize_query};
 use sef_correctness::SemanticContext;
 use sef_model_ir::identity::StableId;
 use sef_model_ir::model::{Lifecycle, ModelDefinition, ObjectMetadata};
@@ -31,6 +33,8 @@ use sef_query_ir::query::{
     QualifiedDimensionRef, Selection, SelectionItem, SemanticQueryBlock, SemanticQuerySet,
 };
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
+use utoipa::ToSchema;
 
 use super::access::{self, Access, AccessError, Resources};
 use super::context_slots;
@@ -52,7 +56,7 @@ pub struct SessionCatalog {
 }
 
 /// One model with at least one metric the session can use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct CatalogModel {
     /// `metrics/<file>`: what a semantic query names as its `model`.
     pub model: String,
@@ -63,7 +67,7 @@ pub struct CatalogModel {
 }
 
 /// A metric or field, by the name a query uses for it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct CatalogMember {
     /// The name as written in the model.
     pub name: String,
@@ -76,7 +80,7 @@ pub struct CatalogMember {
     pub capabilities: Capabilities,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum CatalogLifecycle {
     Active,
@@ -90,7 +94,7 @@ pub enum CatalogLifecycle {
 
 /// What a query of this session may do with a member, each decided on its
 /// own: selecting it never implies filtering, grouping or ordering by it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 pub struct Capabilities {
     pub select: Select,
     pub filter: bool,
@@ -100,7 +104,7 @@ pub struct Capabilities {
 }
 
 /// How a selection of the member returns its values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Select {
     Values,
@@ -125,7 +129,7 @@ pub enum CatalogError {
 }
 
 /// The work one projection did, for its bounds and its tests.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
 pub struct Work {
     /// Files of `metrics/` read.
     pub files: usize,
@@ -138,6 +142,81 @@ pub struct Work {
     /// Decisions taken beyond the single path: a field's own uses before
     /// pairing it, and each capability.
     pub decisions: usize,
+    /// Every decision taken, allowed or not.
+    trail: Trail,
+}
+
+impl Work {
+    fn took(&mut self, decision: &QueryDecision) {
+        self.trail.took(decision);
+    }
+}
+
+/// The fingerprints of the decisions one projection took, in the order it
+/// took them, folded into one identifier for its audit event. Shared with
+/// whoever started the projection, so the decisions taken before a failure
+/// or a deadline still name its event, even while the native work it
+/// abandoned goes on.
+#[derive(Clone, Default)]
+struct Trail(Arc<Mutex<Taken>>);
+
+#[derive(Clone, Default)]
+struct Taken {
+    digest: Sha256,
+    count: usize,
+}
+
+impl Trail {
+    fn took(&self, decision: &QueryDecision) {
+        let mut taken = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        taken.digest.update(decision.fingerprint.to_string());
+        taken.digest.update(b"\n");
+        taken.count += 1;
+    }
+
+    /// The decisions taken so far; `None` when nothing was decided: no
+    /// decision is invented.
+    fn id(&self) -> Option<String> {
+        use fmt::Write as _;
+        let taken = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        (taken.count > 0).then(|| {
+            let mut id = String::from("catalog-decisions-sha256:");
+            for byte in taken.digest.finalize() {
+                let _ = write!(id, "{byte:02x}");
+            }
+            id
+        })
+    }
+}
+
+/// How many, never which.
+impl fmt::Debug for Trail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let count = self.0.lock().map_or(0, |taken| taken.count);
+        write!(f, "Trail({count})")
+    }
+}
+
+/// A catalog and what its audit event names as its decision.
+#[derive(Debug)]
+pub struct Projection {
+    pub catalog: SessionCatalog,
+    /// Derived from every decision the projection took; `None` when it
+    /// took none (a project without metrics).
+    pub decision: Option<String>,
+}
+
+/// Why there is no catalog, and the decisions taken before it failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogFailure {
+    pub error: CatalogError,
+    /// Derived from the decisions taken before the failure; `None` when it
+    /// came before any (no project, policies, busy, before compiling).
+    pub decision: Option<String>,
 }
 
 /// The catalog `session` can use, read and decided once, off the executor,
@@ -154,13 +233,42 @@ pub async fn for_session(
         .map(|(catalog, _)| catalog)
 }
 
+/// [`for_session`] ending by `deadline`, with the identifier of the
+/// decisions it took, also when it fails after taking some.
+///
+/// # Errors
+/// A neutral [`CatalogFailure`].
+pub async fn within(
+    state: &AppState,
+    session: Session,
+    deadline: Instant,
+) -> Result<Projection, CatalogFailure> {
+    let trail = Trail::default();
+    let projected = observed(state, session, deadline, &trail).await;
+    let decision = trail.id();
+    match projected {
+        Ok((catalog, _)) => Ok(Projection { catalog, decision }),
+        Err(error) => Err(CatalogFailure { error, decision }),
+    }
+}
+
 /// [`for_session`] with the work it did.
 pub(super) async fn project_with_work(
     state: &AppState,
     session: Session,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
+    let deadline = Instant::now() + state.query_timeout;
+    observed(state, session, deadline, &Trail::default()).await
+}
+
+async fn observed(
+    state: &AppState,
+    session: Session,
+    deadline: Instant,
+    trail: &Trail,
+) -> Result<(SessionCatalog, Work), CatalogError> {
     let started = Instant::now();
-    let projected = projected(state, session, started).await;
+    let projected = projected(state, session, deadline, trail).await;
     let (outcome, models, metrics, fields) = match &projected {
         Ok((catalog, _)) => (
             "projected",
@@ -170,18 +278,17 @@ pub(super) async fn project_with_work(
         ),
         Err(error) => (error.code(), 0, 0, 0),
     };
-    let work = projected
+    let (files, governed) = projected
         .as_ref()
-        .map(|(_, work)| *work)
-        .unwrap_or_default();
+        .map_or((0, 0), |(_, work)| (work.files, work.governed));
     // Counts only: no name, identity or path of the project.
     tracing::info!(
         outcome,
         models,
         metrics,
         fields,
-        files = work.files,
-        governed = work.governed,
+        files,
+        governed,
         elapsed_ms = started.elapsed().as_millis(),
         "session catalog projected"
     );
@@ -189,7 +296,8 @@ pub(super) async fn project_with_work(
 }
 
 impl CatalogError {
-    const fn code(self) -> &'static str {
+    #[must_use]
+    pub const fn code(self) -> &'static str {
         match self {
             Self::NotConfigured => "not_configured",
             Self::Busy => "busy",
@@ -203,9 +311,9 @@ impl CatalogError {
 async fn projected(
     state: &AppState,
     session: Session,
-    started: Instant,
+    deadline: Instant,
+    trail: &Trail,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
-    let deadline = started + state.query_timeout;
     let Some(directory) = state.models.directory.clone() else {
         return Err(CatalogError::NotConfigured);
     };
@@ -242,10 +350,13 @@ async fn projected(
         return Err(CatalogError::Unavailable);
     };
     let span = tracing::Span::current();
+    let trail = trail.clone();
     let work = runtime.run(move |conn| {
         let _permit = permit;
         let _entered = span.enter();
-        Ok(project_files(files, conn, &access, &session, deadline))
+        Ok(project_files(
+            files, conn, &access, &session, deadline, trail,
+        ))
     });
     tokio::time::timeout_at(deadline.into(), work)
         .await
@@ -261,9 +372,11 @@ fn project_files(
     access: &Access,
     session: &Session,
     deadline: Instant,
+    trail: Trail,
 ) -> Result<(SessionCatalog, Work), CatalogError> {
     let mut work = Work {
         files: files.len(),
+        trail,
         ..Work::default()
     };
     let mut compiled = Vec::with_capacity(files.len());
@@ -414,7 +527,9 @@ fn fields<'m>(
         });
         work.decisions += 1;
         let request = sef_authz::Context::new();
-        if !authorize_query(&scope.access.snapshot, scope.principal, &own, &request).allowed {
+        let decision = authorize_query(&scope.access.snapshot, scope.principal, &own, &request);
+        work.took(&decision);
+        if !decision.allowed {
             continue;
         }
         for (metric, _) in metrics.iter().take(MAX_PAIRINGS_PER_FIELD) {
@@ -477,22 +592,37 @@ fn govern(
     scope: &Scope<'_>,
     work: &mut Work,
 ) -> Result<Option<Governed>, CatalogError> {
+    work.governed += 1;
+    let governed = match prepare::govern(model, query, scope.access, decided, &scope.context) {
+        Ok(governed) => {
+            work.planned += 1;
+            work.took(&governed.decision);
+            Some(governed)
+        }
+        Err(stopped) => {
+            let decision = match &*stopped {
+                Ungoverned::Read { decision, .. } => {
+                    work.planned += 1;
+                    decision
+                }
+                Ungoverned::Asked { decision, .. }
+                | Ungoverned::Incorrect {
+                    asked: decision, ..
+                }
+                | Ungoverned::Unplannable {
+                    asked: decision, ..
+                } => decision,
+            };
+            work.took(decision);
+            None
+        }
+    };
+    // Checked once the decision is in the trail: a decision taken is never
+    // lost, and past the deadline no further query is governed.
     if Instant::now() >= scope.deadline {
         return Err(CatalogError::Timeout);
     }
-    work.governed += 1;
-    match prepare::govern(model, query, scope.access, decided, &scope.context) {
-        Ok(governed) => {
-            work.planned += 1;
-            Ok(Some(governed))
-        }
-        Err(stopped) => {
-            if matches!(*stopped, Ungoverned::Read { .. }) {
-                work.planned += 1;
-            }
-            Ok(None)
-        }
-    }
+    Ok(governed)
 }
 
 /// What a query may do with `id`, on the minimal query `governed` accepted:
@@ -522,7 +652,9 @@ fn capabilities(
         });
         work.decisions += 1;
         let request = sef_authz::Context::new();
-        authorize_query(&scope.access.snapshot, scope.principal, &uses, &request).allowed
+        let decision = authorize_query(&scope.access.snapshot, scope.principal, &uses, &request);
+        work.took(&decision);
+        decision.allowed
     };
     Capabilities {
         select: if masked {

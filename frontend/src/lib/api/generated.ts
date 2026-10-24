@@ -138,6 +138,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/semantic/catalog': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Lists what the session can use of the project: the projection of #139,
+     *     answered once its audit event is confirmed (#140).
+     */
+    get: operations['listSemanticCatalog'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/semantic/explain': {
     parameters: {
       query?: never;
@@ -232,6 +252,54 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /**
+     * @description What a query of this session may do with a member, each decided on its
+     *     own: selecting it never implies filtering, grouping or ordering by it.
+     */
+    Capabilities: {
+      filter: boolean;
+      /** @description Always `false` for a metric: a metric is aggregated, never a group. */
+      group: boolean;
+      order: boolean;
+      select: components['schemas']['Select'];
+    };
+    CatalogLifecycle:
+      | {
+          /** @enum {string} */
+          state: 'active';
+        }
+      | {
+          /** @description Only when the replacement is itself in this catalog. */
+          replacement?: string | null;
+          /** @enum {string} */
+          state: 'deprecated';
+          /** @description ISO `YYYY-MM-DD`, when a retirement date is declared. */
+          sunset?: string | null;
+        };
+    /** @description A metric or field, by the name a query uses for it. */
+    CatalogMember: {
+      capabilities: components['schemas']['Capabilities'];
+      lifecycle: components['schemas']['CatalogLifecycle'];
+      /** @description The name as written in the model. */
+      name: string;
+      /**
+       * @description `DECIMAL(p,s)`, `INT64`, `VARCHAR`, `BOOLEAN`, `DATE` or `TIMESTAMPTZ`,
+       *     as a query result declares it.
+       */
+      type: string;
+      unit?: components['schemas']['SemanticUnit'] | null;
+    };
+    /** @description One model with at least one metric the session can use. */
+    CatalogModel: {
+      fields: components['schemas']['CatalogMember'][];
+      metrics: components['schemas']['CatalogMember'][];
+      /** @description `metrics/<file>`: what a semantic query names as its `model`. */
+      model: string;
+      /** @description The model's name as written. */
+      name: string;
+    };
+    /** @enum {string} */
+    CatalogStatus: 'ready' | 'not_configured';
     /**
      * @description Logical type of a result column. Every non-null value travels as a JSON
      *     string, so `integer` (64- or 128-bit) and `decimal` stay exact in clients.
@@ -483,6 +551,11 @@ export interface components {
       scale?: number | null;
       type: components['schemas']['ColumnType'];
     };
+    /**
+     * @description How a selection of the member returns its values.
+     * @enum {string}
+     */
+    Select: 'values' | 'masked';
     SemanticBlock: {
       block_id: string;
       columns: components['schemas']['SemanticColumn'][];
@@ -498,6 +571,15 @@ export interface components {
        *     or any value of a masked column.
        */
       rows: (components['schemas']['SemanticCell'] | null)[][];
+    };
+    /** @description What the session can use of the project, to discover it (#140). */
+    SemanticCatalog: {
+      /**
+       * @description In the order of their files; only models with a metric the session
+       *     can use. Empty is a valid answer: it tells nothing of what is hidden.
+       */
+      models: components['schemas']['CatalogModel'][];
+      status: components['schemas']['CatalogStatus'];
     };
     /**
      * @description One present value: exact decimal text for DECIMAL and INT64, the text
@@ -1325,6 +1407,62 @@ export interface operations {
         };
       };
       /** @description Superó el tiempo máximo y se canceló */
+      504: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  listSemanticCatalog: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Modelos, métricas y campos que las consultas de esta sesión aceptan, cada uno con lo que puede hacer con ellos; solo después de confirmar su evento de auditoría. Vacío es válido y no indica qué se oculta. Sin proyecto, `not_configured` vacío */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['SemanticCatalog'];
+        };
+      };
+      /** @description Sin sesión */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description `models_busy`: sin capacidad para compilar el proyecto */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description `policies_invalid`, `catalog_unavailable` (proyecto, archivo o motor no utilizables) o `audit_unavailable`: sin catálogo, ni parcial */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description `semantic_timeout`: el catálogo superó el tiempo máximo */
       504: {
         headers: {
           [name: string]: unknown;

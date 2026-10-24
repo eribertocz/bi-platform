@@ -285,6 +285,170 @@ pub async fn query(
     settled.reply.into_response(&request_id)
 }
 
+/// What the session can use of the project, to discover it (#140).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SemanticCatalog {
+    pub status: CatalogStatus,
+    /// In the order of their files; only models with a metric the session
+    /// can use. Empty is a valid answer: it tells nothing of what is hidden.
+    pub models: Vec<catalog::CatalogModel>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogStatus {
+    Ready,
+    /// This instance serves no project.
+    NotConfigured,
+}
+
+/// What a catalog event names: the project's reserved catalog resource.
+const SEMANTIC_CATALOG: (&str, &str) = ("semantic_catalog", "semantic:catalog");
+
+/// Lists what the session can use of the project: the projection of #139,
+/// answered once its audit event is confirmed (#140).
+#[utoipa::path(
+    get,
+    path = "/api/v1/semantic/catalog",
+    operation_id = "listSemanticCatalog",
+    tag = "semantic",
+    security(("sessionCookie" = [])),
+    responses(
+        (status = 200, description = "Modelos, métricas y campos que las consultas de esta sesión aceptan, cada uno con lo que puede hacer con ellos; solo después de confirmar su evento de auditoría. Vacío es válido y no indica qué se oculta. Sin proyecto, `not_configured` vacío", body = SemanticCatalog),
+        (status = 401, description = "Sin sesión", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "`models_busy`: sin capacidad para compilar el proyecto", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "`policies_invalid`, `catalog_unavailable` (proyecto, archivo o motor no utilizables) o `audit_unavailable`: sin catálogo, ni parcial", body = Problem, content_type = "application/problem+json"),
+        (status = 504, description = "`semantic_timeout`: el catálogo superó el tiempo máximo", body = Problem, content_type = "application/problem+json")
+    )
+)]
+pub async fn list_catalog(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    id: Option<Extension<RequestId>>,
+) -> Response {
+    // One deadline: the projection within execution's share, then its
+    // audit event with what is left.
+    let admitted = Instant::now();
+    let request_id = id
+        .as_ref()
+        .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
+        .unwrap_or_default();
+    let runs = &state.semantic_runs;
+    let deadline = admitted + runs.profile().execution_timeout();
+    let session = prepare::Session::of(&principal);
+    let projected = catalog::within(&state, session, deadline).await;
+    let projection = admitted.elapsed();
+    let (result, decision, answer) = match projected {
+        Ok(projection) => (
+            bi_audit::ResultCode::Success,
+            projection.decision,
+            Ok(SemanticCatalog {
+                status: CatalogStatus::Ready,
+                models: projection.catalog.models,
+            }),
+        ),
+        Err(catalog::CatalogFailure {
+            error: catalog::CatalogError::NotConfigured,
+            ..
+        }) => (
+            bi_audit::ResultCode::Success,
+            None,
+            Ok(SemanticCatalog {
+                status: CatalogStatus::NotConfigured,
+                models: Vec::new(),
+            }),
+        ),
+        // The decisions taken before the failure name its event.
+        Err(failure) => (
+            bi_audit::ResultCode::Failure,
+            failure.decision,
+            Err(failure.error),
+        ),
+    };
+    let (resource_type, resource_id) = SEMANTIC_CATALOG;
+    let left = runs
+        .profile()
+        .budgets()
+        .timeout
+        .saturating_sub(admitted.elapsed());
+    let audited = crate::audit::record_within(
+        &state.db,
+        crate::audit::HttpRecord {
+            actor: &principal.session.user.id,
+            request_id: &request_id,
+            action: bi_audit::Action::Query,
+            result,
+            resource_type,
+            resource_id,
+            policy_decision_id: decision,
+            query_shape: None,
+        },
+        left,
+    )
+    .await;
+    let code = match (&audited, &answer) {
+        (Err(code), _) => code,
+        (Ok(()), Ok(_)) => "listed",
+        (Ok(()), Err(error)) => error.code(),
+    };
+    runs.catalog_answered(
+        code,
+        projection,
+        admitted.elapsed().saturating_sub(projection),
+    );
+    tracing::info!(
+        request_id,
+        outcome = code,
+        elapsed_ms = admitted.elapsed().as_millis(),
+        "semantic catalog answered"
+    );
+    if let Err(code) = audited {
+        // Nothing is answered without its audit event.
+        return Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            Some("No se pudo registrar la auditoría. Reintenta.".to_owned()),
+            &request_id,
+        )
+        .into_response();
+    }
+    match answer {
+        Ok(catalog) => ([(header::CACHE_CONTROL, "no-store")], Json(catalog)).into_response(),
+        Err(error) => {
+            let (status, code, message) = catalog_problem(error);
+            Problem::new(status, code, Some(message.to_owned()), &request_id).into_response()
+        }
+    }
+}
+
+/// The neutral answer of a catalog that could not be projected: never a
+/// diagnostic of a file, a name or a partial list.
+const fn catalog_problem(error: catalog::CatalogError) -> (StatusCode, &'static str, &'static str) {
+    match error {
+        catalog::CatalogError::Busy => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "models_busy",
+            "Ya hay dos compilaciones en curso. Reintenta en unos segundos.",
+        ),
+        catalog::CatalogError::Timeout => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "semantic_timeout",
+            "El catálogo superó el tiempo máximo. Reintenta.",
+        ),
+        catalog::CatalogError::PoliciesInvalid => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "policies_invalid",
+            "Las políticas o los miembros del proyecto no son válidos: nadie puede consultar \
+             hasta corregirlos.",
+        ),
+        catalog::CatalogError::Unavailable | catalog::CatalogError::NotConfigured => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "catalog_unavailable",
+            "El catálogo no está disponible. Reintenta.",
+        ),
+    }
+}
+
 /// The only detail a session without inspection gets for an execution
 /// that depends on the catalog.
 const UNDISCLOSED_RUN: &str = "No se puede ejecutar la consulta solicitada.";

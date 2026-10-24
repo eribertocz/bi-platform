@@ -139,6 +139,8 @@ pub struct Runs {
 struct Metrics {
     runs: Counter<u64>,
     phases: Histogram<f64>,
+    catalogs: Counter<u64>,
+    catalog_phases: Histogram<f64>,
 }
 
 impl Default for Runs {
@@ -166,6 +168,11 @@ impl Runs {
                 .f64_histogram("bi.semantic.run.phase.duration")
                 .with_unit("s")
                 .build(),
+            catalogs: meter.u64_counter("bi.semantic.catalog.requests").build(),
+            catalog_phases: meter
+                .f64_histogram("bi.semantic.catalog.phase.duration")
+                .with_unit("s")
+                .build(),
         });
         self
     }
@@ -173,6 +180,25 @@ impl Runs {
     #[must_use]
     pub const fn profile(&self) -> &Profile {
         &self.profile
+    }
+
+    /// One answer of the session's catalog route (#140), which shares this
+    /// profile's timeout: its stable code and how long its projection and
+    /// its audit event took, with closed labels only.
+    pub(super) fn catalog_answered(
+        &self,
+        code: &'static str,
+        projection: Duration,
+        audit: Duration,
+    ) {
+        if let Some(metrics) = &self.metrics {
+            metrics.catalogs.add(1, &[KeyValue::new("code", code)]);
+            for (phase, elapsed) in [("projection", projection), ("audit", audit)] {
+                metrics
+                    .catalog_phases
+                    .record(elapsed.as_secs_f64(), &[KeyValue::new("phase", phase)]);
+            }
+        }
     }
 }
 
