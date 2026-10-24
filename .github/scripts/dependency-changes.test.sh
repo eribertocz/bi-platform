@@ -33,7 +33,7 @@ check() {
   git checkout -q -b "merge-$name-$area" main
   git merge -q --no-ff --no-edit "pr-$name-$area"
   local got
-  got=$("$rule" "$area" pull_request HEAD^1)
+  got=$(bash "$rule" "$area" pull_request HEAD^1)
   git checkout -q main
   if [ "$got" = "$expected" ]; then
     echo "ok   $name ($area): $got"
@@ -67,7 +67,7 @@ check lockfile-not-frontend frontend false edit backend/Cargo.lock
 # Every event other than a pull request audits in full, with no change.
 for event in push schedule workflow_dispatch; do
   for area in backend frontend; do
-    got=$("$rule" "$area" "$event" HEAD^1)
+    got=$(bash "$rule" "$area" "$event" HEAD^1)
     if [ "$got" = true ]; then echo "ok   $event ($area): true"; else
       echo "FAIL $event ($area): expected true, got $got"; failures=$((failures + 1)); fi
   done
@@ -75,7 +75,7 @@ done
 # Fails closed: a base that cannot be diffed, no base, or an unknown area.
 for args in "backend pull_request no-such-commit" "frontend pull_request" "other pull_request HEAD"; do
   # shellcheck disable=SC2086
-  got=$("$rule" $args)
+  got=$(bash "$rule" $args)
   if [ "$got" = true ]; then echo "ok   fails closed ($args): true"; else
     echo "FAIL fails closed ($args): expected true, got $got"; failures=$((failures + 1)); fi
 done
