@@ -731,14 +731,25 @@ impl<'a> Validator<'a> {
             }
             AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
                 if let Some(expr) = &measure.scalar_expression {
-                    self.same(
-                        &expr.value_type,
-                        expr.unit.as_ref(),
-                        &measure.value_type,
-                        measure.unit.as_ref(),
-                        owner,
-                    );
-                    if measure.aggregation == AggregateFunction::Sum && !numeric(&expr.value_type) {
+                    // SUM widens to its exact result type (#261); MIN and
+                    // MAX return a value of their input.
+                    let summed = if measure.aggregation == AggregateFunction::Sum {
+                        expr.value_type.sum_result()
+                    } else {
+                        Some(expr.value_type.clone())
+                    };
+                    if let Some(result) = &summed {
+                        self.same(
+                            result,
+                            expr.unit.as_ref(),
+                            &measure.value_type,
+                            measure.unit.as_ref(),
+                            owner,
+                        );
+                    }
+                    if measure.aggregation == AggregateFunction::Sum
+                        && (summed.is_none() || !numeric(&expr.value_type))
+                    {
                         self.error(
                             ErrorCode::IncompatibleTypes,
                             owner,

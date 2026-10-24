@@ -126,7 +126,7 @@ fn base_model() -> ModelDefinition {
         )),
         aggregation: AggregateFunction::Sum,
         intrinsic_filter: None,
-        value_type: decimal(),
+        value_type: summed(),
         unit: Some(currency("USD")),
         input_grain: model.datasets[0].observation_grain.clone(),
         aggregation_contract: AggregationContract::fully_additive(),
@@ -134,6 +134,11 @@ fn base_model() -> ModelDefinition {
     });
     model.metrics.push(metric("revenue", "revenue", false));
     model
+}
+
+/// What `SUM` of `decimal()` is certified as (#261).
+fn summed() -> ValueType {
+    decimal().sum_result().expect("decimal is numeric")
 }
 
 fn metric(name: &str, target: &str, metric_ref: bool) -> Metric {
@@ -146,11 +151,11 @@ fn metric(name: &str, target: &str, metric_ref: bool) -> Metric {
             } else {
                 MetricExprKind::MeasureRef(reference.clone())
             },
-            value_type: decimal(),
+            value_type: summed(),
             unit: Some(currency("USD")),
         },
         intrinsic_filter: None,
-        value_type: decimal(),
+        value_type: summed(),
         unit: Some(currency("USD")),
         native_grain: Grain::global(),
         aggregation_contract: AggregationContract::fully_additive(),
@@ -241,12 +246,13 @@ fn different_currencies_coexist_until_a_definition_combines_them() {
             left: Box::new(model.metrics[0].expression.clone()),
             right: Box::new(MetricExpr {
                 kind: MetricExprKind::MeasureRef(id("measure", "bob")),
-                value_type: decimal(),
+                value_type: summed(),
                 unit: Some(currency("BOB")),
             }),
             contract: NumericContract::default(),
         },
-        value_type: ValueType::Decimal(DecimalType::new(13, 2).expect("derived type")),
+        // Two DECIMAL(38,2) sums add into DECIMAL(39,2).
+        value_type: ValueType::Decimal(DecimalType::new(39, 2).expect("derived type")),
         unit: Some(currency("USD")),
     };
     model.metrics[0].value_type = model.metrics[0].expression.value_type.clone();
