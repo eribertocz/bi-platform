@@ -10,7 +10,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 arrow-array = "58"
-arrow-schema = "58"
+arrow-schema = "60"
 axum = "0.8.9"
 cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
