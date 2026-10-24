@@ -1,0 +1,79 @@
+{
+  "result": {
+    "blocks": [
+      {
+        "block_id": "query",
+        "columns": [
+          {
+            "selection_id": "t",
+            "kind": "metric",
+            "id": "project-file-76656e7461732e79616d6c/metric/importe_total",
+            "type": "DECIMAL(18,2)",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "f",
+            "kind": "metric",
+            "id": "project-file-76656e7461732e79616d6c/metric/filas",
+            "type": "INT64",
+            "nullable": true,
+            "unit": {
+              "kind": "count"
+            },
+            "timezone": null,
+            "masked": false
+          }
+        ],
+        "rows": [["300.30", "4"]],
+        "row_count": 1,
+        "limit": null
+      }
+    ]
+  },
+  "receipt": {
+    "id": "run:0da876c200814542c5513e87bf5c357521ca5325e504c95962dfaf94fd641230",
+    "version": "bi-run-receipt/1",
+    "query": {
+      "encoding": "sef-canonical-cbor-v1",
+      "sqir": "830a7273656d616e7469632d71756572792d736574a26473716972820663302e3166626c6f636b73820781830a7473656d616e7469632d71756572792d626c6f636ba7656c696d6974810b6666696c746572810b666f6666736574810b68626c6f636b5f69648206657175657279686f726465725f62798207806a73656c656374696f6e73820782830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783870726f6a6563742d66696c652d373636353665373436313733326537393631366436632f6d65747269632f696d706f7274655f746f74616c6c73656c656374696f6e5f696482066174830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783070726f6a6563742d66696c652d373636353665373436313733326537393631366436632f6d65747269632f66696c61736c73656c656374696f6e5f69648206616675706f73745f6167677265676174655f66696c746572810b"
+    },
+    "fingerprints": {
+      "query": "sef-sha256-v1:2acd50c8f17f25ea57e325e3f57a1f0edceca8d11ef5bb8a013622ca53f4e150",
+      "model": "model-hmac-sha256-v1:020299103f756cea7f1af74d02acd8a883b7ef6c66586cd2f9b47f2e61dec0a4",
+      "plan": "plan-hmac-sha256-v1:c20cca8b7636d3a16e78a07e195a13bfa40d172cc51357da13e4f2ce392612ca",
+      "decision": "decision-hmac-sha256-v1:3d41554c1c98aa51e8e5aa04c53055e04e958b25d7af08149047a68bb044e137",
+      "policies": "policies-hmac-sha256-v1:cf48f50014b933c1a35494f11ff9df4634a7d6a461298a261593e348cbc774be",
+      "context": "ctx-hmac-sha256-v1:9840bf3db7bf8805619b4f4d7bdda9c2d7f1b01bbf2a24bff423c96948bd4847"
+    },
+    "definitions": [
+      {
+        "id": "project-file-76656e7461732e79616d6c/metric/filas",
+        "content": "sef-sha256-v1:2b23ea0ce79b3799f3ff172bd08ccd2c4c784d4ffb935c5604a61b58e1f18a4b"
+      },
+      {
+        "id": "project-file-76656e7461732e79616d6c/metric/importe_total",
+        "content": "sef-sha256-v1:54c6d22866cddf2793910584d2c5dcdf939b04a06fa2933968ff6de060977954"
+      }
+    ],
+    "versions": {
+      "engine": "v1.5.6",
+      "adapter": "0.1.0",
+      "capability_profile": "duckdb-seir-0.2",
+      "tzdb": "2025b"
+    },
+    "sources": [
+      {
+        "dataset": "project-file-76656e7461732e79616d6c/dataset/ventas",
+        "data_snapshot": null,
+        "source_refreshed_at": null
+      }
+    ],
+    "evidence": "ev-hmac-sha256-v1:05dc14f18bd4196a2ab1dfa533103854580df57845c551b69a538527dcc4fd39",
+    "read_started_at": "2026-10-24T14:30:31.739472900Z",
+    "read_finished_at": "2026-10-24T14:30:31.745965300Z"
+  },
+  "notices": []
+}
