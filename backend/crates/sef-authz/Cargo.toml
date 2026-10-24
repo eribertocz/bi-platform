@@ -10,7 +10,7 @@ license = "Apache-2.0"
 [dependencies]
 # ADR 0012: exact version, no experimental features and no extension
 # functions until a policy needs one.
-cedar-policy = { version = "=4.13.0", default-features = false }
+cedar-policy = { version = "=4.14.0", default-features = false }
 sha2.workspace = true
 
 [dev-dependencies]
