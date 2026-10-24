@@ -21,6 +21,7 @@ use sef_model_ir::types::ValueType;
 use sef_query_ir::query::SelectionItem;
 use tracing::Instrument;
 
+use super::Audit;
 use super::context::{ContextKey, Scope};
 use super::envelope::{self, RunError, SemanticRun};
 use super::prepare::{self, Prepared, Refusal, Session, Stop};
@@ -96,7 +97,8 @@ impl Profile {
         if b.capacity == 0 {
             return Err(InvalidProfile("capacity"));
         }
-        if b.timeout.is_zero() || Instant::now().checked_add(b.timeout).is_none() {
+        // Both shares of the timeout, execution's and the audit's, are real.
+        if (b.timeout / 4).is_zero() || Instant::now().checked_add(b.timeout).is_none() {
             return Err(InvalidProfile("timeout"));
         }
         Ok(Self(budgets))
@@ -112,7 +114,19 @@ impl Profile {
     pub const fn budgets(&self) -> &Budgets {
         &self.0
     }
+
+    /// The part of [`Budgets::timeout`] execution may use: what is left
+    /// stays for the terminal audit event, so the whole request, its
+    /// confirmed audit included, ends within the timeout (#138).
+    #[must_use]
+    pub fn execution_timeout(&self) -> Duration {
+        let timeout = self.0.timeout;
+        timeout.saturating_sub((timeout / 4).min(AUDIT_RESERVE))
+    }
 }
+
+/// At most this much of the timeout is kept for the terminal audit event.
+pub const AUDIT_RESERVE: Duration = Duration::from_millis(500);
 
 /// The execution service: its profile and its instruments.
 #[derive(Clone)]
@@ -221,11 +235,46 @@ impl fmt::Debug for RunFailure {
     }
 }
 
+/// A complete answer, and what its audit event records: the decision and
+/// the model it was taken on.
+pub struct Answer {
+    pub run: SemanticRun,
+    pub(super) audit: Audit,
+}
+
+/// Why there is no answer, and what was decided before it failed: `None`
+/// when the preparation never reached a decision, or when its refusal
+/// carries its own.
+pub struct Failed {
+    pub failure: RunFailure,
+    pub(super) audit: Option<Audit>,
+    /// The redacted shape of the query as bounded, limit applied; `None`
+    /// when it failed its bounds.
+    pub(super) shape: Option<(u32, u32, u32, u32)>,
+}
+
+impl Failed {
+    const fn before(failure: RunFailure) -> Self {
+        Self {
+            failure,
+            audit: None,
+            shape: None,
+        }
+    }
+}
+
+impl fmt::Debug for Failed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.failure.fmt(f)
+    }
+}
+
 /// Executes `request` for `session`, admitted at `admitted`: the answer of
-/// one complete execution, or why there is none.
+/// one complete execution, or why there is none. Execution ends within
+/// [`Profile::execution_timeout`] of admission.
 ///
 /// # Errors
-/// A [`RunFailure`] for anything but a complete, coherent execution whose
+/// A [`Failed`] for anything but a complete, coherent execution whose
 /// answer fits its budgets before the deadline.
 pub async fn execute(
     state: &AppState,
@@ -233,7 +282,7 @@ pub async fn execute(
     request: ExplainRequest,
     request_id: &str,
     admitted: Instant,
-) -> Result<SemanticRun, RunFailure> {
+) -> Result<Answer, Failed> {
     let span = tracing::info_span!("semantic_run", request_id);
     async {
         let mut observed = Observed::new(state.semantic_runs.metrics.as_ref());
@@ -241,7 +290,7 @@ pub async fn execute(
         observed.finish(
             outcome
                 .as_ref()
-                .map_or_else(RunFailure::code, |_| "complete"),
+                .map_or_else(|failed| failed.failure.code(), |_| "complete"),
         );
         outcome
     }
@@ -256,20 +305,25 @@ async fn governed(
     request_id: &str,
     admitted: Instant,
     observed: &Observed<'_>,
-) -> Result<SemanticRun, RunFailure> {
-    let budgets = *state.semantic_runs.profile.budgets();
+) -> Result<Answer, Failed> {
+    let profile = state.semantic_runs.profile;
     // Bounds first, then the limit into the query itself: SQIR, its
     // fingerprint and the receipt all carry the limit applied.
-    bounded(&mut request.query, &budgets)?;
+    bounded(&mut request.query, profile.budgets()).map_err(Failed::before)?;
+    let shape = prepare::shape(&request);
+    let shaped = |failure| Failed {
+        shape: Some(shape),
+        ..Failed::before(failure)
+    };
     let deadline = admitted
-        .checked_add(budgets.timeout)
-        .ok_or(RunFailure::Deadline)?;
+        .checked_add(profile.execution_timeout())
+        .ok_or_else(|| shaped(RunFailure::Deadline))?;
     if Instant::now() >= deadline {
-        return Err(RunFailure::Deadline);
+        return Err(shaped(RunFailure::Deadline));
     }
     // Without the instance's key nothing can be bound, and nothing is read.
     if !state.context_key.is_available() {
-        return Err(RunFailure::Unavailable);
+        return Err(shaped(RunFailure::Unavailable));
     }
     let scope = Owned {
         project: state
@@ -282,20 +336,33 @@ async fn governed(
     };
     let ready = observed
         .phase("prepare", prepared(state, session, &request, deadline))
-        .await?;
+        .await
+        .map_err(|failed| Failed {
+            shape: Some(shape),
+            ..failed
+        })?;
     let Ready { prepared, plan } = ready;
+    // From here on every failure was decided on: it records the decision.
+    let audit = prepared.audit().clone();
+    let decided = |failure| Failed {
+        audit: Some(audit.clone()),
+        ..shaped(failure)
+    };
     let events = observed
         .phase(
             "execute",
             executed(state, &prepared, plan, request_id, deadline),
         )
-        .await?;
-    observed
+        .await
+        .map_err(decided)?;
+    let run = observed
         .phase(
             "assemble",
             assembled(prepared, events, state.context_key.clone(), scope, deadline),
         )
         .await
+        .map_err(decided)?;
+    Ok(Answer { run, audit })
 }
 
 /// The profile's limit and offset bounds. An omitted limit gets the
@@ -359,32 +426,36 @@ async fn prepared(
     session: Session,
     request: &ExplainRequest,
     deadline: Instant,
-) -> Result<Ready, RunFailure> {
+) -> Result<Ready, Failed> {
     let deadline = tokio::time::Instant::from_std(deadline);
     let loaded = tokio::time::timeout_at(deadline, prepare::load_request(state, session, request))
         .await
-        .map_err(|_| RunFailure::Deadline)?
-        .map_err(RunFailure::Refused)?;
+        .map_err(|_| Failed::before(RunFailure::Deadline))?
+        .map_err(|refusal| Failed::before(RunFailure::Refused(refusal)))?;
     // Lowered in the preparation's native work, on its single read.
     match prepare::prepare_until(state, loaded, Some(deadline), lowered).await {
         Ok(ready) => ready,
-        Err(Stop::Refused(refusal)) => Err(RunFailure::Refused(refusal)),
-        Err(Stop::Deadline) => Err(RunFailure::Deadline),
-        Err(Stop::Engine(bi_runtime::RuntimeError::Busy)) => Err(RunFailure::Busy),
-        Err(Stop::Engine(_)) => Err(RunFailure::Engine),
+        Err(Stop::Refused(refusal)) => Err(Failed::before(RunFailure::Refused(refusal))),
+        Err(Stop::Deadline) => Err(Failed::before(RunFailure::Deadline)),
+        Err(Stop::Engine(bi_runtime::RuntimeError::Busy)) => Err(Failed::before(RunFailure::Busy)),
+        Err(Stop::Engine(_)) => Err(Failed::before(RunFailure::Engine)),
     }
 }
 
 /// What execution can honour of `prepared`, lowered onto the sources it
 /// captured; nothing of the data is read.
-fn lowered(prepared: Prepared) -> Result<Ready, RunFailure> {
+fn lowered(prepared: Prepared) -> Result<Ready, Failed> {
+    let decided = |failure| Failed {
+        audit: Some(prepared.audit().clone()),
+        ..Failed::before(failure)
+    };
     let plan = {
         // A masked use would return raw values: refused whole (#137).
         let execution = prepared
             .execution()
-            .map_err(|prepare::Masked| RunFailure::MaskedUnsupported)?;
+            .map_err(|prepare::Masked| decided(RunFailure::MaskedUnsupported))?;
         if ungoverned_bucket(&prepared) {
-            return Err(RunFailure::TemporalUnsupported);
+            return Err(decided(RunFailure::TemporalUnsupported));
         }
         sef_adapter_duckdb::execution::lower(
             execution.model(),
@@ -393,7 +464,7 @@ fn lowered(prepared: Prepared) -> Result<Ready, RunFailure> {
             execution.certificate(),
             &execution.catalog(),
         )
-        .map_err(|_| RunFailure::Engine)?
+        .map_err(|_| decided(RunFailure::Engine))?
     };
     Ok(Ready {
         prepared,

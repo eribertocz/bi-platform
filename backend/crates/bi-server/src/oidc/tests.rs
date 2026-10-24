@@ -179,6 +179,11 @@ mod real {
 
     // Actual Keycloak login form and token exchange, without replacing any provider endpoint.
     async fn authorize(url: &str) -> String {
+        authorize_as(url, "oidc-user").await
+    }
+
+    /// The login of `username` (password `oidc-test-only`) at the real form.
+    async fn authorize_as(url: &str, username: &str) -> String {
         let http = http_client().unwrap();
         let response = http.get(url).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -214,7 +219,9 @@ mod real {
             .post(action)
             .header(header::COOKIE, cookies)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body("username=oidc-user&password=oidc-test-only&credentialId=")
+            .body(format!(
+                "username={username}&password=oidc-test-only&credentialId="
+            ))
             .send()
             .await
             .unwrap();
@@ -747,8 +754,13 @@ mod real {
 
     /// A whole login of `oidc-user` at the real provider: its session cookie.
     async fn signed_in(app: &Router) -> String {
+        signed_in_as(app, "oidc-user").await
+    }
+
+    /// A whole login of `username` at the real provider: its session cookie.
+    async fn signed_in_as(app: &Router, username: &str) -> String {
         let (url, cookie) = begin(app).await;
-        let callback = reqwest::Url::parse(&authorize(&url).await).unwrap();
+        let callback = reqwest::Url::parse(&authorize_as(&url, username).await).unwrap();
         let path = format!("{}?{}", callback.path(), callback.query().unwrap());
         let response = send(app, "GET", &path, Some(&cookie), None).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -875,6 +887,257 @@ mod real {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
         assert!(text.contains("explain_unavailable"), "{text}");
         assert_eq!(events().await.len(), recorded);
+        db.close().await;
+    }
+
+    /// The project of #138 over the provider's verified `department`: the
+    /// composition's row policy reads that claim, and only the provider
+    /// group `analysts` is mapped, to `viewer`.
+    fn department_project() -> tempfile::TempDir {
+        use crate::semantic::prepare::tests::composition::{ROW_POLICY, model, project};
+        let policy = ROW_POLICY
+            .replace(":region", ":department")
+            .replace(r#""name": "region""#, r#""name": "department""#);
+        assert_eq!(policy.matches("department").count(), 2, "{policy}");
+        project(
+            &model(&policy, ""),
+            "version: 1\ngroups:\n  analysts: [viewer]\n",
+        )
+    }
+
+    /// The real router over `project` and the oracle rows, with the real provider.
+    async fn semantic_app(
+        pool: &PgPool,
+        project: &std::path::Path,
+    ) -> (crate::db::Database, Router) {
+        let db = crate::db::Database::start(
+            &pool.connect_options(),
+            crate::metadata::MetadataMode::Development,
+        );
+        assert!(db.wait_until_ready().await);
+        let mut state = AppState::new(db.clone());
+        state.auth.oidc = Some(config(&issuer(), "bi-platform"));
+        state.models = crate::models::Models::new(Some(project.to_owned()));
+        state.analytics = crate::semantic::prepare::tests::composition::analytics().await;
+        (db, crate::router(state))
+    }
+
+    /// The same request for everyone: the total and its row count.
+    fn totals() -> serde_json::Value {
+        serde_json::json!({
+            "model": "metrics/ventas.yaml",
+            "query": { "selections": [
+                { "kind": "metric", "id": "t", "name": "importe_total" },
+                { "kind": "metric", "id": "f", "name": "filas" }
+            ] }
+        })
+    }
+
+    /// `POST /api/v1/semantic/query` with `session` and any extra headers:
+    /// the status and the body as text.
+    async fn run_query(
+        app: &Router,
+        session: &str,
+        body: &serde_json::Value,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, String) {
+        let mut request = Request::post("/api/v1/semantic/query")
+            .header(header::COOKIE, session)
+            .header(header::ORIGIN, "http://127.0.0.1:8080")
+            .header(header::CONTENT_TYPE, "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// The rows of a successful answer.
+    fn answered_rows(status: StatusCode, text: &str) -> serde_json::Value {
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let answer: serde_json::Value = serde_json::from_str(text).unwrap();
+        answer["result"]["blocks"][0]["rows"].clone()
+    }
+
+    /// The verified user id behind `session`, as the server resolves it.
+    async fn user_id(app: &Router, session: &str) -> String {
+        let response = send(app, "GET", "/api/v1/session", Some(session), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        body["user"]["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Every semantic execution event: actor, action and result, in order.
+    async fn semantic_events(pool: &PgPool) -> Vec<(String, String, String)> {
+        sqlx::query_as(
+            "SELECT (payload::jsonb)->>'actor_id', (payload::jsonb)->>'action',
+                    (payload::jsonb)->>'result'
+             FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'resource_type' IN ('semantic_model', 'semantic_request')
+             ORDER BY sequence",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn event(actor: &str, action: &str, result: &str) -> (String, String, String) {
+        (actor.to_owned(), action.to_owned(), result.to_owned())
+    }
+
+    /// #138 with real identities: two verified logins whose `department`
+    /// binds the row policy to Norte and to Sur send the same body and each
+    /// gets only its rows, one after the other and concurrently, each with
+    /// its own `query`/`success` event. Roles, groups or attributes the
+    /// client claims, in headers or in the body, grant nothing.
+    #[sqlx::test(migrations = false)]
+    async fn real_identities_execute_only_their_own_rows(pool: PgPool) {
+        let project = department_project();
+        let (db, app) = semantic_app(&pool, project.path()).await;
+        let norte = signed_in_as(&app, "oidc-norte").await;
+        let sur = signed_in_as(&app, "oidc-sur").await;
+        let (norte_id, sur_id) = (user_id(&app, &norte).await, user_id(&app, &sur).await);
+        assert_ne!(norte_id, sur_id);
+        let expected_norte = serde_json::json!([["100.30", "2"]]);
+        let expected_sur = serde_json::json!([["200.00", "2"]]);
+
+        let (status, text) = run_query(&app, &norte, &totals(), &[]).await;
+        assert_eq!(answered_rows(status, &text), expected_norte);
+        let (status, text) = run_query(&app, &sur, &totals(), &[]).await;
+        assert_eq!(answered_rows(status, &text), expected_sur);
+        assert_eq!(
+            semantic_events(&pool).await,
+            vec![
+                event(&norte_id, "query", "success"),
+                event(&sur_id, "query", "success"),
+            ]
+        );
+
+        // Concurrently: no answer crosses to the other session.
+        let same = totals();
+        for _ in 0..4 {
+            let ((a_status, a_text), (b_status, b_text)) = tokio::join!(
+                run_query(&app, &norte, &same, &[]),
+                run_query(&app, &sur, &same, &[])
+            );
+            assert_eq!(answered_rows(a_status, &a_text), expected_norte);
+            assert_eq!(answered_rows(b_status, &b_text), expected_sur);
+        }
+        let recorded = semantic_events(&pool).await;
+        assert_eq!(recorded.len(), 10);
+        for actor in [&norte_id, &sur_id] {
+            let own: Vec<_> = recorded.iter().filter(|e| &e.0 == actor).collect();
+            assert_eq!(own.len(), 5, "{recorded:?}");
+            assert!(own.iter().all(|e| e.1 == "query" && e.2 == "success"));
+        }
+
+        // Claimed in headers: ignored, the verified identity decides.
+        let claimed = [
+            ("x-roles", "admin"),
+            ("x-forwarded-groups", "admins"),
+            ("x-department", "Sur"),
+            ("x-forwarded-user", "oidc-sur"),
+        ];
+        let (status, text) = run_query(&app, &norte, &totals(), &claimed).await;
+        assert_eq!(answered_rows(status, &text), expected_norte);
+
+        // Claimed in the body: refused before preparing, with no data and
+        // no event.
+        let recorded = semantic_events(&pool).await.len();
+        let mut forged = Vec::new();
+        for (key, value) in [
+            ("roles", serde_json::json!(["admin"])),
+            ("groups", serde_json::json!(["analysts"])),
+            ("context", serde_json::json!({ "department": "Sur" })),
+            ("attributes", serde_json::json!({ "department": "Sur" })),
+        ] {
+            let mut top = totals();
+            top[key] = value.clone();
+            forged.push(top);
+            let mut nested = totals();
+            nested["query"][key] = value;
+            forged.push(nested);
+        }
+        for body in &forged {
+            let (status, text) = run_query(&app, &norte, body, &[]).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body} {text}");
+            let problem: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(problem["code"], "invalid_request", "{text}");
+            assert!(problem.get("result").is_none(), "{text}");
+            for leaked in ["100.30", "200.00", "Norte", "Sur", "receipt"] {
+                assert!(!text.contains(leaked), "{leaked}: {text}");
+            }
+        }
+        assert_eq!(semantic_events(&pool).await.len(), recorded);
+        db.close().await;
+    }
+
+    /// An identity whose provider group `members.yaml` does not map gets
+    /// the neutral refusal and no data, recorded as a denial; and removing
+    /// a group's mapping revokes the same session cookie on its next query,
+    /// with no new login.
+    #[sqlx::test(migrations = false)]
+    async fn unmapped_and_revoked_identities_get_the_neutral_refusal(pool: PgPool) {
+        let project = department_project();
+        let (db, app) = semantic_app(&pool, project.path()).await;
+        let outsider = signed_in_as(&app, "oidc-outsider").await;
+        let norte = signed_in_as(&app, "oidc-norte").await;
+        let (outsider_id, norte_id) = (user_id(&app, &outsider).await, user_id(&app, &norte).await);
+        let neutral = |status: StatusCode, text: &str| {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+            let problem: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(problem["code"], "model_not_found", "{text}");
+            assert_eq!(
+                problem["detail"], "No se puede ejecutar la consulta solicitada.",
+                "{text}"
+            );
+            assert!(problem.get("result").is_none(), "{text}");
+            for leaked in ["100.30", "200.00", "receipt", "ventas", "department"] {
+                assert!(!text.contains(leaked), "{leaked}: {text}");
+            }
+        };
+
+        // Verified by the provider, with the same department as Norte, but
+        // its group is unmapped: nothing.
+        let (status, text) = run_query(&app, &outsider, &totals(), &[]).await;
+        neutral(status, &text);
+        // The mapped identity answers over the same project.
+        let (status, text) = run_query(&app, &norte, &totals(), &[]).await;
+        assert_eq!(
+            answered_rows(status, &text),
+            serde_json::json!([["100.30", "2"]])
+        );
+
+        // Revoked: the mapping goes, the cookie stays.
+        std::fs::write(
+            project.path().join("policies/members.yaml"),
+            "version: 1\ngroups:\n  catalog_authors: [viewer]\n",
+        )
+        .unwrap();
+        let (status, text) = run_query(&app, &norte, &totals(), &[]).await;
+        neutral(status, &text);
+        assert_eq!(
+            send(&app, "GET", "/api/v1/session", Some(&norte), None)
+                .await
+                .status(),
+            StatusCode::OK,
+            "the session itself is still valid"
+        );
+        assert_eq!(
+            semantic_events(&pool).await,
+            vec![
+                event(&outsider_id, "denial", "denied"),
+                event(&norte_id, "query", "success"),
+                event(&norte_id, "denial", "denied"),
+            ]
+        );
         db.close().await;
     }
 

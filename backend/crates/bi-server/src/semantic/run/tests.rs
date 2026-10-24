@@ -29,7 +29,10 @@ async fn run(
     session: Session,
     request: ExplainRequest,
 ) -> Result<SemanticRun, RunFailure> {
-    execute(state, session, request, "semantic-run-test", Instant::now()).await
+    execute(state, session, request, "semantic-run-test", Instant::now())
+        .await
+        .map(|answer| answer.run)
+        .map_err(|failed| failed.failure)
 }
 
 fn ana() -> Session {
@@ -597,7 +600,9 @@ async fn one_deadline_covers_admission_the_queue_and_the_execution() {
     // Admitted too long ago: nothing starts.
     let admitted = Instant::now().checked_sub(Duration::from_secs(11)).unwrap();
     assert!(matches!(
-        execute(&state, ana(), total(), "stale", admitted).await,
+        execute(&state, ana(), total(), "stale", admitted)
+            .await
+            .map_err(|failed| failed.failure),
         Err(RunFailure::Deadline)
     ));
     // Waiting for the engine to prepare.
@@ -1030,6 +1035,26 @@ fn only_a_finite_profile_prepares_the_service() {
     assert_eq!(invalid(|b| b.default_limit = b.max_limit + 1), "limit");
     assert_eq!(invalid(|b| b.timeout = Duration::ZERO), "timeout");
     assert_eq!(invalid(|b| b.timeout = Duration::MAX), "timeout");
+}
+
+#[test]
+fn execution_leaves_the_audit_its_reserve_of_the_timeout() {
+    // R = min(500 ms, T/4): below, at and above 2 s.
+    for (timeout, execution) in [(1_000, 750), (2_000, 1_500), (10_000, 9_500)] {
+        let profile = Profile::new(Budgets {
+            timeout: Duration::from_millis(timeout),
+            ..INITIAL
+        })
+        .unwrap();
+        assert_eq!(
+            profile.execution_timeout(),
+            Duration::from_millis(execution)
+        );
+    }
+    // Too short to share: refused when the service prepares.
+    let mut tiny = INITIAL;
+    tiny.timeout = Duration::from_nanos(3);
+    assert_eq!(Profile::new(tiny).unwrap_err().0, "timeout");
 }
 
 #[test]

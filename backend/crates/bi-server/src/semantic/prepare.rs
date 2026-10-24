@@ -534,7 +534,7 @@ pub(super) async fn prepare_until<T: Send + 'static>(
 }
 
 /// The redacted shape the audit records: counts and the limit.
-fn shape(request: &ExplainRequest) -> (u32, u32, u32, u32) {
+pub(super) fn shape(request: &ExplainRequest) -> (u32, u32, u32, u32) {
     let (dimensions, metrics, filters) = request.query.shape();
     let limit = request
         .query

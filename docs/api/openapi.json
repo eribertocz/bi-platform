@@ -634,6 +634,112 @@
         ]
       }
     },
+    "/api/v1/semantic/query": {
+      "post": {
+        "tags": [
+          "semantic"
+        ],
+        "summary": "Executes a semantic query and answers its exact result with its\nreceipt, once its audit event is confirmed (#138).",
+        "operationId": "executeSemanticQuery",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExplainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Resultado exacto completo, recibo y avisos; solo después de confirmar su evento de auditoría. Sin `limit`, una consulta con dimensiones recibe 1000 filas ordenadas por sus dimensiones; nunca más de 10000",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticRun"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Un uso no permitido, con las mismas reglas de divulgación que explain",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticDenial"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`model_not_found`: el modelo no existe o la consulta no se puede ejecutar para esta sesión. Sin permiso de inspección del catálogo, todo fallo que dependa del catálogo responde igual, con el detalle fijo «No se puede ejecutar la consulta solicitada.»",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported` o `result_too_large`",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticRejection"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`models_busy` o `semantic_busy`: sin capacidad para preparar o ejecutar",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Políticas no válidas, metadatos no listos, motor no disponible o fallido (`analytics_unavailable`, `analytics_failed`), resultado no verificable (`result_unverified`), `semantic_unavailable` o auditoría no confirmada (`audit_unavailable`): sin resultado ni recibo",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`semantic_timeout`: la consulta superó el tiempo máximo, contado desde su admisión",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/session": {
       "get": {
         "tags": [

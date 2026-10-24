@@ -212,6 +212,315 @@ pub async fn explain(
     outcome.into_response(&request_id)
 }
 
+/// Executes a semantic query and answers its exact result with its
+/// receipt, once its audit event is confirmed (#138).
+#[utoipa::path(
+    post,
+    path = "/api/v1/semantic/query",
+    operation_id = "executeSemanticQuery",
+    tag = "semantic",
+    request_body = ExplainRequest,
+    security(("sessionCookie" = [])),
+    responses(
+        (status = 200, description = "Resultado exacto completo, recibo y avisos; solo después de confirmar su evento de auditoría. Sin `limit`, una consulta con dimensiones recibe 1000 filas ordenadas por sus dimensiones; nunca más de 10000", body = envelope::SemanticRun),
+        (status = 401, description = "Sin sesión", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Un uso no permitido, con las mismas reglas de divulgación que explain", body = SemanticDenial, content_type = "application/problem+json"),
+        (status = 404, description = "`model_not_found`: el modelo no existe o la consulta no se puede ejecutar para esta sesión. Sin permiso de inspección del catálogo, todo fallo que dependa del catálogo responde igual, con el detalle fijo «No se puede ejecutar la consulta solicitada.»", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported` o `result_too_large`", body = SemanticRejection, content_type = "application/problem+json"),
+        (status = 429, description = "`models_busy` o `semantic_busy`: sin capacidad para preparar o ejecutar", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "Políticas no válidas, metadatos no listos, motor no disponible o fallido (`analytics_unavailable`, `analytics_failed`), resultado no verificable (`result_unverified`), `semantic_unavailable` o auditoría no confirmada (`audit_unavailable`): sin resultado ni recibo", body = Problem, content_type = "application/problem+json"),
+        (status = 504, description = "`semantic_timeout`: la consulta superó el tiempo máximo, contado desde su admisión", body = Problem, content_type = "application/problem+json")
+    )
+)]
+pub async fn query(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    id: Option<Extension<RequestId>>,
+    body: Result<Json<ExplainRequest>, JsonRejection>,
+) -> Response {
+    // One deadline from admission: execution, then its audit event.
+    let admitted = Instant::now();
+    let request_id = id
+        .as_ref()
+        .and_then(|Extension(id)| id.header_value().to_str().ok().map(str::to_owned))
+        .unwrap_or_default();
+    let Ok(Json(request)) = body else {
+        return Outcome::Refused(
+            "La petición no es un JSON válido con el formato de la consulta semántica.".to_owned(),
+        )
+        .into_response(&request_id);
+    };
+    let shape = prepare::shape(&request);
+    let session = prepare::Session::of(&principal);
+    let executed = run::execute(&state, session, request, &request_id, admitted).await;
+    let settled = Settled::of(executed, shape);
+    let label = settled.label();
+    // Execution ended within its share; the event gets what is left.
+    let timeout = state.semantic_runs.profile().budgets().timeout;
+    let audited = match &settled.terminal {
+        Some(terminal) => {
+            let left = timeout.saturating_sub(admitted.elapsed());
+            terminal.record(&state, &principal, &request_id, left).await
+        }
+        None => Ok(()),
+    };
+    tracing::info!(
+        request_id,
+        outcome = label,
+        audited = audited.is_ok(),
+        elapsed_ms = admitted.elapsed().as_millis(),
+        "semantic query answered"
+    );
+    if let Err(code) = audited {
+        // Nothing is answered without its audit event.
+        return Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            Some("No se pudo registrar la auditoría. Reintenta.".to_owned()),
+            &request_id,
+        )
+        .into_response();
+    }
+    settled.reply.into_response(&request_id)
+}
+
+/// The only detail a session without inspection gets for an execution
+/// that depends on the catalog.
+const UNDISCLOSED_RUN: &str = "No se puede ejecutar la consulta solicitada.";
+
+/// How one execution ended: its single terminal event and its answer,
+/// decided before anything is written.
+struct Settled {
+    terminal: Option<Terminal>,
+    reply: Reply,
+}
+
+enum Reply {
+    Run(Box<envelope::SemanticRun>),
+    Outcome(Outcome),
+    Problem(StatusCode, &'static str, &'static str),
+}
+
+impl Settled {
+    fn of(executed: Result<run::Answer, run::Failed>, shape: (u32, u32, u32, u32)) -> Self {
+        let failed = match executed {
+            Ok(answer) => {
+                return Self {
+                    terminal: Some(Terminal::of(&answer.audit, false)),
+                    reply: Reply::Run(Box::new(answer.run)),
+                };
+            }
+            Err(failed) => failed,
+        };
+        // The shape as bounded, its applied limit included, when it got there.
+        let shape = failed.shape.unwrap_or(shape);
+        let terminal = failed.audit.as_ref().map_or_else(
+            || Terminal::undecided(shape),
+            |audit| Terminal::of(audit, true),
+        );
+        let (status, code, message) = match failed.failure {
+            run::RunFailure::Refused(prepare::Refusal(outcome)) => {
+                return Self::refused(*outcome, shape);
+            }
+            run::RunFailure::LimitInvalid => {
+                return Self {
+                    terminal: None,
+                    reply: Reply::Problem(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "limit_invalid",
+                        "limit va de 1 a 10000 y offset de 0 a 10000.",
+                    ),
+                };
+            }
+            run::RunFailure::MaskedUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "masked_unsupported",
+                "La consulta usa valores que tus roles solo permiten ver enmascarados, y la \
+                 ejecución todavía no los aplica.",
+            ),
+            run::RunFailure::TemporalUnsupported => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "temporal_unsupported",
+                "Agrupar por periodo un instante sin semántica temporal gobernada todavía no se \
+                 puede ejecutar.",
+            ),
+            run::RunFailure::Budget => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "result_too_large",
+                "El resultado supera el tamaño máximo. Añade filtros, menos dimensiones o un \
+                 límite menor.",
+            ),
+            run::RunFailure::Busy => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "semantic_busy",
+                "El motor analítico está ocupado. Reintenta en unos segundos.",
+            ),
+            run::RunFailure::Deadline => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "semantic_timeout",
+                "La consulta superó el tiempo máximo. Simplifica la consulta y reintenta.",
+            ),
+            run::RunFailure::Engine | run::RunFailure::Cancelled => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "analytics_failed",
+                "El motor analítico no pudo completar la consulta. Reintenta.",
+            ),
+            run::RunFailure::Incomplete | run::RunFailure::Evidence | run::RunFailure::Codec => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "result_unverified",
+                "No se pudo verificar el resultado completo, y no se entrega ninguna parte.",
+            ),
+            run::RunFailure::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "semantic_unavailable",
+                "La ejecución semántica no está disponible. Reintenta.",
+            ),
+        };
+        Self {
+            terminal: Some(terminal),
+            reply: Reply::Problem(status, code, message),
+        }
+    }
+
+    /// A refusal of the preparation, classified as explain classifies it,
+    /// with its single terminal event: the decision when there was one, the
+    /// reserved request resource if not. Released under inspection, it
+    /// records no second event.
+    fn refused(outcome: Outcome, shape: (u32, u32, u32, u32)) -> Self {
+        let outcome = match outcome {
+            Outcome::Inspected { outcome, .. } => *outcome,
+            outcome => outcome,
+        };
+        let terminal = match &outcome {
+            Outcome::Denied { audit, .. }
+            | Outcome::Invalid {
+                audit: Some(audit), ..
+            }
+            | Outcome::Undisclosed { audit: Some(audit) } => Some(Terminal::of(audit, false)),
+            Outcome::Invalid { audit: None, .. }
+            | Outcome::Undisclosed { audit: None }
+            | Outcome::Failed(..) => Some(Terminal::undecided(shape)),
+            // Refused within the request's own bounds, before preparing.
+            Outcome::Refused(_) | Outcome::Explained { .. } | Outcome::Inspected { .. } => None,
+        };
+        Self {
+            terminal,
+            reply: Reply::Outcome(outcome),
+        }
+    }
+
+    const fn label(&self) -> &'static str {
+        match &self.reply {
+            Reply::Run(_) => "answered",
+            Reply::Outcome(outcome) => outcome.label(),
+            Reply::Problem(_, code, _) => code,
+        }
+    }
+}
+
+impl Reply {
+    fn into_response(self, request_id: &str) -> Response {
+        match self {
+            Self::Run(answer) => {
+                ([(header::CACHE_CONTROL, "no-store")], Json(*answer)).into_response()
+            }
+            Self::Outcome(outcome) => outcome.answer(request_id, UNDISCLOSED_RUN),
+            // A 422 keeps the contract of every semantic rejection.
+            Self::Problem(StatusCode::UNPROCESSABLE_ENTITY, code, message) => Outcome::Invalid {
+                code,
+                message: message.to_owned(),
+                diagnostics: Vec::new(),
+                audit: None,
+            }
+            .answer(request_id, UNDISCLOSED_RUN),
+            Self::Problem(status, code, message) => {
+                Problem::new(status, code, Some(message.to_owned()), request_id).into_response()
+            }
+        }
+    }
+}
+
+/// The terminal audit event of one execution (#138).
+struct Terminal {
+    action: bi_audit::Action,
+    result: bi_audit::ResultCode,
+    /// The model's fingerprint; `None` before any decision.
+    model: Option<String>,
+    decision: Option<String>,
+    shape: (u32, u32, u32, u32),
+}
+
+/// What an event names when no model was decided on.
+const SEMANTIC_REQUEST: (&str, &str) = ("semantic_request", "semantic:request");
+
+impl Terminal {
+    /// The decision taken; `failed` when the execution did not complete.
+    fn of(audit: &Audit, failed: bool) -> Self {
+        Self {
+            action: if audit.allowed {
+                bi_audit::Action::Query
+            } else {
+                bi_audit::Action::Denial
+            },
+            result: match (audit.allowed, audit.valid && !failed) {
+                (false, _) => bi_audit::ResultCode::Denied,
+                (true, true) => bi_audit::ResultCode::Success,
+                (true, false) => bi_audit::ResultCode::Failure,
+            },
+            model: Some(audit.model.clone()),
+            decision: Some(audit.decision.clone()),
+            shape: audit.shape,
+        }
+    }
+
+    /// A request that entered the preparation and failed before deciding.
+    const fn undecided(shape: (u32, u32, u32, u32)) -> Self {
+        Self {
+            action: bi_audit::Action::Query,
+            result: bi_audit::ResultCode::Failure,
+            model: None,
+            decision: None,
+            shape,
+        }
+    }
+
+    /// Appends and confirms the event within `budget`, what is left of the
+    /// request's deadline.
+    async fn record(
+        &self,
+        state: &AppState,
+        principal: &Principal,
+        request_id: &str,
+        budget: std::time::Duration,
+    ) -> Result<(), &'static str> {
+        let (resource_type, resource_id) = match &self.model {
+            Some(model) => ("semantic_model", model.as_str()),
+            None => SEMANTIC_REQUEST,
+        };
+        let (dimensions, measures, filters, limit) = self.shape;
+        crate::audit::record_within(
+            &state.db,
+            crate::audit::HttpRecord {
+                actor: &principal.session.user.id,
+                request_id,
+                action: self.action,
+                result: self.result,
+                resource_type,
+                resource_id,
+                policy_decision_id: self.decision.clone(),
+                query_shape: Some(bi_audit::QueryShape {
+                    dimensions,
+                    measures,
+                    filters,
+                    limit,
+                }),
+            },
+            budget,
+        )
+        .await
+    }
+}
+
 /// What an explanation needs from the audit, decided before writing it.
 #[derive(Clone)]
 struct Audit {
@@ -270,6 +579,12 @@ impl Outcome {
     }
 
     fn into_response(self, request_id: &str) -> Response {
+        self.answer(request_id, UNDISCLOSED)
+    }
+
+    /// The answer, with `undisclosed` as the one detail of a failure that
+    /// depends on the catalog.
+    fn answer(self, request_id: &str, undisclosed: &str) -> Response {
         let no_store = [(header::CACHE_CONTROL, "no-store")];
         match self {
             Self::Explained { explanation, .. } => (no_store, Json(explanation)).into_response(),
@@ -321,15 +636,15 @@ impl Outcome {
                 diagnostics: Vec::new(),
                 audit: None,
             }
-            .into_response(request_id),
+            .answer(request_id, undisclosed),
             Self::Failed(status, code, message) => {
                 Problem::new(status, code, Some(message.to_owned()), request_id).into_response()
             }
-            Self::Inspected { outcome, .. } => outcome.into_response(request_id),
+            Self::Inspected { outcome, .. } => outcome.answer(request_id, undisclosed),
             Self::Undisclosed { .. } => Problem::new(
                 StatusCode::NOT_FOUND,
                 "model_not_found",
-                Some(UNDISCLOSED.to_owned()),
+                Some(undisclosed.to_owned()),
                 request_id,
             )
             .into_response(),

@@ -155,6 +155,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/semantic/query': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Executes a semantic query and answers its exact result with its
+     *     receipt, once its audit event is confirmed (#138).
+     */
+    post: operations['executeSemanticQuery'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/session': {
     parameters: {
       query?: never;
@@ -1392,6 +1412,93 @@ export interface operations {
         };
       };
       /** @description Tiempo agotado */
+      504: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+    };
+  };
+  executeSemanticQuery: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ExplainRequest'];
+      };
+    };
+    responses: {
+      /** @description Resultado exacto completo, recibo y avisos; solo después de confirmar su evento de auditoría. Sin `limit`, una consulta con dimensiones recibe 1000 filas ordenadas por sus dimensiones; nunca más de 10000 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['SemanticRun'];
+        };
+      };
+      /** @description Sin sesión */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Un uso no permitido, con las mismas reglas de divulgación que explain */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['SemanticDenial'];
+        };
+      };
+      /** @description `model_not_found`: el modelo no existe o la consulta no se puede ejecutar para esta sesión. Sin permiso de inspección del catálogo, todo fallo que dependa del catálogo responde igual, con el detalle fijo «No se puede ejecutar la consulta solicitada.» */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Petición o consulta inválida (`invalid_request`, `query_invalid`, `query_incorrect`, `query_unplannable`, `model_invalid` con inspección), `limit_invalid` (limit 1–10000, offset hasta 10000), `masked_unsupported`, `temporal_unsupported` o `result_too_large` */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['SemanticRejection'];
+        };
+      };
+      /** @description `models_busy` o `semantic_busy`: sin capacidad para preparar o ejecutar */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description Políticas no válidas, metadatos no listos, motor no disponible o fallido (`analytics_unavailable`, `analytics_failed`), resultado no verificable (`result_unverified`), `semantic_unavailable` o auditoría no confirmada (`audit_unavailable`): sin resultado ni recibo */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/problem+json': components['schemas']['Problem'];
+        };
+      };
+      /** @description `semantic_timeout`: la consulta superó el tiempo máximo, contado desde su admisión */
       504: {
         headers: {
           [name: string]: unknown;

@@ -192,6 +192,7 @@ async fn record_denial(
             // An operational closure, not a decision of the permission engine;
             // the refused body is never read.
             policy_decision_id: None,
+            query_shape: None,
         },
         state.query_timeout,
     )

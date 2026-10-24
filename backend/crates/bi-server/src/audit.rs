@@ -50,13 +50,17 @@ pub(crate) struct HttpRecord<'a> {
     pub action: bi_audit::Action,
     pub result: bi_audit::ResultCode,
     pub resource_type: &'static str,
-    pub resource_id: &'static str,
+    pub resource_id: &'a str,
     /// The decision's fingerprint; `None` when no decision was taken.
     pub policy_decision_id: Option<String>,
+    /// The redacted shape of a query, when the route answers one.
+    pub query_shape: Option<bi_audit::QueryShape>,
 }
 
-/// Appends `record` within `budget`, all of it: connection, transaction,
-/// the append (which may wait for the audit head) and the commit.
+/// Appends `record` within `budget`, all of it: the event's identifier
+/// (entropy runs on the blocking pool, which may be busy), connection,
+/// transaction, the append (which may wait for the audit head) and the
+/// commit.
 /// PostgreSQL also ends its own wait within what is left, so an abandoned
 /// statement never outlives the request; an unconfirmed transaction rolls
 /// back and frees its connection. No retry. The error is the problem code
@@ -68,28 +72,30 @@ pub(crate) async fn record_within(
 ) -> Result<(), &'static str> {
     const UNAVAILABLE: &str = "audit_unavailable";
     let started = Instant::now();
-    let event_id = crate::auth::random_token()
-        .await
-        .map_err(|()| UNAVAILABLE)?;
     let (request_id, trace_id) = correlation(record.request_id);
-    let event = Event {
-        event_id,
-        occurred_at: std::time::SystemTime::now().into(),
-        actor_id: record.actor.to_owned(),
-        actor_type: bi_audit::ActorType::User,
-        session_id: None,
-        action: record.action,
-        resource_type: record.resource_type.to_owned(),
-        resource_id: record.resource_id.to_owned(),
-        result: record.result,
-        request_id,
-        trace_id,
-        policy_decision_id: record.policy_decision_id,
-        source: bi_audit::Source::Http,
-        metadata_redacted: bi_audit::MetadataRedacted { query_shape: None },
-        schema_version: bi_audit::SCHEMA_VERSION,
-    };
     let write = async {
+        let event_id = crate::auth::random_token()
+            .await
+            .map_err(|()| UNAVAILABLE)?;
+        let event = Event {
+            event_id,
+            occurred_at: std::time::SystemTime::now().into(),
+            actor_id: record.actor.to_owned(),
+            actor_type: bi_audit::ActorType::User,
+            session_id: None,
+            action: record.action,
+            resource_type: record.resource_type.to_owned(),
+            resource_id: record.resource_id.to_owned(),
+            result: record.result,
+            request_id,
+            trace_id,
+            policy_decision_id: record.policy_decision_id,
+            source: bi_audit::Source::Http,
+            metadata_redacted: bi_audit::MetadataRedacted {
+                query_shape: record.query_shape,
+            },
+            schema_version: bi_audit::SCHEMA_VERSION,
+        };
         let mut transaction = db
             .begin()
             .await
@@ -433,3 +439,6 @@ pub async fn report(pool: &PgPool, trusted: Option<Checkpoint>) -> Result<Report
         checkpoint: checkpoint_out,
     })
 }
+
+#[cfg(test)]
+mod tests;

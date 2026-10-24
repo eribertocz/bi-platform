@@ -151,6 +151,7 @@ impl Event {
             resource_type: "project_catalog",
             resource_id: RESOURCE_ID,
             policy_decision_id: self.fingerprint,
+            query_shape: None,
         };
         crate::audit::record_within(db, record, budget).await
     }
