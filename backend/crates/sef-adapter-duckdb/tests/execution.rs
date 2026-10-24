@@ -325,8 +325,11 @@ fn case_009_aggregates_before_alignment_and_preserves_absent_branches() {
             vec![
                 g.map_or(Cell::Null, |v| Cell::Decimal(v, 38, 2)),
                 r.map_or(Cell::Null, |v| Cell::Decimal(v, 38, 2)),
-                g.zip(r)
-                    .map_or(Cell::Null, |(g, r)| Cell::Decimal(g - r, 19, 2)),
+                // Two DECIMAL(38,2) sums subtract into DECIMAL(39,2), past
+                // DuckDB's native width: an exact Decimal256 (#261).
+                g.zip(r).map_or(Cell::Null, |(g, r)| {
+                    Cell::WideDecimal((g - r).to_string(), 39, 2)
+                }),
                 Cell::Date(day),
                 Cell::Text(region.into()),
             ]

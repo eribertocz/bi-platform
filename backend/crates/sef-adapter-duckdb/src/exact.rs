@@ -164,6 +164,164 @@ impl VArrowScalar for LocalDate {
     }
 }
 
+/// [`coefficient`], for the adapter's output conformance.
+pub(super) fn coefficient_of(text: &str, scale: u8) -> Result<BigInt, ExecutionError> {
+    coefficient(text, scale)
+}
+
+/// A decimal carrier as an integer coefficient at `scale` digits: `"12.3"`
+/// at scale 2 is 1230. A carrier never has more fractional digits than its
+/// certified scale; anything else is no decimal of this contract.
+fn coefficient(text: &str, scale: u8) -> Result<BigInt, ExecutionError> {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    let unsigned = whole.strip_prefix('-').unwrap_or(whole);
+    if unsigned.is_empty() || !digits(unsigned) || !digits(fraction) {
+        return Err(ExecutionError::SourceContract);
+    }
+    let missing = usize::from(scale)
+        .checked_sub(fraction.len())
+        .ok_or(ExecutionError::SourceContract)?;
+    format!("{whole}{fraction}{}", "0".repeat(missing))
+        .parse()
+        .map_err(|_| ExecutionError::SourceContract)
+}
+
+/// The exact text of `coefficient` at `scale` digits.
+fn carrier(coefficient: &BigInt, scale: u8) -> String {
+    let text = coefficient.to_string();
+    let (sign, digits) = text
+        .strip_prefix('-')
+        .map_or(("", text.as_str()), |v| ("-", v));
+    let digits = format!("{:0>width$}", digits, width = usize::from(scale) + 1);
+    if scale == 0 {
+        return format!("{sign}{digits}");
+    }
+    let split = digits.len() - usize::from(scale);
+    format!("{sign}{}.{}", &digits[..split], &digits[split..])
+}
+
+/// `a ± b` of two decimal carriers, exactly, at `scale` digits, within
+/// `precision` digits: what DuckDB cannot represent past 38 digits (#261).
+///
+/// # Errors
+/// `ResultOutOfRange` when the exact result has more than `precision`
+/// digits; `SourceContract` for a malformed carrier.
+pub(super) fn combine(
+    a: &str,
+    b: &str,
+    subtract: bool,
+    precision: u8,
+    scale: u8,
+) -> Result<String, ExecutionError> {
+    let (a, b) = (coefficient(a, scale)?, coefficient(b, scale)?);
+    let result = if subtract { a - b } else { a + b };
+    if result.magnitude().to_string().len() > usize::from(precision) {
+        return Err(ExecutionError::ResultOutOfRange);
+    }
+    Ok(carrier(&result, scale))
+}
+
+/// A key whose text order is the numeric order of the decimal carrier
+/// `text`: a sign byte, then for a positive value its digit count and
+/// digits, for a negative one their nines' complement so that larger
+/// magnitudes sort first.
+pub(super) fn sort_key(text: &str, scale: u8) -> Result<String, ExecutionError> {
+    let value = coefficient(text, scale)?;
+    let digits = value.magnitude().to_string();
+    // At most 76 digits plus a scale of 76: three-digit lengths suffice.
+    let length = format!("{:03}", digits.len());
+    Ok(match value.sign() {
+        Sign::Minus => {
+            let complement = |s: &str| {
+                s.bytes()
+                    .map(|b| char::from(b'9' - (b - b'0')))
+                    .collect::<String>()
+            };
+            format!("0{}{}", complement(&length), complement(&digits))
+        }
+        Sign::NoSign => "1".to_owned(),
+        Sign::Plus => format!("2{length}{digits}"),
+    })
+}
+
+/// `sef_exact_combine(a, b, 'precision:scale:+|-')`: exact decimal sum or
+/// difference past DuckDB's 38 digits.
+pub(super) struct Combine;
+
+impl VArrowScalar for Combine {
+    type State = ();
+    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+        let (a, b, options) = (
+            strings(&input, 0)?,
+            strings(&input, 1)?,
+            strings(&input, 2)?,
+        );
+        let values = (0..input.num_rows())
+            .map(|i| {
+                if a.is_null(i) || b.is_null(i) || options.is_null(i) {
+                    return Ok(None);
+                }
+                let mut parts = options.value(i).split(':');
+                let (Some(precision), Some(scale), Some(op), None) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return Err(ExecutionError::Engine);
+                };
+                combine(
+                    a.value(i),
+                    b.value(i),
+                    match op {
+                        "+" => false,
+                        "-" => true,
+                        _ => return Err(ExecutionError::Engine),
+                    },
+                    precision.parse().map_err(|_| ExecutionError::Engine)?,
+                    scale.parse().map_err(|_| ExecutionError::Engine)?,
+                )
+                .map(Some)
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        Ok(Arc::new(StringArray::from(values)))
+    }
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(
+            vec![DataType::Utf8; 3],
+            DataType::Utf8,
+        )]
+    }
+}
+
+/// `sef_exact_sort_key(text, 'scale')`: the order-preserving key of a wide
+/// decimal carrier; NULL stays NULL so the query's NULLS policy applies.
+pub(super) struct SortKey;
+
+impl VArrowScalar for SortKey {
+    type State = ();
+    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+        let (text, scale) = (strings(&input, 0)?, strings(&input, 1)?);
+        let values = (0..input.num_rows())
+            .map(|i| {
+                if text.is_null(i) || scale.is_null(i) {
+                    return Ok(None);
+                }
+                sort_key(
+                    text.value(i),
+                    scale.value(i).parse().map_err(|_| ExecutionError::Engine)?,
+                )
+                .map(Some)
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        Ok(Arc::new(StringArray::from(values)))
+    }
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(
+            vec![DataType::Utf8; 2],
+            DataType::Utf8,
+        )]
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // A failure must fail the arithmetic property/test.
 mod tests {
