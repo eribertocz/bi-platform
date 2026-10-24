@@ -747,9 +747,7 @@ impl<'a> Validator<'a> {
                             owner,
                         );
                     }
-                    if measure.aggregation == AggregateFunction::Sum
-                        && (summed.is_none() || !numeric(&expr.value_type))
-                    {
+                    if summed.is_none() {
                         self.error(
                             ErrorCode::IncompatibleTypes,
                             owner,

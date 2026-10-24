@@ -42,7 +42,8 @@ fn rows() -> String {
         INSERT INTO lake.main.n38 VALUES
             (1, 'max', {M}), (2, 'max_mas', {M}), (3, 'max_mas', 0.01),
             (4, 'menos', -{M}), (5, 'menos', -0.01),
-            (6, 'cancela', {M}), (7, 'cancela', -{M}), (8, 'cancela', 0.01);
+            (6, 'cancela', {M}), (7, 'cancela', -{M}), (8, 'cancela', 0.01),
+            (9, 'motor', {M}), (10, 'motor', {M});
         INSERT INTO lake.main.ni VALUES
             (1, 'max_mas', 9223372036854775807), (2, 'max_mas', 1),
             (3, 'min_menos', -9223372036854775808), (4, 'min_menos', -1),
@@ -93,7 +94,12 @@ fn project() -> tempfile::TempDir {
         model(
             "n18",
             &["v"],
-            &[("suma", "SUM(n18.v)"), ("doble", "suma + suma")],
+            &[
+                ("suma", "SUM(n18.v)"),
+                ("doble", "suma + suma"),
+                ("mayor", "MAX(n18.v)"),
+                ("por_mayor", "suma * mayor"),
+            ],
         ),
     );
     write(
@@ -280,13 +286,25 @@ async fn the_owners_sum_is_exact_in_its_widened_type(pool: sqlx::PgPool) {
     let h = harness(pool).await;
     let ana = h.login().await;
     // The owner's stack: a DECIMAL(18,2) sum past 18 digits (#260).
-    let (status, body) = h.sum(&ana, "n18", &["suma", "doble"], "propietario").await;
+    let (status, body) = h
+        .sum(&ana, "n18", &["suma", "doble", "por_mayor"], "propietario")
+        .await;
     assert_eq!(status, StatusCode::OK, "{body:#}");
+    // A product of metrics keeps every digit too: DECIMAL(38,2) x
+    // DECIMAL(18,2) is DECIMAL(57,4), past DuckDB's native width.
     assert_eq!(
         answered(&body),
         (
-            vec!["DECIMAL(38,2)".to_owned(), "DECIMAL(39,2)".to_owned()],
-            vec![json!("10000000048735710.80"), json!("20000000097471421.60")],
+            vec![
+                "DECIMAL(38,2)".to_owned(),
+                "DECIMAL(39,2)".to_owned(),
+                "DECIMAL(57,4)".to_owned()
+            ],
+            vec![
+                json!("10000000048735710.80"),
+                json!("20000000097471421.60"),
+                json!("100000000487357107899999999512642.8920")
+            ],
         )
     );
     // Empty or all NULL: NULL; zeros: zero.
@@ -361,6 +379,11 @@ async fn a_sum_past_38_digits_is_a_typed_422_and_the_next_query_recovers(pool: s
         assert_eq!(events[0].0, "failure", "{caso}");
         assert!(events[0].1.is_some(), "{caso}: the decision taken names it");
     }
+    // Twice the largest overflows DuckDB's own 128-bit accumulator: an
+    // engine failure, never inferred to be a result out of range.
+    let (status, body) = h.sum(&ana, "n38", &["suma"], "motor").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body:#}");
+    assert_eq!(body["code"], "analytics_failed");
     // The next valid query is answered.
     let (status, _) = h.sum(&ana, "n38", &["suma"], "max").await;
     assert_eq!(status, StatusCode::OK);

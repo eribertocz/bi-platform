@@ -300,10 +300,10 @@ fn rescale(value: BigInt, from: u8, to: u8) -> Result<BigInt, ExecutionError> {
 }
 
 fn check_decimal(value: &BigInt, precision: u8) -> Result<(), ExecutionError> {
-    if value.to_string().trim_start_matches('-').len() > usize::from(precision) {
-        Err(ExecutionError::NumericOverflow)
-    } else {
+    if super::exact::within(value, precision) {
         Ok(())
+    } else {
+        Err(ExecutionError::NumericOverflow)
     }
 }
 

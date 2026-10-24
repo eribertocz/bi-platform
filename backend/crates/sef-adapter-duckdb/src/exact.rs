@@ -164,15 +164,10 @@ impl VArrowScalar for LocalDate {
     }
 }
 
-/// [`coefficient`], for the adapter's output conformance.
-pub(super) fn coefficient_of(text: &str, scale: u8) -> Result<BigInt, ExecutionError> {
-    coefficient(text, scale)
-}
-
 /// A decimal carrier as an integer coefficient at `scale` digits: `"12.3"`
 /// at scale 2 is 1230. A carrier never has more fractional digits than its
 /// certified scale; anything else is no decimal of this contract.
-fn coefficient(text: &str, scale: u8) -> Result<BigInt, ExecutionError> {
+pub(super) fn coefficient(text: &str, scale: u8) -> Result<BigInt, ExecutionError> {
     let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
     let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
     let unsigned = whole.strip_prefix('-').unwrap_or(whole);
@@ -201,24 +196,39 @@ fn carrier(coefficient: &BigInt, scale: u8) -> String {
     format!("{sign}{}.{}", &digits[..split], &digits[split..])
 }
 
-/// `a ± b` of two decimal carriers, exactly, at `scale` digits, within
-/// `precision` digits: what DuckDB cannot represent past 38 digits (#261).
+/// Whether `value` has at most `precision` digits: the one rule every
+/// exact precision check of this adapter applies (#261).
+pub(super) fn within(value: &BigInt, precision: u8) -> bool {
+    value.magnitude() < BigInt::from(10).pow(u32::from(precision)).magnitude()
+}
+
+/// `a ± b` or `a × b` of two decimal carriers of scales `sa` and `sb`,
+/// exactly, as a carrier of `scale` digits: what DuckDB cannot represent
+/// past 38 digits (#261). The result is not range-checked here: the
+/// adapter's output conformance checks it against its certified type, so
+/// a range failure is never an engine error.
 ///
 /// # Errors
-/// `ResultOutOfRange` when the exact result has more than `precision`
-/// digits; `SourceContract` for a malformed carrier.
+/// `SourceContract` for a malformed carrier or an impossible scale.
 pub(super) fn combine(
     a: &str,
     b: &str,
-    subtract: bool,
-    precision: u8,
-    scale: u8,
+    op: char,
+    (sa, sb, scale): (u8, u8, u8),
 ) -> Result<String, ExecutionError> {
-    let (a, b) = (coefficient(a, scale)?, coefficient(b, scale)?);
-    let result = if subtract { a - b } else { a + b };
-    if result.magnitude().to_string().len() > usize::from(precision) {
-        return Err(ExecutionError::ResultOutOfRange);
-    }
+    let (a, b) = (coefficient(a, sa)?, coefficient(b, sb)?);
+    let up = |v: BigInt, from: u8| -> Result<BigInt, ExecutionError> {
+        let by = scale
+            .checked_sub(from)
+            .ok_or(ExecutionError::SourceContract)?;
+        Ok(v * BigInt::from(10).pow(u32::from(by)))
+    };
+    let result = match op {
+        '+' => up(a, sa)? + up(b, sb)?,
+        '-' => up(a, sa)? - up(b, sb)?,
+        '*' if u16::from(sa) + u16::from(sb) == u16::from(scale) => a * b,
+        _ => return Err(ExecutionError::SourceContract),
+    };
     Ok(carrier(&result, scale))
 }
 
@@ -245,8 +255,8 @@ pub(super) fn sort_key(text: &str, scale: u8) -> Result<String, ExecutionError> 
     })
 }
 
-/// `sef_exact_combine(a, b, 'precision:scale:+|-')`: exact decimal sum or
-/// difference past DuckDB's 38 digits.
+/// `sef_exact_combine(a, b, 'precision:scale:+|-|*:left scale:right scale')`:
+/// exact decimal sum, difference or product past DuckDB's 38 digits.
 pub(super) struct Combine;
 
 impl VArrowScalar for Combine {
@@ -262,22 +272,24 @@ impl VArrowScalar for Combine {
                 if a.is_null(i) || b.is_null(i) || options.is_null(i) {
                     return Ok(None);
                 }
-                let mut parts = options.value(i).split(':');
-                let (Some(precision), Some(scale), Some(op), None) =
-                    (parts.next(), parts.next(), parts.next(), parts.next())
-                else {
+                // `precision:scale:op:left scale:right scale`; the precision
+                // is checked by the adapter on the output.
+                let parts = options.value(i).split(':').collect::<Vec<_>>();
+                let [_, scale, op, sa, sb] = parts.as_slice() else {
                     return Err(ExecutionError::Engine);
+                };
+                let number = |s: &str| s.parse::<u8>().map_err(|_| ExecutionError::Engine);
+                let op = match *op {
+                    "+" => '+',
+                    "-" => '-',
+                    "*" => '*',
+                    _ => return Err(ExecutionError::Engine),
                 };
                 combine(
                     a.value(i),
                     b.value(i),
-                    match op {
-                        "+" => false,
-                        "-" => true,
-                        _ => return Err(ExecutionError::Engine),
-                    },
-                    precision.parse().map_err(|_| ExecutionError::Engine)?,
-                    scale.parse().map_err(|_| ExecutionError::Engine)?,
+                    op,
+                    (number(sa)?, number(sb)?, number(scale)?),
                 )
                 .map(Some)
             })
@@ -342,20 +354,34 @@ mod tests {
     }
 
     proptest! {
-        /// Exact sums and differences of carriers equal integer arithmetic
-        /// on coefficients, and beyond the precision they are refused (#261).
+        /// Exact sums, differences and products of carriers equal integer
+        /// arithmetic on their coefficients (#261).
         #[test]
-        fn combine_is_integer_arithmetic_or_out_of_range(
-            a in up_to(39), b in up_to(39), subtract: bool, scale in 0_u8..6,
+        fn combine_is_integer_arithmetic(
+            a in up_to(38), b in up_to(38), op in prop::sample::select(vec!['+', '-', '*']),
+            sa in 0_u8..5, sb in 0_u8..5,
         ) {
-            let precision = 39_u8;
-            let expected = if subtract { &a - &b } else { &a + &b };
-            let got = combine(&carrier(&a, scale), &carrier(&b, scale), subtract, precision, scale);
-            if expected.magnitude().to_string().len() > usize::from(precision) {
-                prop_assert_eq!(got, Err(ExecutionError::ResultOutOfRange));
-            } else {
-                prop_assert_eq!(got, Ok(carrier(&expected, scale)));
-            }
+            let scale = if op == '*' { sa + sb } else { sa.max(sb) };
+            let up = |v: &BigInt, from: u8| v * BigInt::from(10).pow(u32::from(scale - from));
+            let expected = match op {
+                '+' => up(&a, sa) + up(&b, sb),
+                '-' => up(&a, sa) - up(&b, sb),
+                _ => &a * &b,
+            };
+            prop_assert_eq!(
+                combine(&carrier(&a, sa), &carrier(&b, sb), op, (sa, sb, scale)),
+                Ok(carrier(&expected, scale))
+            );
+        }
+
+        /// `within` is the digit count, exactly at the edge.
+        #[test]
+        fn within_counts_digits(precision in 1_u8..=76) {
+            let edge = BigInt::from(10).pow(u32::from(precision));
+            prop_assert!(within(&(&edge - 1), precision));
+            prop_assert!(within(&(1 - &edge), precision));
+            prop_assert!(!within(&edge, precision));
+            prop_assert!(!within(&-&edge, precision));
         }
 
         /// The sort key orders carriers exactly as their numeric values.

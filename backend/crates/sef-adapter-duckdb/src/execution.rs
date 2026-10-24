@@ -183,8 +183,9 @@ pub struct DuckDbPlan {
     certificate: Certificate,
     checks: Vec<String>,
     wide: Option<wide::Aggregation>,
-    /// Whether the plan aggregates with SUM (#261).
-    sums: bool,
+    /// Per block, the certified (precision, scale) of each decimal output
+    /// column, parsed once at lowering (#261).
+    decimals: BTreeMap<String, Vec<Option<(u8, u8)>>>,
     definitions: Vec<sef_exec_ir::ObjectRef>,
     output_grains: BTreeMap<String, Vec<RequestedAtom>>,
     metadata: BTreeMap<String, Vec<std::collections::HashMap<String, String>>>,
@@ -329,28 +330,12 @@ impl DuckDbPlan {
                 .register_scalar_function::<exact::SortKey>(&sort_key)
                 .map_err(|_| ExecutionError::Engine)?;
         }
-        if self
-            .sql
-            .iter()
-            .any(|(_, sql)| sql.contains("sef_exact_ratio("))
-            || self
-                .checks
-                .iter()
-                .any(|sql| sql.contains("sef_exact_ratio("))
-        {
+        if uses("sef_exact_ratio(") {
             connection
                 .register_scalar_function::<exact::Ratio>(&ratio)
                 .map_err(|_| ExecutionError::Engine)?;
         }
-        if self
-            .sql
-            .iter()
-            .any(|(_, sql)| sql.contains("sef_local_date("))
-            || self
-                .checks
-                .iter()
-                .any(|sql| sql.contains("sef_local_date("))
-        {
+        if uses("sef_local_date(") {
             connection
                 .register_scalar_function::<exact::LocalDate>(&local_date)
                 .map_err(|_| ExecutionError::Engine)?;
@@ -402,16 +387,14 @@ impl DuckDbPlan {
             let bound = statement_values(&statement, &values)?;
             let _ = statement
                 .stream_arrow(duckdb::params_from_iter(bound))
-                .map_err(|error| self.engine_failure(&error))?;
+                .map_err(|_| ExecutionError::Engine)?;
             let mut intermediate = Vec::new();
             let mut intermediate_bytes = 0_usize;
             let mut emitted = false;
             loop {
                 // Arrow's convenience iterator panics with backend details on
                 // fetch failure. The public fallible step keeps errors private.
-                let chunk = statement
-                    .step()
-                    .map_err(|error| self.engine_failure(&error))?;
+                let chunk = statement.step().map_err(|_| ExecutionError::Engine)?;
                 let Some(chunk) = chunk else {
                     break;
                 };
@@ -500,36 +483,21 @@ impl DuckDbPlan {
         ))
     }
 
-    /// The engine's failure, typed: its structured out-of-range error is a
-    /// result out of range only when the plan sums (#261). The driver's
-    /// error type is read, never its message.
-    fn engine_failure(&self, error: &duckdb::Error) -> ExecutionError {
-        match error {
-            duckdb::Error::DuckDBFailure(failure, _)
-                if self.sums
-                    && i64::from(failure.extended_code)
-                        == i64::from(duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_OUT_OF_RANGE) =>
-            {
-                ExecutionError::ResultOutOfRange
-            }
-            _ => ExecutionError::Engine,
-        }
-    }
-
     /// Every decimal output within its certified type, exactly (#261): a
-    /// carrier past 38 digits becomes Decimal256; a native decimal whose
-    /// value exceeds its certified precision is a result out of range.
+    /// carrier past 38 digits becomes Decimal256, and a value past its
+    /// certified precision is a result out of range. This exact check on
+    /// what the plan returned is the only source of that verdict: an
+    /// engine failure is never inferred to be one.
     fn conform(&self, block: &str, batch: &RecordBatch) -> Result<RecordBatch, ExecutionError> {
         use duckdb::arrow::array::{Array, Decimal128Array, Decimal256Array, StringArray};
         use duckdb::arrow::datatypes::{DataType, i256};
-        let metadata = self
-            .metadata
+        let types = self
+            .decimals
             .get(block)
             .ok_or(ExecutionError::InvalidCertificate)?;
-        if metadata.len() != batch.num_columns() {
+        if types.len() != batch.num_columns() {
             return Err(ExecutionError::SourceContract);
         }
-        let mut changed = false;
         let mut columns = batch.columns().to_vec();
         let mut fields = batch
             .schema()
@@ -537,18 +505,11 @@ impl DuckDbPlan {
             .iter()
             .map(|f| f.as_ref().clone())
             .collect::<Vec<_>>();
-        for (i, metadata) in metadata.iter().enumerate() {
-            let Some((precision, scale)) = metadata
-                .get("sef.value_type")
-                .and_then(|ty| ty.strip_prefix("DECIMAL("))
-                .and_then(|ty| ty.strip_suffix(')'))
-                .and_then(|ty| ty.split_once(','))
-                .and_then(|(p, s)| Some((p.parse::<u8>().ok()?, s.parse::<u8>().ok()?)))
-            else {
+        let mut changed = false;
+        for (i, ty) in types.iter().enumerate() {
+            let Some((precision, scale)) = *ty else {
                 continue;
             };
-            let limit = num_bigint::BigInt::from(10).pow(u32::from(precision));
-            let fits = |value: &num_bigint::BigInt| value.magnitude() < limit.magnitude();
             match columns[i].data_type() {
                 DataType::Utf8 if precision > 38 => {
                     let text = columns[i]
@@ -560,8 +521,8 @@ impl DuckDbPlan {
                             if text.is_null(row) {
                                 return Ok(None);
                             }
-                            let value = exact::coefficient_of(text.value(row), scale)?;
-                            if !fits(&value) {
+                            let value = exact::coefficient(text.value(row), scale)?;
+                            if !exact::within(&value, precision) {
                                 return Err(ExecutionError::ResultOutOfRange);
                             }
                             value
@@ -581,15 +542,14 @@ impl DuckDbPlan {
                     columns[i] = std::sync::Arc::new(array);
                     changed = true;
                 }
-                DataType::Decimal128(_, _) => {
+                DataType::Decimal128(_, _) if precision <= 38 => {
+                    let limit = 10_u128.pow(u32::from(precision));
                     let array = columns[i]
                         .as_any()
                         .downcast_ref::<Decimal128Array>()
                         .ok_or(ExecutionError::SourceContract)?;
-                    for value in array.iter().flatten() {
-                        if !fits(&num_bigint::BigInt::from(value)) {
-                            return Err(ExecutionError::ResultOutOfRange);
-                        }
+                    if array.iter().flatten().any(|v| v.unsigned_abs() >= limit) {
+                        return Err(ExecutionError::ResultOutOfRange);
                     }
                 }
                 _ => {}
@@ -717,7 +677,6 @@ pub fn lower(
         filter_targets: BTreeMap::new(),
         wide: None,
         carriers: BTreeMap::new(),
-        sums: false,
     };
     let mut ctes = Vec::new();
     for node in plan.graph.topological(&roots) {
@@ -808,7 +767,7 @@ pub fn lower(
             .map(|check| format!("WITH {} {check}", ctes.join(",\n")))
             .collect(),
         wide: lowering.wide,
-        sums: lowering.sums,
+        decimals: decimal_outputs(&metadata),
         definitions,
         output_grains: validated
             .query
@@ -819,6 +778,27 @@ pub fn lower(
         metadata,
         binding_key,
     })
+}
+
+/// The certified decimal type of every output column, from its metadata.
+fn decimal_outputs(metadata: &OutputMetadata) -> BTreeMap<String, Vec<Option<(u8, u8)>>> {
+    metadata
+        .iter()
+        .map(|(block, fields)| {
+            let types = fields
+                .iter()
+                .map(|field| {
+                    let (p, s) = field
+                        .get("sef.value_type")?
+                        .strip_prefix("DECIMAL(")?
+                        .strip_suffix(')')?
+                        .split_once(',')?;
+                    Some((p.parse().ok()?, s.parse().ok()?))
+                })
+                .collect();
+            (block.clone(), types)
+        })
+        .collect()
 }
 
 fn quote(name: &str) -> String {
@@ -1013,9 +993,6 @@ struct Lowering<'a> {
     /// Output selections carried as exact decimal text because their type
     /// exceeds DuckDB's 38 digits (#261), with their scale.
     carriers: BTreeMap<String, u8>,
-    /// Whether the plan aggregates with SUM: only then may the engine's
-    /// structured out-of-range error be a result out of range.
-    sums: bool,
 }
 
 /// The decimal type of `ty` when DuckDB cannot represent it natively.
@@ -1252,9 +1229,12 @@ impl Lowering<'_> {
                 left,
                 right,
                 contract,
-            } if contract.rounding.is_none()
-                && matches!(op, ArithmeticOp::Add | ArithmeticOp::Subtract) =>
-            {
+            } if contract.rounding.is_none() && !contract.explicit_narrowing => {
+                let scale_of = |side: &MetricExpr| match side.value_type {
+                    ValueType::Decimal(d) => Ok(d.scale()),
+                    ValueType::Integer { .. } => Ok(0),
+                    _ => Err(ExecutionError::Unsupported("wide metric operand")),
+                };
                 let carrier = |side: &MetricExpr| -> Result<String, ExecutionError> {
                     let sql = Self::metric(side)?;
                     Ok(if wide_decimal(&side.value_type).is_some() {
@@ -1263,13 +1243,22 @@ impl Lowering<'_> {
                         format!("CAST({sql} AS VARCHAR)")
                     })
                 };
+                let op = match op {
+                    ArithmeticOp::Add => "+",
+                    ArithmeticOp::Subtract => "-",
+                    ArithmeticOp::Multiply => "*",
+                    ArithmeticOp::Divide => {
+                        return Err(ExecutionError::Unsupported("wide metric division"));
+                    }
+                };
                 Ok(format!(
-                    "sef_exact_combine({}, {}, '{}:{}:{}')",
+                    "sef_exact_combine({}, {}, '{}:{}:{op}:{}:{}')",
                     carrier(left)?,
                     carrier(right)?,
                     ty.precision(),
                     ty.scale(),
-                    if *op == ArithmeticOp::Add { "+" } else { "-" }
+                    scale_of(left)?,
+                    scale_of(right)?
                 ))
             }
             _ => Err(ExecutionError::Unsupported("wide metric expression")),
@@ -2029,9 +2018,6 @@ impl Lowering<'_> {
                             "CAST(({expr} * {weight}) AS {})",
                             sql_type(&measure.value_type)?
                         );
-                    }
-                    if measure.aggregation == AggregateFunction::Sum {
-                        self.sums = true;
                     }
                     let function = match measure.aggregation {
                         AggregateFunction::Sum => "SUM",

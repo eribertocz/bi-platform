@@ -344,6 +344,105 @@ test('keyboard only: choose the model, toggle metrics and a breakdown, read the 
 });
 
 /**
+ * #261: a SUM wider than its DECIMAL(18, 2) source. Oracle, computed apart
+ * from the server with exact decimals: Norte's two rows of `grandes` in
+ * `semantic/ventas.sql`, 9999999999999999.99 + 48735710.81.
+ */
+const LARGE = {
+  option: 'Importes grandes · metrics/ventas_grandes.yaml',
+  model: 'metrics/ventas_grandes.yaml',
+  total: {
+    type: 'DECIMAL(38,2)',
+    value: '10000000048735710.80',
+    shown: '10.000.000.048.735.710,80',
+  },
+  doble: {
+    type: 'DECIMAL(39,2)',
+    value: '20000000097471421.60',
+    shown: '20.000.000.097.471.421,60',
+  },
+};
+
+test('a SUM beyond 18 digits: the real answer, every digit and its scale on screen', async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const network = watch(page);
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const metric = (name: string) => page.getByRole('checkbox', { name, exact: true });
+
+  await signIn(page, NORTE.user, NORTE.name);
+  await openExplore(page);
+  const model = page.getByLabel('Modelo');
+  await expect(model.getByRole('option', { name: LARGE.option, exact: true })).toHaveCount(1);
+  // The model, by keyboard: past `ventas`, the last one of the catalog.
+  await tabTo(page, model);
+  await page.keyboard.press('ArrowDown');
+  await expect(model).toHaveValue('metrics/ventas.yaml');
+  await settled(page, 1);
+  await page.keyboard.press('ArrowDown');
+  await expect(model).toHaveValue(LARGE.model);
+  // Its first selectable metric starts the question.
+  await expect(metric('doble')).toBeChecked();
+  await expect(kpi(page, 'doble')).toHaveText(LARGE.doble.shown);
+  await settled(page, 1);
+
+  // `total` next to it: the answer the page reads, observed on the network.
+  const both = page.waitForResponse((response) => {
+    const request = response.request();
+    if (request.method() !== 'POST') return false;
+    if (new URL(response.url()).pathname !== '/api/v1/semantic/query') return false;
+    const names = JSON.parse(request.postData() ?? '{}').query?.selections?.map(
+      (selection: { name: string }) => selection.name,
+    );
+    return names?.length === 2 && names.includes('total') && names.includes('doble');
+  });
+  await tabTo(page, metric('total'));
+  await page.keyboard.press('Space');
+  await expect(metric('total')).toBeChecked();
+  const response = await both;
+  expect(response.status()).toBe(200);
+  const sent: { model: string; query: { selections: { id: string; name: string }[] } } = JSON.parse(
+    response.request().postData()!,
+  );
+  expect(sent.model).toBe(LARGE.model);
+  const raw = await response.text();
+  // The exact decimals travel as JSON strings: never a number to round.
+  expect(raw).toContain(`"${LARGE.total.value}"`);
+  expect(raw).toContain(`"${LARGE.doble.value}"`);
+  const [block, ...others] = JSON.parse(raw).result.blocks;
+  expect(others).toEqual([]);
+  expect(block.row_count).toBe(1);
+  expect(block.rows).toHaveLength(1);
+  for (const name of ['total', 'doble'] as const) {
+    const id = sent.query.selections.find((selection) => selection.name === name)!.id;
+    const at = block.columns.findIndex(
+      (column: { selection_id: string }) => column.selection_id === id,
+    );
+    expect(block.columns[at]).toMatchObject({
+      kind: 'metric',
+      type: LARGE[name].type,
+      masked: false,
+    });
+    expect(block.rows[0][at]).toBe(LARGE[name].value);
+  }
+
+  // The KPI strip: every digit and the scale, grouped as es writes them.
+  await settled(page, 2);
+  await expect(kpi(page, 'total')).toHaveText(LARGE.total.shown);
+  await expect(kpi(page, 'doble')).toHaveText(LARGE.doble.shown);
+  await expect(page.getByRole('heading', { name: 'Recibo de los totales' })).toBeVisible();
+  await expect(page.locator('dt:text-is("Identificador") + dd code')).toHaveCount(1);
+  await noLeaks(page, SUR);
+  await axe(page);
+
+  onlySemantic(network.sent);
+  expect(network.concurrent()).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+/**
  * The 21 metrics of `semantic/project/metrics/ventas.yaml` the viewer may
  * select, in the catalog's order; `margen` (masked) is not among them.
  */

@@ -1,0 +1,37 @@
+version: '0.2.0.dev0'
+name: Importes grandes
+custom_extensions:
+  - vendor_name: bi-platform
+    data: '{"version": 1, "semantic_version": "0.1.0", "policies": [{"name": "zona", "dataset": "grandes", "enforcement": "mandatory", "predicate": "region = :department", "context": [{"name": "department", "type": "string", "sensitivity": "sensitive"}]}]}'
+datasets:
+  - name: grandes
+    source: lake.main.grandes
+    primary_key: [id]
+    fields:
+      - name: id
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: id
+      - name: region
+        dimension: {}
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: region
+      - name: importe
+        expression:
+          dialects:
+            - dialect: OSSIE_SQL_2026
+              expression: importe
+metrics:
+  - name: total
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(grandes.importe)
+  - name: doble
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: total + total
