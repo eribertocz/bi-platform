@@ -171,7 +171,7 @@ fn oracle_sales(data: &[(&str, &str, Option<i128>)], tenant: Option<&str>) -> Ve
         .into_iter()
         .map(|(region, sum)| {
             vec![
-                sum.map_or(Cell::Null, |value| Cell::Decimal(value, 18, 2)),
+                sum.map_or(Cell::Null, |value| Cell::Decimal(value, 38, 2)),
                 Cell::Text(region.into()),
             ]
         })
@@ -323,8 +323,8 @@ fn case_009_aggregates_before_alignment_and_preserves_absent_branches() {
             let g = gross.get(&key).copied();
             let r = refunds.get(&key).copied();
             vec![
-                g.map_or(Cell::Null, |v| Cell::Decimal(v, 18, 2)),
-                r.map_or(Cell::Null, |v| Cell::Decimal(v, 18, 2)),
+                g.map_or(Cell::Null, |v| Cell::Decimal(v, 38, 2)),
+                r.map_or(Cell::Null, |v| Cell::Decimal(v, 38, 2)),
                 g.zip(r)
                     .map_or(Cell::Null, |(g, r)| Cell::Decimal(g - r, 19, 2)),
                 Cell::Date(day),
@@ -376,9 +376,9 @@ fn case_005_multihop_matches_an_independent_integer_oracle() {
     assert_eq!(
         rows(&plan.execute(&conn, &SemanticContext::default()).unwrap()),
         vec![
-            vec![Cell::Decimal(201, 18, 2), Cell::Text("sur".into())],
+            vec![Cell::Decimal(201, 38, 2), Cell::Text("sur".into())],
             vec![
-                Cell::Decimal(9_007_199_254_740_893, 18, 2),
+                Cell::Decimal(9_007_199_254_740_893, 38, 2),
                 Cell::Text("norte".into())
             ],
         ]
@@ -793,7 +793,7 @@ fn metric_filter_order_offset_and_limit_follow_aggregation() {
                 .execute(&connection, &SemanticContext::default())
                 .unwrap()
         ),
-        vec![vec![Cell::Decimal(300, 18, 2), Cell::Text("c".into())]]
+        vec![vec![Cell::Decimal(300, 38, 2), Cell::Text("c".into())]]
     );
 }
 
@@ -1049,8 +1049,8 @@ fn physical_collation_never_merges_distinct_semantic_keys() {
     assert_eq!(
         result,
         vec![
-            vec![Cell::Decimal(100, 18, 2), Cell::Text("a".into())],
-            vec![Cell::Decimal(200, 18, 2), Cell::Text("A".into())]
+            vec![Cell::Decimal(100, 38, 2), Cell::Text("a".into())],
+            vec![Cell::Decimal(200, 38, 2), Cell::Text("A".into())]
         ]
     );
 }
@@ -1159,7 +1159,7 @@ fn initial_lowering_and_execution_latency() {
 }
 
 #[test]
-fn int64_and_timestamptz_remain_native_exact_arrow_types() {
+fn int64_sums_widen_to_decimal_and_timestamptz_stays_native() {
     let mut catalog = common::catalog(1);
     for column in &mut catalog.relations.get_mut("sales").unwrap().columns {
         if column.name == "amount" {
@@ -1185,8 +1185,9 @@ fn int64_and_timestamptz_remain_native_exact_arrow_types() {
                 .execute(&connection, &SemanticContext::default())
                 .unwrap()
         ),
+        // SUM over INT64 is certified DECIMAL(38,0) (#261): exact beyond 2^53.
         vec![vec![
-            Cell::Integer(9_007_199_254_740_995),
+            Cell::Decimal(9_007_199_254_740_995, 38, 0),
             Cell::Instant(123_456)
         ]]
     );

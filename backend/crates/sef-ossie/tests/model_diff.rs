@@ -176,11 +176,22 @@ fn an_expression_change_is_one_of_meaning_and_reaches_what_depends_on_it() {
         meaning(change(&changed, "metric", "importe")).contains(&Aspect::Contract),
         "{changed:#?}"
     );
-    // `doble` is defined on `importe`: unchanged itself, but affected.
-    let Change::Affected { through } = change(&changed, "metric", "doble") else {
-        panic!("doble: {changed:#?}");
+    // `doble` is defined on `importe`. MAX keeps the field's type while SUM
+    // widens it (#261), so its own derived type follows: a contract change.
+    assert_eq!(
+        meaning(change(&changed, "metric", "doble")),
+        BTreeSet::from([Aspect::Contract]),
+        "{changed:#?}"
+    );
+    // An expression change that keeps every type only affects `doble`.
+    let same_type = diff(
+        &model(SALES),
+        &model(&SALES.replace("SUM(sales.amount)", "SUM(sales.amount + sales.amount)")),
+    );
+    let Change::Affected { through } = change(&same_type, "metric", "doble") else {
+        panic!("doble: {same_type:#?}");
     };
-    assert!(names(through).contains("importe"), "{changed:#?}");
+    assert!(names(through).contains("importe"), "{same_type:#?}");
     // What does not read `amount` is untouched.
     assert!(
         changed

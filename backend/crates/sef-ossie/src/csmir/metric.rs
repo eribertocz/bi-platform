@@ -1356,7 +1356,17 @@ fn measure_type(
                     ),
                 ));
             }
-            (scalar.value_type.clone(), scalar.unit.clone())
+            // SUM certifies its exact result type (#261); MIN and MAX keep
+            // the type of their input.
+            let value_type = if aggregation == AggregateFunction::Sum {
+                scalar
+                    .value_type
+                    .sum_result()
+                    .ok_or_else(|| not_representable(&format!("{name}(…)")))?
+            } else {
+                scalar.value_type.clone()
+            };
+            (value_type, scalar.unit.clone())
         }
         (None, false) => return Err(not_representable(&format!("{name}(*)"))),
     })
