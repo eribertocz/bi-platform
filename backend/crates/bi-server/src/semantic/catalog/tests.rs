@@ -458,8 +458,15 @@ async fn global_conditions_fail_closed_and_bounded() {
         for_session(&down, session("lector", &[])).await,
         Err(CatalogError::Unavailable)
     );
-    // Every permit is back.
-    assert_eq!(busy.models.admission.available_permits(), 2);
+    // Every permit comes back: the work abandoned at its deadline releases
+    // its own when the native read it travels with ends, promptly.
+    let back = tokio::time::timeout(
+        Duration::from_secs(5),
+        busy.models.admission.acquire_many(2),
+    )
+    .await
+    .expect("every permit is released within the bound");
+    drop(back.unwrap());
 }
 
 /// The rows of the Issue behind a view that fails when anything reads a
