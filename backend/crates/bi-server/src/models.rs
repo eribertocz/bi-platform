@@ -728,10 +728,24 @@ pub(crate) struct Compiled {
 }
 
 /// Why a project file did not compile: the model's name when the document
-/// could be read, and diagnostics located in the file.
+/// could be read, diagnostics located in the file, and what failed.
 pub(crate) struct Rejected {
     pub(crate) name: Option<String>,
     pub(crate) diagnostics: Vec<ModelDiagnostic>,
+    pub(crate) cause: Cause,
+}
+
+/// What made a file not compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cause {
+    /// The file's own definition: its document, a source it names that the
+    /// engine does not have or cannot type, or its semantics. The same file
+    /// fails the same way on every attempt.
+    Definition,
+    /// The file could not be read safely and whole.
+    Unread,
+    /// The engine could not describe a source.
+    Engine,
 }
 
 /// Compiles one file of `metrics/` against the engine's catalog.
@@ -742,18 +756,21 @@ pub(crate) fn compile(
     let text = file.text.map_err(|d| Rejected {
         name: None,
         diagnostics: vec![d],
+        cause: Cause::Unread,
     })?;
     let loaded = sef_ossie::load::load(&text).map_err(|ds| Rejected {
         name: None,
         diagnostics: ds.into_iter().map(Into::into).collect(),
+        cause: Cause::Definition,
     })?;
     let name = Some(loaded.model.name.clone());
     let catalog = match catalog(&loaded.model, conn) {
         Ok(catalog) => catalog,
-        Err(diagnostics) => {
+        Err((diagnostics, cause)) => {
             return Err(Rejected {
                 name,
                 diagnostics: located(&text, diagnostics),
+                cause,
             });
         }
     };
@@ -784,6 +801,7 @@ pub(crate) fn compile(
         Err(ds) => Err(Rejected {
             name,
             diagnostics: located(&text, ds.into_iter().map(Into::into).collect()),
+            cause: Cause::Definition,
         }),
     }
 }
@@ -849,12 +867,16 @@ fn compile_file(file: ProjectFile, conn: &bi_runtime::duckdb::Connection) -> Mod
 
 /// The exact source types of every dataset, or one diagnostic per source
 /// the engine cannot describe.
+/// The engine's description of every source `model` reads; else its
+/// diagnostics and whether the engine itself failed (rather than the model
+/// naming a source it does not have or cannot type).
 fn catalog(
     model: &sef_ossie::SemanticModel,
     conn: &bi_runtime::duckdb::Connection,
-) -> Result<Catalog, Vec<ModelDiagnostic>> {
+) -> Result<Catalog, (Vec<ModelDiagnostic>, Cause)> {
     let mut catalog = Catalog::default();
     let mut diagnostics = vec![];
+    let mut cause = Cause::Definition;
     for (i, dataset) in model.datasets.iter().enumerate() {
         match sef_adapter_duckdb::describe(conn, &dataset.source) {
             Ok(relation) => {
@@ -868,7 +890,10 @@ fn catalog(
                         "unsupported_source_type"
                     }
                     sef_adapter_duckdb::CatalogError::Engine(_)
-                    | sef_adapter_duckdb::CatalogError::InvalidHandle => "catalog_unavailable",
+                    | sef_adapter_duckdb::CatalogError::InvalidHandle => {
+                        cause = Cause::Engine;
+                        "catalog_unavailable"
+                    }
                 };
                 let mut d = ModelDiagnostic::error(code, error.to_string());
                 d.path = format!("/datasets/{i}/source");
@@ -879,7 +904,7 @@ fn catalog(
     if diagnostics.is_empty() {
         Ok(catalog)
     } else {
-        Err(diagnostics)
+        Err((diagnostics, cause))
     }
 }
 

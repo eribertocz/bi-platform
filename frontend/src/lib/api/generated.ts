@@ -1453,7 +1453,7 @@ export interface operations {
           'application/problem+json': components['schemas']['Problem'];
         };
       };
-      /** @description `policies_invalid`, `catalog_unavailable` (proyecto, archivo o motor no utilizables) o `audit_unavailable`: sin catálogo, ni parcial */
+      /** @description `policies_invalid`, `catalog_unavailable` (proyecto o uno de sus archivos ilegible, o motor no utilizable) o `audit_unavailable`: sin catálogo. Un archivo cuya definición no compila queda fuera del catálogo, sin nombrarlo ni contarlo, y los demás modelos siguen disponibles */
       503: {
         headers: {
           [name: string]: unknown;

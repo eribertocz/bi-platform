@@ -317,7 +317,7 @@ const SEMANTIC_CATALOG: (&str, &str) = ("semantic_catalog", "semantic:catalog");
         (status = 200, description = "Modelos, métricas y campos que las consultas de esta sesión aceptan, cada uno con lo que puede hacer con ellos; solo después de confirmar su evento de auditoría. Vacío es válido y no indica qué se oculta. Sin proyecto, `not_configured` vacío", body = SemanticCatalog),
         (status = 401, description = "Sin sesión", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "`models_busy`: sin capacidad para compilar el proyecto", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "`policies_invalid`, `catalog_unavailable` (proyecto, archivo o motor no utilizables) o `audit_unavailable`: sin catálogo, ni parcial", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "`policies_invalid`, `catalog_unavailable` (proyecto o uno de sus archivos ilegible, o motor no utilizable) o `audit_unavailable`: sin catálogo. Un archivo cuya definición no compila queda fuera del catálogo, sin nombrarlo ni contarlo, y los demás modelos siguen disponibles", body = Problem, content_type = "application/problem+json"),
         (status = 504, description = "`semantic_timeout`: el catálogo superó el tiempo máximo", body = Problem, content_type = "application/problem+json")
     )
 )]
