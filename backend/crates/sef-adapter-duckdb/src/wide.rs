@@ -207,6 +207,7 @@ impl Aggregation {
                         "sef.value_type".into(),
                         format!("DECIMAL({},{})", ty.precision(), ty.scale()),
                     );
+                    let bound = super::exact::bound(ty.precision());
                     let values = groups
                         .values()
                         .map(|sums| {
@@ -215,8 +216,9 @@ impl Aggregation {
                                 .map(|value| {
                                     // A sum past its certified precision is
                                     // a result out of range (#261).
-                                    check_decimal(value, ty.precision())
-                                        .map_err(|_| ExecutionError::ResultOutOfRange)?;
+                                    if !super::exact::within_bound(value, &bound) {
+                                        return Err(ExecutionError::ResultOutOfRange);
+                                    }
                                     value
                                         .to_string()
                                         .parse::<i256>()

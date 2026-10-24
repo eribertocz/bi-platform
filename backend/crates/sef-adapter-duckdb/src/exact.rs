@@ -196,10 +196,36 @@ fn carrier(coefficient: &BigInt, scale: u8) -> String {
     format!("{sign}{}.{}", &digits[..split], &digits[split..])
 }
 
-/// Whether `value` has at most `precision` digits: the one rule every
-/// exact precision check of this adapter applies (#261).
+/// `10^precision`: the first magnitude a value of `precision` digits
+/// cannot reach. Computed once per column, never per value.
+pub(super) fn bound(precision: u8) -> BigInt {
+    BigInt::from(10).pow(u32::from(precision))
+}
+
+/// Whether `value` stays below `bound`: the one rule every exact
+/// precision check of this adapter applies (#261).
+pub(super) fn within_bound(value: &BigInt, bound: &BigInt) -> bool {
+    value.magnitude() < bound.magnitude()
+}
+
+/// Whether `value` has at most `precision` digits.
 pub(super) fn within(value: &BigInt, precision: u8) -> bool {
-    value.magnitude() < BigInt::from(10).pow(u32::from(precision)).magnitude()
+    within_bound(value, &bound(precision))
+}
+
+/// The coefficient and scale of any decimal carrier, whatever its scale.
+fn parsed(text: &str) -> Result<(BigInt, u8), ExecutionError> {
+    let scale = text.split_once('.').map_or(0, |(_, f)| f.len());
+    let scale = u8::try_from(scale).map_err(|_| ExecutionError::SourceContract)?;
+    Ok((coefficient(text, scale)?, scale))
+}
+
+/// The exact order of two decimal carriers of any scales.
+pub(super) fn compare(a: &str, b: &str) -> Result<std::cmp::Ordering, ExecutionError> {
+    let ((a, sa), (b, sb)) = (parsed(a)?, parsed(b)?);
+    let at = |v: BigInt, from: u8, to: u8| v * BigInt::from(10).pow(u32::from(to - from));
+    let to = sa.max(sb);
+    Ok(at(a, sa, to).cmp(&at(b, sb, to)))
 }
 
 /// `a ± b` or `a × b` of two decimal carriers of scales `sa` and `sb`,
@@ -255,6 +281,9 @@ pub(super) fn sort_key(text: &str, scale: u8) -> Result<String, ExecutionError> 
     })
 }
 
+/// The operator and the (left, right, result) scales of a combination.
+type CombineOptions = (char, (u8, u8, u8));
+
 /// `sef_exact_combine(a, b, 'precision:scale:+|-|*:left scale:right scale')`:
 /// exact decimal sum, difference or product past DuckDB's 38 digits.
 pub(super) struct Combine;
@@ -267,10 +296,17 @@ impl VArrowScalar for Combine {
             strings(&input, 1)?,
             strings(&input, 2)?,
         );
+        // The options are a literal of the plan: parsed once per batch.
+        let mut parsed_options: Option<(String, CombineOptions)> = None;
         let values = (0..input.num_rows())
             .map(|i| {
                 if a.is_null(i) || b.is_null(i) || options.is_null(i) {
                     return Ok(None);
+                }
+                if let Some((text, (op, scales))) = &parsed_options
+                    && text == options.value(i)
+                {
+                    return combine(a.value(i), b.value(i), *op, *scales).map(Some);
                 }
                 // `precision:scale:op:left scale:right scale`; the precision
                 // is checked by the adapter on the output.
@@ -285,13 +321,9 @@ impl VArrowScalar for Combine {
                     "*" => '*',
                     _ => return Err(ExecutionError::Engine),
                 };
-                combine(
-                    a.value(i),
-                    b.value(i),
-                    op,
-                    (number(sa)?, number(sb)?, number(scale)?),
-                )
-                .map(Some)
+                let scales = (number(sa)?, number(sb)?, number(scale)?);
+                parsed_options = Some((options.value(i).to_owned(), (op, scales)));
+                combine(a.value(i), b.value(i), op, scales).map(Some)
             })
             .collect::<Result<Vec<_>, ExecutionError>>()?;
         Ok(Arc::new(StringArray::from(values)))
@@ -300,6 +332,32 @@ impl VArrowScalar for Combine {
         vec![ArrowFunctionSignature::exact(
             vec![DataType::Utf8; 3],
             DataType::Utf8,
+        )]
+    }
+}
+
+/// `sef_exact_cmp(a, b)`: -1, 0 or 1 by the exact order of two decimal
+/// carriers; NULL when either is NULL, as SQL comparisons are.
+pub(super) struct Compare;
+
+impl VArrowScalar for Compare {
+    type State = ();
+    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+        let (a, b) = (strings(&input, 0)?, strings(&input, 1)?);
+        let values = (0..input.num_rows())
+            .map(|i| {
+                if a.is_null(i) || b.is_null(i) {
+                    return Ok(None);
+                }
+                compare(a.value(i), b.value(i)).map(|order| Some(order as i64))
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        Ok(Arc::new(Int64Array::from(values)))
+    }
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(
+            vec![DataType::Utf8; 2],
+            DataType::Int64,
         )]
     }
 }
