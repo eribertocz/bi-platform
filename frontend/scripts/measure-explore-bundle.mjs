@@ -44,7 +44,7 @@ function measure(keys) {
     files,
   };
 }
-const chart = 'src/lib/features/explore/echarts.ts';
+const chart = 'src/lib/features/semantic/bars.ts';
 if (!manifest[chart]?.isDynamicEntry) throw new Error('ECharts must have its own dynamic entry.');
 const initial = dependencies(root);
 if (initial.has(chart)) throw new Error('ECharts must stay behind a dynamic import.');

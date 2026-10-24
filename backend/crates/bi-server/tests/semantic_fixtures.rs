@@ -1,13 +1,15 @@
-//! The frontend's semantic fixtures (#141) are real answers of
-//! `POST /api/v1/semantic/query` (#138): the real router, sessions and audit
-//! on PostgreSQL, DuckDB with the Issue's rows and an Ossie project on disk.
+//! The frontend's semantic fixtures (#141, #147) are real answers of
+//! `POST /api/v1/semantic/query` (#138) and `GET /api/v1/semantic/catalog`
+//! (#140): the real router, sessions and audit on PostgreSQL, DuckDB with
+//! the Issue's rows and an Ossie project on disk.
 //!
 //! `BI_UPDATE_FIXTURES=1` rewrites them, formatted as the frontend's
 //! Prettier formats JSON. Otherwise each committed file must equal a fresh
 //! answer once the values that change on every run (the receipt's ID, read
 //! times, protected fingerprints and evidence, keyed per instance) are
 //! replaced, on both sides, by a placeholder of their format: any drift of
-//! the contract or of a value fails.
+//! the contract or of a value fails. The catalog holds no such value and is
+//! compared whole.
 #![cfg(all(feature = "postgres-tests", feature = "dev-auth"))]
 
 use std::path::PathBuf;
@@ -342,6 +344,26 @@ impl Harness {
         answer
     }
 
+    /// The catalog the session may use, as the client reads it.
+    async fn catalog(&self, cookie: &str) -> Value {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::get("/api/v1/semantic/catalog")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let catalog: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{catalog:#}");
+        catalog
+    }
+
     async fn answer(&self, cookie: &str, body: &Value) -> (StatusCode, Value) {
         let response = self
             .app
@@ -440,8 +462,13 @@ fn normalized(answer: &Value) -> Value {
     answer
 }
 
-/// Writes `answer` as `<name>.json`, or checks it against the committed one.
+/// Writes `answer` as `<name>.json`, or checks it against the committed one
+/// once `normalize` has replaced its volatile values on both sides.
 fn fixture(name: &str, answer: &Value) {
+    compared(name, answer, normalized);
+}
+
+fn compared(name: &str, answer: &Value, normalize: fn(&Value) -> Value) {
     let path = fixtures_dir().join(format!("{name}.json"));
     if std::env::var_os("BI_UPDATE_FIXTURES").is_some_and(|v| v == "1") {
         std::fs::create_dir_all(fixtures_dir()).unwrap();
@@ -456,8 +483,8 @@ fn fixture(name: &str, answer: &Value) {
     });
     let committed: Value = serde_json::from_str(&committed).unwrap();
     assert_eq!(
-        normalized(&committed),
-        normalized(answer),
+        normalize(&committed),
+        normalize(answer),
         "{name}.json differs from the real answer; regenerate with BI_UPDATE_FIXTURES=1 \
          if the change is intended"
     );
@@ -579,6 +606,25 @@ async fn real_semantic_answers_match_the_frontend_fixtures(pool: sqlx::PgPool) {
     let h = harness(pool).await;
     let ana = h.login("ana").await;
     let ventas = "metrics/ventas.yaml";
+
+    // What the viewer may use of the project, in the order of its files:
+    // nothing volatile, compared whole. Restricted and confidential members
+    // never appear, and neither does a sentinel.
+    let catalog = h.catalog(&ana).await;
+    assert_eq!(catalog["status"], "ready", "{catalog:#}");
+    let models: Vec<_> = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["model"].as_str().unwrap())
+        .collect();
+    assert!(models.contains(&ventas), "{models:?}");
+    let text = catalog.to_string();
+    assert!(
+        !text.contains("centinela") && !text.contains("nota"),
+        "{text}"
+    );
+    compared("catalog", &catalog, Value::clone);
 
     // The Issue's oracle by region, ordered by region.
     let region = h

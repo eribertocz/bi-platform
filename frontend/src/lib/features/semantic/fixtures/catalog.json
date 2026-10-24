@@ -1,0 +1,521 @@
+{
+  "status": "ready",
+  "models": [
+    {
+      "model": "metrics/anchos.yaml",
+      "name": "Ventas",
+      "metrics": [
+        {
+          "name": "cubo",
+          "type": "DECIMAL(56,6)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "filas",
+          "type": "INT64",
+          "unit": {
+            "kind": "count"
+          },
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "importe_total",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "margen",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "masked",
+            "filter": false,
+            "group": false,
+            "order": false
+          }
+        }
+      ],
+      "fields": [
+        {
+          "name": "ventas.ciudad",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.instante",
+          "type": "TIMESTAMPTZ",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.region",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        }
+      ]
+    },
+    {
+      "model": "metrics/extremos.yaml",
+      "name": "Extremos",
+      "metrics": [
+        {
+          "name": "entero_max",
+          "type": "INT64",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "entero_min",
+          "type": "INT64",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "preciso_total",
+          "type": "DECIMAL(38,10)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        }
+      ],
+      "fields": [
+        {
+          "name": "extremos.grupo",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        }
+      ]
+    },
+    {
+      "model": "metrics/instantes.yaml",
+      "name": "Ventas",
+      "metrics": [
+        {
+          "name": "filas",
+          "type": "INT64",
+          "unit": {
+            "kind": "count"
+          },
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "importe_total",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "margen",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "masked",
+            "filter": false,
+            "group": false,
+            "order": false
+          }
+        },
+        {
+          "name": "ultimo_instante",
+          "type": "TIMESTAMPTZ",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        }
+      ],
+      "fields": [
+        {
+          "name": "ventas.ciudad",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.instante",
+          "type": "TIMESTAMPTZ",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.mes",
+          "type": "DATE",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.region",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        }
+      ]
+    },
+    {
+      "model": "metrics/obsoletas.yaml",
+      "name": "Ventas",
+      "metrics": [
+        {
+          "name": "antigua",
+          "type": "INT64",
+          "unit": {
+            "kind": "count"
+          },
+          "lifecycle": {
+            "state": "deprecated",
+            "sunset": "2027-06-30",
+            "replacement": null
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "filas",
+          "type": "INT64",
+          "unit": {
+            "kind": "count"
+          },
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "importe_total",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "margen",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "masked",
+            "filter": false,
+            "group": false,
+            "order": false
+          }
+        },
+        {
+          "name": "vieja",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "deprecated",
+            "sunset": "2027-01-01",
+            "replacement": "importe_total"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        }
+      ],
+      "fields": [
+        {
+          "name": "ventas.ciudad",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.instante",
+          "type": "TIMESTAMPTZ",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.region",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        }
+      ]
+    },
+    {
+      "model": "metrics/ventas.yaml",
+      "name": "Ventas",
+      "metrics": [
+        {
+          "name": "filas",
+          "type": "INT64",
+          "unit": {
+            "kind": "count"
+          },
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "importe_total",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": false,
+            "order": true
+          }
+        },
+        {
+          "name": "margen",
+          "type": "DECIMAL(18,2)",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "masked",
+            "filter": false,
+            "group": false,
+            "order": false
+          }
+        }
+      ],
+      "fields": [
+        {
+          "name": "ventas.ciudad",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.instante",
+          "type": "TIMESTAMPTZ",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        },
+        {
+          "name": "ventas.region",
+          "type": "VARCHAR",
+          "unit": null,
+          "lifecycle": {
+            "state": "active"
+          },
+          "capabilities": {
+            "select": "values",
+            "filter": true,
+            "group": true,
+            "order": true
+          }
+        }
+      ]
+    }
+  ]
+}

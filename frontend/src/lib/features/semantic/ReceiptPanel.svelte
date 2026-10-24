@@ -1,11 +1,16 @@
 <script lang="ts">
   import { instantText, type SemanticNotice, type SemanticReceipt } from './exact';
-  let { receipt, notices }: { receipt: SemanticReceipt; notices: SemanticNotice[] } = $props();
+  let {
+    receipt,
+    notices,
+    title = 'Recibo de la respuesta',
+  }: { receipt: SemanticReceipt; notices: SemanticNotice[]; title?: string } = $props();
+  const id = $props.id();
   const segment = (id: string) => id.split(/[/:]/).at(-1) ?? id;
 </script>
 
-<section class="panel" aria-labelledby="receipt-title">
-  <h2 id="receipt-title">Recibo de la respuesta</h2>
+<section class="panel" aria-labelledby={`${id}-title`}>
+  <h2 id={`${id}-title`}>{title}</h2>
   {#if notices.length > 0}
     <ul class="mb-4" aria-label="Avisos">
       {#each notices as notice (notice.metric)}

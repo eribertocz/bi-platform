@@ -252,3 +252,13 @@ describe('receipt', () => {
     expect(document.body.textContent).not.toMatch(/SELECT|viewer|analyst|lake\.main/);
   });
 });
+
+describe('columns are addressed by their selection', () => {
+  it('shows no table when two columns share one', () => {
+    const twin = first(region);
+    twin.columns[2]!.selection_id = twin.columns[1]!.selection_id;
+    render(ResultTable, { block: twin, caption: 'Repetidas' });
+    expect(screen.getByRole('alert').textContent).toContain('no se muestra ninguna cifra');
+    expect(screen.queryByRole('table')).toBeNull();
+  });
+});

@@ -56,14 +56,26 @@ jobs:
           LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi:bi@127.0.0.1:18072/bi backend/target/debug/bi-server migrate
           psql postgres://bi:bi@127.0.0.1:18072/bi -v ON_ERROR_STOP=1 -c "CREATE ROLE bi_runtime LOGIN PASSWORD 'runtime-test-only'"
           psql postgres://bi:bi@127.0.0.1:18072/bi -v ON_ERROR_STOP=1 -f backend/crates/bi-server/admin/runtime-grants.sql
-          LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi_runtime:runtime-test-only@127.0.0.1:18072/bi BI_PUBLIC_ORIGIN=http://127.0.0.1:18070 BI_BIND_ADDR=127.0.0.1:18070 BI_STATIC_DIR=frontend/build BI_ANALYTICS=off BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test BI_OIDC_CLIENT_ID=bi-platform backend/target/debug/bi-server > /tmp/oidc-server.log 2>&1 &
+          # The rows of #147's oracle in the server's own DuckLake, written once
+          # with the same DuckDB version (test-only tool, not shipped).
+          python3 -m venv /tmp/seed && /tmp/seed/bin/pip install --quiet duckdb==1.5.6
+          mkdir -p /tmp/oidc-lake
+          /tmp/seed/bin/python - <<'PY'
+          import duckdb
+          c = duckdb.connect()
+          c.execute("INSTALL ducklake; INSTALL postgres; LOAD ducklake; LOAD postgres;")
+          c.execute("ATTACH 'ducklake:postgres:dbname=bi_lake_catalog host=127.0.0.1 port=18072 user=bi password=bi' AS lake (DATA_PATH '/tmp/oidc-lake/', METADATA_SCHEMA 'e2e')")
+          c.execute(open('frontend/e2e/semantic/ventas.sql').read())
+          PY
+          # Governed project with region row policy from the verified claim.
+          LD_LIBRARY_PATH=/tmp/oidc-duckdb BI_DATABASE_URL=postgres://bi_runtime:runtime-test-only@127.0.0.1:18072/bi BI_PUBLIC_ORIGIN=http://127.0.0.1:18070 BI_BIND_ADDR=127.0.0.1:18070 BI_STATIC_DIR=frontend/build BI_OIDC_ISSUER=http://127.0.0.1:18071/realms/bi-test BI_OIDC_CLIENT_ID=bi-platform BI_OIDC_ATTRIBUTE_CLAIMS=department BI_PROJECT_DIR=frontend/e2e/semantic/project BI_LAKE_CATALOG='dbname=bi_lake_catalog host=127.0.0.1 port=18072 user=bi password=bi' BI_LAKE_METADATA_SCHEMA=e2e BI_LAKE_DATA_PATH=/tmp/oidc-lake backend/target/debug/bi-server > /tmp/oidc-server.log 2>&1 &
           for attempt in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:18070/health/ready >/dev/null; then exit 0; fi
             sleep 2
           done
           exit 1
-      - name: Corporate login, session, logout, keyboard and axe
-        run: npm run test:e2e -- e2e/oidc.spec.ts
+      - name: Corporate login, semantic Explorar A/B, logout, keyboard and axe
+        run: npm run test:e2e -- e2e/oidc.spec.ts e2e/explore.spec.ts
         working-directory: frontend
         env:
           BI_E2E_BASE_URL: http://127.0.0.1:18070
