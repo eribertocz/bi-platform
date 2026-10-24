@@ -4,6 +4,12 @@ name: dependencies
 # crate (backend/deny.toml) and known vulnerabilities of every frontend
 # package. Runs when dependencies change and daily, because advisories are
 # published without any change on our side.
+#
+# A pull request answers for what it changes: licenses, bans and sources
+# always; known vulnerabilities only when it changes dependencies. An
+# advisory published against what main already has is caught by the daily
+# run and fixed by its own pull request (Dependabot), never by stopping
+# unrelated work (#128).
 on:
   # Sin filtro de rutas: cargo-deny y npm-audit son checks obligatorios de
   # main (protección de rama) y deben reportar en todo PR.
@@ -40,6 +46,24 @@ jobs:
       CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
     steps:
       - uses: actions/checkout@v7
+        with:
+          # A pull request is checked out as its merge commit: the first
+          # parent is the base it merges into.
+          fetch-depth: 2
+      - name: Do known vulnerabilities apply to this change?
+        id: scope
+        working-directory: .
+        env:
+          EVENT: ${{ github.event_name }}
+        # Fails closed: when the change cannot be told, everything is checked.
+        run: |
+          advisories=true
+          if [ "$EVENT" = "pull_request" ] && changed=$(git diff --name-only HEAD^1 HEAD) &&
+            ! grep -qE '^(backend/(.+/)?Cargo\.toml|backend/Cargo\.lock|backend/deny\.toml|\.github/workflows/dependencies\.yml)$' <<< "$changed"
+          then
+            advisories=false
+          fi
+          echo "advisories=$advisories" >> "$GITHUB_OUTPUT"
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install cargo-deny (pinned release, verified checksum)
@@ -50,7 +74,10 @@ jobs:
           echo "${CARGO_DENY_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" --strip-components=1
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - run: cargo deny --locked check
+      - if: steps.scope.outputs.advisories == 'true'
+        run: cargo deny --locked check
+      - if: steps.scope.outputs.advisories != 'true'
+        run: cargo deny --locked check bans licenses sources
 
   npm-audit:
     runs-on: ubuntu-24.04
@@ -60,9 +87,29 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Do known vulnerabilities apply to this change?
+        id: scope
+        working-directory: .
+        env:
+          EVENT: ${{ github.event_name }}
+        # Fails closed: when the change cannot be told, everything is checked.
+        run: |
+          advisories=true
+          if [ "$EVENT" = "pull_request" ] && changed=$(git diff --name-only HEAD^1 HEAD) &&
+            ! grep -qE '^(frontend/package(-lock)?\.json|\.github/workflows/dependencies\.yml)$' <<< "$changed"
+          then
+            advisories=false
+          fi
+          echo "advisories=$advisories" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
+        if: steps.scope.outputs.advisories == 'true'
         with:
           node-version: '24.21.0'
       # Every package, not --omit=dev: the app is a static build, so all of
       # them are devDependencies, including the code bundled into it.
-      - run: npm audit
+      - if: steps.scope.outputs.advisories == 'true'
+        run: npm audit
+      - if: steps.scope.outputs.advisories != 'true'
+        run: echo "No frontend dependency changed; main is audited daily and Dependabot opens its fixes."
