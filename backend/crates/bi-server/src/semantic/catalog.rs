@@ -364,8 +364,10 @@ async fn projected(
         .map_err(|_| CatalogError::Unavailable)?
 }
 
-/// Compiles every file, then projects each model. A file that does not
-/// compile makes the whole catalog unavailable: no partial catalog.
+/// Compiles every file, then projects each model. A file whose own
+/// definition does not compile is left out whole, unnamed and uncounted
+/// (#259): the valid models stay usable. A file that cannot be read or a
+/// source the engine cannot describe makes the whole catalog unavailable.
 fn project_files(
     files: Vec<ProjectFile>,
     conn: &bi_runtime::duckdb::Connection,
@@ -386,8 +388,11 @@ fn project_files(
         }
         let reference = format!("metrics/{}", file.name);
         work.compiled += 1;
-        let file = models::compile(file, conn).map_err(|_| CatalogError::Unavailable)?;
-        compiled.push((reference, file));
+        match models::compile(file, conn) {
+            Ok(file) => compiled.push((reference, file)),
+            Err(rejected) if rejected.cause == models::Cause::Definition => {}
+            Err(_) => return Err(CatalogError::Unavailable),
+        }
     }
     let principal = access::principal(&access.members, &session.user, &session.groups);
     let mut catalog = SessionCatalog { models: Vec::new() };

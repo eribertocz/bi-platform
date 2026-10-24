@@ -725,9 +725,7 @@ async fn assert_failed(h: &Harness, cookie: &str, status: StatusCode, code: &str
 }
 
 #[sqlx::test(migrations = false)]
-async fn invalid_policies_or_members_and_a_file_that_fails_to_compile_answer_neutrally(
-    pool: PgPool,
-) {
+async fn invalid_policies_fail_whole_and_files_that_do_not_compile_are_left_out(pool: PgPool) {
     let h = harness(pool).await;
     let ana = h.login("ana").await;
     let unavailable = StatusCode::SERVICE_UNAVAILABLE;
@@ -742,12 +740,33 @@ async fn invalid_policies_or_members_and_a_file_that_fails_to_compile_answer_neu
     assert_failed(&h, &ana, unavailable, "policies_invalid").await;
     h.write("policies/members.yaml", MEMBERS);
 
-    // One file that does not compile: no partial catalog of the others.
+    // A file whose definition does not compile is left out whole, unnamed
+    // and uncounted (#259): the valid model answers exactly as without it.
     h.write("metrics/rota.yaml", BROKEN);
-    assert_failed(&h, &ana, unavailable, "catalog_unavailable").await;
-    std::fs::remove_file(h.project.path().join("metrics/rota.yaml")).unwrap();
-    // An unreadable model and a project without its folder alike.
+    let since = h.head().await;
+    let mixed = h.catalog(&ana).await;
+    assert_listed(&mixed);
+    assert_eq!(mixed.body, viewer_catalog());
+    assert_no_sentinel(
+        "mixed",
+        &String::from_utf8_lossy(&mixed.bytes),
+        h.project.path(),
+    );
+    assert!(!String::from_utf8_lossy(&mixed.bytes).contains("rota"));
+    assert_catalog_event(&h.only_event_since(since).await, "success", "ana");
+    // Every file invalid: a configured project with nothing usable, never
+    // a denial and never `not_configured`.
     h.write("metrics/ventas.yaml", "name: [secreto_centinela");
+    let since = h.head().await;
+    let empty = h.catalog(&ana).await;
+    assert_listed(&empty);
+    assert_eq!(empty.body, json!({ "status": "ready", "models": [] }));
+    assert_catalog_event(&h.only_event_since(since).await, "success", "ana");
+    std::fs::remove_file(h.project.path().join("metrics/rota.yaml")).unwrap();
+    // A file that cannot be read, and a project without its folder, still
+    // fail whole: they are no definition of a file.
+    h.write("metrics/ventas.yaml", MODEL);
+    std::fs::create_dir(h.project.path().join("metrics/carpeta.yaml")).unwrap();
     assert_failed(&h, &ana, unavailable, "catalog_unavailable").await;
     std::fs::remove_dir_all(h.project.path().join("metrics")).unwrap();
     assert_failed(&h, &ana, unavailable, "catalog_unavailable").await;

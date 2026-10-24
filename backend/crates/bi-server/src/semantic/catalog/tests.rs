@@ -376,26 +376,75 @@ async fn row_policies_decide_with_the_verified_context_only() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_file_that_does_not_compile_leaves_no_partial_catalog() {
+async fn a_file_that_does_not_compile_is_left_out_whole_and_unnamed() {
     let p = project(&sales(), MEMBERS);
     let state = state(p.path(), analytics().await);
-    let before = catalog_of(&state, "lector").await;
-    // A second file with an error whose diagnostic carries a sentinel.
-    let broken = "version: '0.2.0.dev0'\nname: Rota\ndatasets:\n  - name: rota\n    source: lake.main.diagnostico_centinela\n    primary_key: [id]\n    fields:\n      - name: id\n        expression:\n          dialects:\n            - dialect: OSSIE_SQL_2026\n              expression: id\nmetrics: []\n";
-    std::fs::write(p.path().join("metrics/rota.yaml"), broken).unwrap();
+    let mut before = Vec::new();
     for user in ["lector", "jefa", "inspector"] {
-        let failed = for_session(&state, session(user, &[])).await;
-        assert_eq!(failed, Err(CatalogError::Unavailable), "{user}");
-        assert!(!format!("{failed:?}").contains("centinela"));
+        before.push(catalog_of(&state, user).await);
     }
-    // Fixed, it answers again; broken again, the old catalog never returns.
-    std::fs::remove_file(p.path().join("metrics/rota.yaml")).unwrap();
-    assert_eq!(catalog_of(&state, "lector").await, before);
+    // A source the engine does not have, and a document that does not
+    // parse: each with sentinels in its name, path and diagnostic.
+    std::fs::write(
+        p.path().join("metrics/rota_centinela.yaml"),
+        unknown_source(),
+    )
+    .unwrap();
+    std::fs::write(
+        p.path().join("metrics/yaml_centinela.yaml"),
+        "name: [diagnostico_centinela",
+    )
+    .unwrap();
+    for (user, expected) in ["lector", "jefa", "inspector"].iter().zip(&before) {
+        let mixed = catalog_of(&state, user).await;
+        assert_eq!(
+            &mixed, expected,
+            "{user}: exactly what the valid files give"
+        );
+        // Nothing of the files left out: their names, paths or diagnostics.
+        let text = mixed.to_string();
+        for leak in [
+            "diagnostico_centinela",
+            "rota_centinela",
+            "yaml_centinela",
+            "Rota",
+        ] {
+            assert!(!text.contains(leak), "{user}: {leak}");
+        }
+    }
+    // Repaired, nothing changes for the valid model.
+    std::fs::remove_file(p.path().join("metrics/rota_centinela.yaml")).unwrap();
+    assert_eq!(catalog_of(&state, "lector").await, before[0]);
+    // The valid file broken too: a configured project with nothing usable.
     std::fs::write(p.path().join("metrics/ventas.yaml"), "name: [").unwrap();
+    assert_eq!(
+        for_session(&state, session("lector", &[])).await,
+        Ok(SessionCatalog { models: Vec::new() })
+    );
+    // Repaired: it returns, for whom it is authorized.
+    std::fs::write(p.path().join("metrics/ventas.yaml"), sales()).unwrap();
+    assert_eq!(catalog_of(&state, "lector").await, before[0]);
+}
+
+/// A model whose source the engine does not have: its own definition fails.
+fn unknown_source() -> String {
+    "version: '0.2.0.dev0'\nname: Rota\ndatasets:\n  - name: rota\n    source: lake.main.diagnostico_centinela\n    primary_key: [id]\n    fields:\n      - name: id\n        expression:\n          dialects:\n            - dialect: OSSIE_SQL_2026\n              expression: id\nmetrics: []\n".to_owned()
+}
+
+/// A file that cannot be read safely is no definition error: the catalog
+/// fails whole, never by leaving that file out.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_file_still_fails_the_whole_catalog() {
+    let p = project(&sales(), MEMBERS);
+    let state = state(p.path(), analytics().await);
+    // A directory where a file is expected: it cannot be read as one.
+    std::fs::create_dir(p.path().join("metrics/carpeta.yaml")).unwrap();
     assert_eq!(
         for_session(&state, session("lector", &[])).await,
         Err(CatalogError::Unavailable)
     );
+    std::fs::remove_dir(p.path().join("metrics/carpeta.yaml")).unwrap();
+    assert!(for_session(&state, session("lector", &[])).await.is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -792,4 +841,33 @@ async fn a_deadline_during_the_projection_keeps_its_decisions() {
         }
     }
     assert!(kept, "no deadline fell during the projection");
+}
+
+/// Invalid files never change what the session is announced: adding,
+/// renaming or multiplying them, of either kind, within the bounds.
+#[test]
+fn invalid_files_never_change_what_is_announced() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _context = rt.enter();
+    let analytics = rt.block_on(analytics());
+    let baseline = {
+        let p = project(&sales(), MEMBERS);
+        let state = state(p.path(), analytics.clone());
+        rt.block_on(for_session(&state, session("lector", &[])))
+            .unwrap()
+    };
+    let invalid = prop::collection::btree_map("[a-z]{3,10}", any::<bool>(), 0..5);
+    proptest!(ProptestConfig::with_cases(16), |(files in invalid)| {
+        let p = project(&sales(), MEMBERS);
+        for (name, parses) in &files {
+            let text = if *parses { unknown_source() } else { format!("name: [{name}_centinela") };
+            std::fs::write(p.path().join(format!("metrics/x_{name}.yaml")), text).unwrap();
+        }
+        let state = state(p.path(), analytics.clone());
+        let mixed = rt.block_on(for_session(&state, session("lector", &[])));
+        prop_assert_eq!(mixed, Ok(baseline.clone()));
+    });
 }
