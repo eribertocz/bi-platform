@@ -1,0 +1,77 @@
+{
+  "result": {
+    "blocks": [
+      {
+        "block_id": "query",
+        "columns": [
+          {
+            "selection_id": "r",
+            "kind": "dimension",
+            "id": "project-file-76656e7461732e79616d6c/dimension/ventas.region",
+            "type": "VARCHAR",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "t",
+            "kind": "metric",
+            "id": "project-file-76656e7461732e79616d6c/metric/importe_total",
+            "type": "DECIMAL(18,2)",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          }
+        ],
+        "rows": [["Norte", "100.30"]],
+        "row_count": 1,
+        "limit": 1
+      }
+    ]
+  },
+  "receipt": {
+    "id": "run:c709be4abb75b7b4c956ccd1462145ebb42f2f1cf0958cbc278086f06b005e45",
+    "version": "bi-run-receipt/1",
+    "query": {
+      "encoding": "sef-canonical-cbor-v1",
+      "sqir": "830a7273656d616e7469632d71756572792d736574a26473716972820663302e3166626c6f636b73820781830a7473656d616e7469632d71756572792d626c6f636ba7656c696d6974820c8203016666696c746572810b666f6666736574810b68626c6f636b5f69648206657175657279686f726465725f6279820781830a6a6f726465722d7465726da3656e756c6c738206646c61737469646972656374696f6e830a6e736f72742d646972656374696f6ea16776617269616e74820669617363656e64696e676c73656c656374696f6e5f6964820661726a73656c656374696f6e73820782830a6973656c656374696f6ea2646974656d830a7373656c656374696f6e2e64696d656e73696f6ea16964696d656e73696f6e830a737175616c69666965642d64696d656e73696f6ea265726f6c65738208806964696d656e73696f6e8206783b70726f6a6563742d66696c652d373636353665373436313733326537393631366436632f64696d656e73696f6e2f76656e7461732e726567696f6e6c73656c656374696f6e5f696482066172830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783870726f6a6563742d66696c652d373636353665373436313733326537393631366436632f6d65747269632f696d706f7274655f746f74616c6c73656c656374696f6e5f69648206617475706f73745f6167677265676174655f66696c746572810b"
+    },
+    "fingerprints": {
+      "query": "sef-sha256-v1:eb95c2aaa20a55162bf8b8927062eb1112d2773896b94c9310f21b2fd4b58077",
+      "model": "model-hmac-sha256-v1:020299103f756cea7f1af74d02acd8a883b7ef6c66586cd2f9b47f2e61dec0a4",
+      "plan": "plan-hmac-sha256-v1:8899e4508c26d93300880b21200d6cd690723bbc492efb81eac1c3ac4522eee6",
+      "decision": "decision-hmac-sha256-v1:ce353d6b29cdc4d3f2cf5b64273a3afd94a3d6de3a387ca160c5207eaae20c33",
+      "policies": "policies-hmac-sha256-v1:cf48f50014b933c1a35494f11ff9df4634a7d6a461298a261593e348cbc774be",
+      "context": "ctx-hmac-sha256-v1:9840bf3db7bf8805619b4f4d7bdda9c2d7f1b01bbf2a24bff423c96948bd4847"
+    },
+    "definitions": [
+      {
+        "id": "project-file-76656e7461732e79616d6c/dimension/ventas.region",
+        "content": "sef-sha256-v1:f247e5353efb2c4a3fd1beec1a3558309d4e201d10b25e764ed557feeaf228ea"
+      },
+      {
+        "id": "project-file-76656e7461732e79616d6c/metric/importe_total",
+        "content": "sef-sha256-v1:54c6d22866cddf2793910584d2c5dcdf939b04a06fa2933968ff6de060977954"
+      }
+    ],
+    "versions": {
+      "engine": "v1.5.6",
+      "adapter": "0.1.0",
+      "capability_profile": "duckdb-seir-0.2",
+      "tzdb": "2025b"
+    },
+    "sources": [
+      {
+        "dataset": "project-file-76656e7461732e79616d6c/dataset/ventas",
+        "data_snapshot": null,
+        "source_refreshed_at": null
+      }
+    ],
+    "evidence": "ev-hmac-sha256-v1:f7bdf9d0d9dc1fef624bf4c85417fdc6e977bcf15eb248f506f694997ed576f8",
+    "read_started_at": "2026-10-24T14:30:32.117315200Z",
+    "read_finished_at": "2026-10-24T14:30:32.126816300Z"
+  },
+  "notices": []
+}

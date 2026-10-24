@@ -1,0 +1,90 @@
+{
+  "result": {
+    "blocks": [
+      {
+        "block_id": "query",
+        "columns": [
+          {
+            "selection_id": "v",
+            "kind": "metric",
+            "id": "project-file-6f62736f6c657461732e79616d6c/metric/vieja",
+            "type": "DECIMAL(18,2)",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "a",
+            "kind": "metric",
+            "id": "project-file-6f62736f6c657461732e79616d6c/metric/antigua",
+            "type": "INT64",
+            "nullable": true,
+            "unit": {
+              "kind": "count"
+            },
+            "timezone": null,
+            "masked": false
+          }
+        ],
+        "rows": [["300.30", "4"]],
+        "row_count": 1,
+        "limit": null
+      }
+    ]
+  },
+  "receipt": {
+    "id": "run:32a6a689df7847b0e1c42e315af8655f2758cea3feeea3c3abee0757602a2c41",
+    "version": "bi-run-receipt/1",
+    "query": {
+      "encoding": "sef-canonical-cbor-v1",
+      "sqir": "830a7273656d616e7469632d71756572792d736574a26473716972820663302e3166626c6f636b73820781830a7473656d616e7469632d71756572792d626c6f636ba7656c696d6974810b6666696c746572810b666f6666736574810b68626c6f636b5f69648206657175657279686f726465725f62798207806a73656c656374696f6e73820782830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783670726f6a6563742d66696c652d366636323733366636633635373436313733326537393631366436632f6d65747269632f7669656a616c73656c656374696f6e5f696482066176830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783870726f6a6563742d66696c652d366636323733366636633635373436313733326537393631366436632f6d65747269632f616e74696775616c73656c656374696f6e5f69648206616175706f73745f6167677265676174655f66696c746572810b"
+    },
+    "fingerprints": {
+      "query": "sef-sha256-v1:2ad1a84deb666f51125fec0d28ff9a9362d01a6d31d86b499b5b940c1fcee793",
+      "model": "model-hmac-sha256-v1:6ed0133b55aca39ff0428a32a0e3f92d5e83857c87096781568c5e9f12472598",
+      "plan": "plan-hmac-sha256-v1:cae7c43743360f15a289b07242c6dac9e67c4b771dfbf2c1ccd2e7bedcc5f59f",
+      "decision": "decision-hmac-sha256-v1:0a03c4b3d6d0a70c28c4486f74b3f831f0fa4e6ea87e9c992e9b770b88f85f13",
+      "policies": "policies-hmac-sha256-v1:cf48f50014b933c1a35494f11ff9df4634a7d6a461298a261593e348cbc774be",
+      "context": "ctx-hmac-sha256-v1:9840bf3db7bf8805619b4f4d7bdda9c2d7f1b01bbf2a24bff423c96948bd4847"
+    },
+    "definitions": [
+      {
+        "id": "project-file-6f62736f6c657461732e79616d6c/metric/antigua",
+        "content": "sef-sha256-v1:1076874cd90813dcfca6a77a0897a9a7ba80b9d9d844d416167fad2e33dea40e"
+      },
+      {
+        "id": "project-file-6f62736f6c657461732e79616d6c/metric/vieja",
+        "content": "sef-sha256-v1:441d9ab94155df69044ed9a9254a12f017dd4e7650c1da3849dff6af8862b7ad"
+      }
+    ],
+    "versions": {
+      "engine": "v1.5.6",
+      "adapter": "0.1.0",
+      "capability_profile": "duckdb-seir-0.2",
+      "tzdb": "2025b"
+    },
+    "sources": [
+      {
+        "dataset": "project-file-6f62736f6c657461732e79616d6c/dataset/ventas",
+        "data_snapshot": null,
+        "source_refreshed_at": null
+      }
+    ],
+    "evidence": "ev-hmac-sha256-v1:160062012e6bd7a4d63268b00889dc18fa7cb964950b3f222a1f8d3243532b93",
+    "read_started_at": "2026-10-24T14:30:32.041251300Z",
+    "read_finished_at": "2026-10-24T14:30:32.047750300Z"
+  },
+  "notices": [
+    {
+      "metric": "project-file-6f62736f6c657461732e79616d6c/metric/antigua",
+      "sunset": "2027-06-30",
+      "replacement": null
+    },
+    {
+      "metric": "project-file-6f62736f6c657461732e79616d6c/metric/vieja",
+      "sunset": "2027-01-01",
+      "replacement": "project-file-6f62736f6c657461732e79616d6c/metric/importe_total"
+    }
+  ]
+}

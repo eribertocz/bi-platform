@@ -1,0 +1,63 @@
+{
+  "result": {
+    "blocks": [
+      {
+        "block_id": "query",
+        "columns": [
+          {
+            "selection_id": "c",
+            "kind": "metric",
+            "id": "project-file-616e63686f732e79616d6c/metric/cubo",
+            "type": "DECIMAL(56,6)",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          }
+        ],
+        "rows": [["9027027.009000"]],
+        "row_count": 1,
+        "limit": null
+      }
+    ]
+  },
+  "receipt": {
+    "id": "run:b8e8475da0758f8466ab34410c37ac7532cbb7062b5cebbf9a72bf398993ca72",
+    "version": "bi-run-receipt/1",
+    "query": {
+      "encoding": "sef-canonical-cbor-v1",
+      "sqir": "830a7273656d616e7469632d71756572792d736574a26473716972820663302e3166626c6f636b73820781830a7473656d616e7469632d71756572792d626c6f636ba7656c696d6974810b6666696c746572810b666f6666736574810b68626c6f636b5f69648206657175657279686f726465725f62798207806a73656c656374696f6e73820781830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206782f70726f6a6563742d66696c652d363136653633363836663733326537393631366436632f6d65747269632f6375626f6c73656c656374696f6e5f69648206616375706f73745f6167677265676174655f66696c746572810b"
+    },
+    "fingerprints": {
+      "query": "sef-sha256-v1:1b43e08dc08735c37f5b7c393c69cff02ad6dfc129ad65e2d83015366da072f0",
+      "model": "model-hmac-sha256-v1:65abc1242feea45133e45783c9ff25774e4e6b1be85694f08e140cd335294b73",
+      "plan": "plan-hmac-sha256-v1:1b0a9d5f47027322137425a8895db318a64a7f838bbfd7318e0780baf4062334",
+      "decision": "decision-hmac-sha256-v1:5ce8bb8dbad426771cc7f776b80c9a5cb3491940e8416e4573a46f21a7240167",
+      "policies": "policies-hmac-sha256-v1:431d32cd919b6eef9e0ea5ef72b5ac720ddcd617fa1a272b6eea0f3f130d21ce",
+      "context": "ctx-hmac-sha256-v1:1a4aa2b95c178ad380d862d41118882e14c8e43b02038241f35af3b92aaa761d"
+    },
+    "definitions": [
+      {
+        "id": "project-file-616e63686f732e79616d6c/metric/cubo",
+        "content": "sef-sha256-v1:853f6ff45b0deaf3234bb4f7c7f2631801fbe90fd9cf378838afda0713cf7b0d"
+      }
+    ],
+    "versions": {
+      "engine": "v1.5.6",
+      "adapter": "0.1.0",
+      "capability_profile": "duckdb-seir-0.2",
+      "tzdb": "2025b"
+    },
+    "sources": [
+      {
+        "dataset": "project-file-616e63686f732e79616d6c/dataset/ventas",
+        "data_snapshot": null,
+        "source_refreshed_at": null
+      }
+    ],
+    "evidence": "ev-hmac-sha256-v1:56e308ec6100695580e6f280233fca17b57d0e2b18c6c7dfd69d9fbc78453790",
+    "read_started_at": "2026-10-24T17:28:02.527173600Z",
+    "read_finished_at": "2026-10-24T17:28:02.533282900Z"
+  },
+  "notices": []
+}

@@ -1,0 +1,96 @@
+{
+  "result": {
+    "blocks": [
+      {
+        "block_id": "query",
+        "columns": [
+          {
+            "selection_id": "m",
+            "kind": "time_dimension",
+            "id": "project-file-696e7374616e7465732e79616d6c/dimension/ventas.mes",
+            "type": "DATE",
+            "nullable": true,
+            "unit": null,
+            "timezone": "America/La_Paz",
+            "masked": false
+          },
+          {
+            "selection_id": "u",
+            "kind": "metric",
+            "id": "project-file-696e7374616e7465732e79616d6c/metric/ultimo_instante",
+            "type": "TIMESTAMPTZ",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "f",
+            "kind": "metric",
+            "id": "project-file-696e7374616e7465732e79616d6c/metric/filas",
+            "type": "INT64",
+            "nullable": true,
+            "unit": {
+              "kind": "count"
+            },
+            "timezone": null,
+            "masked": false
+          }
+        ],
+        "rows": [
+          ["2025-12-01", "2026-01-01T00:00:00Z", "2"],
+          ["2026-01-01", "2026-01-02T00:00:00Z", "2"]
+        ],
+        "row_count": 2,
+        "limit": 1000
+      }
+    ]
+  },
+  "receipt": {
+    "id": "run:f5bb137a294bbc238c0421b775be0907f94e043657cc517f01f7bb83e17e2724",
+    "version": "bi-run-receipt/1",
+    "query": {
+      "encoding": "sef-canonical-cbor-v1",
+      "sqir": "830a7273656d616e7469632d71756572792d736574a26473716972820663302e3166626c6f636b73820781830a7473656d616e7469632d71756572792d626c6f636ba7656c696d6974820c82031903e86666696c746572810b666f6666736574810b68626c6f636b5f69648206657175657279686f726465725f6279820781830a6a6f726465722d7465726da3656e756c6c738206646c61737469646972656374696f6e830a6e736f72742d646972656374696f6ea16776617269616e74820669617363656e64696e676c73656c656374696f6e5f69648206616d6a73656c656374696f6e73820783830a6973656c656374696f6ea2646974656d830a781873656c656374696f6e2e74696d652d64696d656e73696f6ea16474696d65830a781874696d652d64696d656e73696f6e2d73656c656374696f6ea465677261696e830a6a74696d652d677261696ea16776617269616e748206656d6f6e74686863616c656e646172810b6874696d657a6f6e65810b6964696d656e73696f6e830a737175616c69666965642d64696d656e73696f6ea265726f6c65738208806964696d656e73696f6e8206783e70726f6a6563742d66696c652d363936653733373436313665373436353733326537393631366436632f64696d656e73696f6e2f76656e7461732e6d65736c73656c656374696f6e5f69648206616d830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206784070726f6a6563742d66696c652d363936653733373436313665373436353733326537393631366436632f6d65747269632f756c74696d6f5f696e7374616e74656c73656c656374696f6e5f696482066175830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783670726f6a6563742d66696c652d363936653733373436313665373436353733326537393631366436632f6d65747269632f66696c61736c73656c656374696f6e5f69648206616675706f73745f6167677265676174655f66696c746572810b"
+    },
+    "fingerprints": {
+      "query": "sef-sha256-v1:74a30fa1d57f6ac85d94e2cbe220f40d645a3c524499169a3863b670a0ddf250",
+      "model": "model-hmac-sha256-v1:e70bdf7ce34badb93b3ae17ba5e25945573e986a47d1874870e5a0fd3743efa1",
+      "plan": "plan-hmac-sha256-v1:94eb6ad17d6cb7d7709fd840dc8cfb5fb044e7d0d0072b34eaf0d63cfc170665",
+      "decision": "decision-hmac-sha256-v1:e169d7a4f3c324e981daba97c6a7edb3f311ec3207b1dbf59e555a06aa5aef98",
+      "policies": "policies-hmac-sha256-v1:cf48f50014b933c1a35494f11ff9df4634a7d6a461298a261593e348cbc774be",
+      "context": "ctx-hmac-sha256-v1:9840bf3db7bf8805619b4f4d7bdda9c2d7f1b01bbf2a24bff423c96948bd4847"
+    },
+    "definitions": [
+      {
+        "id": "project-file-696e7374616e7465732e79616d6c/dimension/ventas.mes",
+        "content": "sef-sha256-v1:3482909d11d638269e51b2854169811bc003276a440c2baa1e9ae8a759171364"
+      },
+      {
+        "id": "project-file-696e7374616e7465732e79616d6c/metric/filas",
+        "content": "sef-sha256-v1:632477bf1463998372c1e34d2192363b33f4764c21efc4cb6795f0daf1a7065a"
+      },
+      {
+        "id": "project-file-696e7374616e7465732e79616d6c/metric/ultimo_instante",
+        "content": "sef-sha256-v1:1c2eac39ae89883af528b2006cc924665fea9cec7697800d0e06fee946a9b1d7"
+      }
+    ],
+    "versions": {
+      "engine": "v1.5.6",
+      "adapter": "0.1.0",
+      "capability_profile": "duckdb-seir-0.2",
+      "tzdb": "2025b"
+    },
+    "sources": [
+      {
+        "dataset": "project-file-696e7374616e7465732e79616d6c/dataset/ventas",
+        "data_snapshot": null,
+        "source_refreshed_at": null
+      }
+    ],
+    "evidence": "ev-hmac-sha256-v1:2043fb9e651465768c403413652af517db77d9a3eb0386ac8a7f3dafe1a015e2",
+    "read_started_at": "2026-10-24T14:30:31.938686400Z",
+    "read_finished_at": "2026-10-24T14:30:31.951895Z"
+  },
+  "notices": []
+}

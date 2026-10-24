@@ -598,8 +598,11 @@ async fn the_byte_budget_and_the_deadline_are_honored(pool: PgPool) {
     let elapsed = started.elapsed();
     println!("deadline {tight:?} under a held lock: {elapsed:?}");
     assert_eq!(outcome.unwrap_err(), PageError::DeadlineExceeded);
+    // PostgreSQL also enforces what is left, as a whole number of
+    // milliseconds: it may cancel a fraction of a millisecond early.
     assert!(
-        elapsed >= tight && elapsed < tight + Duration::from_millis(500),
+        elapsed >= tight.saturating_sub(Duration::from_millis(5))
+            && elapsed < tight + Duration::from_millis(500),
         "{elapsed:?}"
     );
     assert_eq!(

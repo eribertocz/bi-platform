@@ -1,0 +1,115 @@
+{
+  "result": {
+    "blocks": [
+      {
+        "block_id": "query",
+        "columns": [
+          {
+            "selection_id": "g",
+            "kind": "dimension",
+            "id": "project-file-65787472656d6f732e79616d6c/dimension/extremos.grupo",
+            "type": "VARCHAR",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "max",
+            "kind": "metric",
+            "id": "project-file-65787472656d6f732e79616d6c/metric/entero_max",
+            "type": "INT64",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "min",
+            "kind": "metric",
+            "id": "project-file-65787472656d6f732e79616d6c/metric/entero_min",
+            "type": "INT64",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          },
+          {
+            "selection_id": "p",
+            "kind": "metric",
+            "id": "project-file-65787472656d6f732e79616d6c/metric/preciso_total",
+            "type": "DECIMAL(38,10)",
+            "nullable": true,
+            "unit": null,
+            "timezone": null,
+            "masked": false
+          }
+        ],
+        "rows": [
+          [
+            "A",
+            "9007199254740993",
+            "-9223372036854775808",
+            "9999999999999999999999999999.9999999998"
+          ],
+          ["B", "9223372036854775807", "9223372036854775807", "-12345.6789012345"],
+          ["C", null, null, null],
+          [null, "42", "42", "0.0000000001"]
+        ],
+        "row_count": 4,
+        "limit": 1000
+      }
+    ]
+  },
+  "receipt": {
+    "id": "run:6657b3b8be1a92c16f2f534e13672e8a96ce7ba64f9f3773233549201db9d3a1",
+    "version": "bi-run-receipt/1",
+    "query": {
+      "encoding": "sef-canonical-cbor-v1",
+      "sqir": "830a7273656d616e7469632d71756572792d736574a26473716972820663302e3166626c6f636b73820781830a7473656d616e7469632d71756572792d626c6f636ba7656c696d6974820c82031903e86666696c746572810b666f6666736574810b68626c6f636b5f69648206657175657279686f726465725f6279820781830a6a6f726465722d7465726da3656e756c6c738206646c61737469646972656374696f6e830a6e736f72742d646972656374696f6ea16776617269616e74820669617363656e64696e676c73656c656374696f6e5f6964820661676a73656c656374696f6e73820784830a6973656c656374696f6ea2646974656d830a7373656c656374696f6e2e64696d656e73696f6ea16964696d656e73696f6e830a737175616c69666965642d64696d656e73696f6ea265726f6c65738208806964696d656e73696f6e8206784070726f6a6563742d66696c652d36353738373437323635366436663733326537393631366436632f64696d656e73696f6e2f65787472656d6f732e677275706f6c73656c656374696f6e5f696482066167830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783970726f6a6563742d66696c652d36353738373437323635366436663733326537393631366436632f6d65747269632f656e7465726f5f6d61786c73656c656374696f6e5f69648206636d6178830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783970726f6a6563742d66696c652d36353738373437323635366436663733326537393631366436632f6d65747269632f656e7465726f5f6d696e6c73656c656374696f6e5f69648206636d696e830a6973656c656374696f6ea2646974656d830a7073656c656374696f6e2e6d6574726963a1666d65747269638206783c70726f6a6563742d66696c652d36353738373437323635366436663733326537393631366436632f6d65747269632f7072656369736f5f746f74616c6c73656c656374696f6e5f69648206617075706f73745f6167677265676174655f66696c746572810b"
+    },
+    "fingerprints": {
+      "query": "sef-sha256-v1:0e4728e691bbca8f0e9f059a142a1e24ca0cedb242ddccfb3f1166f38f2ddb98",
+      "model": "model-hmac-sha256-v1:1cf297fca7d411500943fa00c2fae8cde2b2b426dfe1c5b3a12c74c482b9fd46",
+      "plan": "plan-hmac-sha256-v1:55895debb54d2596c4a678a5199348f74fc766a41eadb76143298d459244c861",
+      "decision": "decision-hmac-sha256-v1:d0c55d17c33251951883247894c1338dbc12401f4d18d1488e2c134a55946e50",
+      "policies": "policies-hmac-sha256-v1:cf48f50014b933c1a35494f11ff9df4634a7d6a461298a261593e348cbc774be",
+      "context": "ctx-hmac-sha256-v1:9840bf3db7bf8805619b4f4d7bdda9c2d7f1b01bbf2a24bff423c96948bd4847"
+    },
+    "definitions": [
+      {
+        "id": "project-file-65787472656d6f732e79616d6c/dimension/extremos.grupo",
+        "content": "sef-sha256-v1:766f5a53f86a8e84f97e5d3ea1c0606452ceecc65a9b2e0fe1b91f4eab4b025b"
+      },
+      {
+        "id": "project-file-65787472656d6f732e79616d6c/metric/entero_max",
+        "content": "sef-sha256-v1:2b223307651cc49244104a8f46f3bd9263c9b72e0c7439cc2adb557ba0f33818"
+      },
+      {
+        "id": "project-file-65787472656d6f732e79616d6c/metric/entero_min",
+        "content": "sef-sha256-v1:63506b8aa079ba6612b5665ee8b68b6d3ed50de556257b3d679a9a64acbfb04d"
+      },
+      {
+        "id": "project-file-65787472656d6f732e79616d6c/metric/preciso_total",
+        "content": "sef-sha256-v1:86e446ebb3d3e7dca9f06a1c337f692417c9a8920cee1d88caf13879f8e28a9f"
+      }
+    ],
+    "versions": {
+      "engine": "v1.5.6",
+      "adapter": "0.1.0",
+      "capability_profile": "duckdb-seir-0.2",
+      "tzdb": "2025b"
+    },
+    "sources": [
+      {
+        "dataset": "project-file-65787472656d6f732e79616d6c/dataset/extremos",
+        "data_snapshot": null,
+        "source_refreshed_at": null
+      }
+    ],
+    "evidence": "ev-hmac-sha256-v1:466611c8cb3f636c6f3b4f9ff23deaa7d53cf39b8d8f8a946b6853fd4702d6f2",
+    "read_started_at": "2026-10-24T14:30:31.816752700Z",
+    "read_finished_at": "2026-10-24T14:30:31.824268300Z"
+  },
+  "notices": []
+}
