@@ -355,3 +355,49 @@ describe('up to 20 metrics per question (#147, decided by Codex)', () => {
     expect(api.overlapped()).toBe(false);
   });
 });
+
+describe('an incompatible answer withdraws the whole attempt (Codex review of #257)', () => {
+  const broken = (fixture: unknown, cell: [number, number]) => {
+    const copy = structuredClone(fixture) as { result: { blocks: { rows: unknown[][] }[] } };
+    copy.result.blocks[0]!.rows[cell[0]]![cell[1]] = 'not-a-decimal';
+    return copy;
+  };
+
+  it('an invalid breakdown leaves no total, table, chart or receipt, and a new question recovers', async () => {
+    server((call) => {
+      if (call.url.endsWith('/catalog')) return catalog();
+      return Response.json(grouped(call) ? broken(region, [0, 1]) : total);
+    });
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('no se muestra ninguna cifra');
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByTestId('chart-omitted')).toBeNull();
+    expect(screen.queryAllByRole('heading', { name: /Recibo de/ })).toHaveLength(0);
+    expect(document.body.textContent).not.toMatch(/300,30|100,30|200,00/);
+    expect(screen.queryByRole('button', { name: 'Reintentar' })).toBeNull();
+    // Changing the question asks again and recovers.
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
+    expect((await screen.findByTestId('kpi-t')).textContent!.trim()).toBe('300,30');
+  });
+
+  it('an invalid total ends the attempt before the breakdown is asked', async () => {
+    let totals = 0;
+    const api = server((call) => {
+      if (call.url.endsWith('/catalog')) return catalog();
+      if (grouped(call)) return Response.json(region);
+      return Response.json(totals++ === 0 ? total : broken(total, [0, 0]));
+    });
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
+    expect((await screen.findByRole('alert')).textContent).toContain('no se muestra ninguna cifra');
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/100,30|200,00/);
+    expect(api.calls.some((c) => c.body !== null && grouped(c))).toBe(false);
+  });
+});

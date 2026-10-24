@@ -1,5 +1,5 @@
 import { ApiError } from '#lib/api/session.ts';
-import { IncompatibleResult } from './exact';
+import { checkBlock, IncompatibleResult, kpis } from './exact';
 import {
   InvalidAnswer,
   runSemantic,
@@ -98,7 +98,10 @@ export type Answer = { kpi: SemanticRun; table: SemanticRun | null };
 
 /**
  * Answers `choice` one request after the other, never at once: the person's
- * quota is shared by every request. The first failure ends the attempt.
+ * quota is shared by every request. Each answer is checked whole, with the
+ * very validators of its presentation, before anything is published: the
+ * first failure or incompatible answer ends the attempt, and nothing of it
+ * is shown.
  */
 export async function answer(
   choice: Choice,
@@ -108,11 +111,15 @@ export async function answer(
   const { kpi, table } = requests(choice);
   const total = await run(kpi, signal);
   signal.throwIfAborted();
+  // One question, one block each: anything else is shown nowhere. An
+  // invalid total ends the attempt before the breakdown is asked.
+  if (total.result.blocks.length !== 1) throw new IncompatibleResult();
+  kpis(total);
   const grouped = table && (await run(table, signal));
   signal.throwIfAborted();
-  // One question, one block each: anything else is shown nowhere.
-  if (total.result.blocks.length !== 1 || (grouped && grouped.result.blocks.length !== 1)) {
-    throw new IncompatibleResult();
+  if (grouped) {
+    if (grouped.result.blocks.length !== 1) throw new IncompatibleResult();
+    checkBlock(grouped.result.blocks[0]!);
   }
   return { kpi: total, table: grouped };
 }
