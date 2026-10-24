@@ -18,6 +18,7 @@ postgres-tests = []
 
 [dependencies]
 axum.workspace = true
+base64 = "0.22.1"
 bi-audit = { path = "../bi-audit" }
 bi-fixtures = { path = "../bi-fixtures" }
 bi-runtime = { path = "../bi-runtime", default-features = false }
@@ -32,7 +33,7 @@ sef-ossie = { path = "../sef-ossie" }
 sef-model-ir = { path = "../sef-model-ir" }
 sef-planner = { path = "../sef-planner" }
 sef-query-ir = { path = "../sef-query-ir" }
-serde-saphyr = "=1.3.0"
+serde-saphyr = "=2.0.0"
 getrandom.workspace = true
 hmac = "0.13.0"
 opentelemetry.workspace = true
@@ -61,7 +62,6 @@ http-body-util.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tower.workspace = true
-base64 = "0.22.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

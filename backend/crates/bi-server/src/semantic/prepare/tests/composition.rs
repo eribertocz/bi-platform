@@ -458,6 +458,82 @@ async fn refused_requests_are_never_prepared_and_say_why() {
     );
 }
 
+/// A restricted ratio: its inline aggregates become the components
+/// `ratio_centinela.m1` and `ratio_centinela.m2`; `sobre_ratio` derives
+/// from it.
+const RESTRICTED_RATIO: &str = "  - name: ratio_centinela\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: CAST(SUM(ventas.importe) / COUNT(ventas.id) AS DECIMAL(18, 4))\n  - name: sobre_ratio\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: ratio_centinela\n";
+
+/// The one value of the one row the preparation returns, as text.
+async fn single_value(analytics: &Analytics, prepared: &Prepared) -> String {
+    let blocks = execute(analytics, prepared).await;
+    let batch = &blocks[0].batches[0];
+    assert_eq!((batch.num_rows(), batch.num_columns()), (1, 1));
+    bi_runtime::duckdb::arrow::util::display::array_value_to_string(batch.column(0), 0).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_components_of_a_restricted_metric_are_as_restricted_as_it() {
+    let members = "version: 1\nusers:\n  lector: [viewer]\n  jefa: [admin]\n";
+    let p = project(&model("", RESTRICTED_RATIO), members);
+    let analytics = analytics().await;
+    let state = state(p.path(), analytics.clone());
+    let lector = || session("lector", &[]);
+    let jefa = || session("jefa", &[]);
+    // The components the compiler produced, exactly.
+    let parent = selections(&json!([metric("r", "ratio_centinela")]));
+    let admin = ready(&state, jefa(), &parent).await;
+    let components: Vec<String> = admin
+        .model()
+        .definition()
+        .metrics
+        .iter()
+        .filter_map(|m| m.metadata.label.clone())
+        .filter(|label| label.starts_with("ratio_centinela."))
+        .collect();
+    assert_eq!(components, ["ratio_centinela.m1", "ratio_centinela.m2"]);
+    // The parent and each component, by label: the viewer is refused,
+    // neutrally, as for the parent itself.
+    for name in [
+        "ratio_centinela",
+        "ratio_centinela.m1",
+        "ratio_centinela.m2",
+    ] {
+        let request = selections(&json!([metric("r", name)]));
+        let Err(Refusal(outcome)) = prepare(&state, lector(), &request).await else {
+            panic!("{name}: prepared for a viewer");
+        };
+        assert!(
+            matches!(*outcome, Outcome::Undisclosed { audit: Some(_) }),
+            "{name}"
+        );
+    }
+    // A metric derived from it: denied for its lineage, never named.
+    let derived = selections(&json!([metric("d", "sobre_ratio")]));
+    let Outcome::Denied { denial, .. } = refusal(&state, lector(), &derived).await else {
+        panic!("derived from a restricted metric");
+    };
+    assert!(
+        denial
+            .1
+            .is_some_and(|d| d.usage == "lineage" && d.name.is_none())
+    );
+    // The administrator prepares and runs all of them, exactly:
+    // 300.30 over 4 rows.
+    for (name, expected) in [
+        ("ratio_centinela", "75.0750"),
+        ("ratio_centinela.m1", "300.30"),
+        ("ratio_centinela.m2", "4"),
+        ("sobre_ratio", "75.0750"),
+    ] {
+        let prepared = ready(&state, jefa(), &selections(&json!([metric("x", name)]))).await;
+        assert_eq!(
+            single_value(&analytics, &prepared).await,
+            expected,
+            "{name}"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deprecated_metric_names_only_a_visible_replacement() {
     let deprecated = |replacement: &str| {

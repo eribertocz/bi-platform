@@ -483,7 +483,87 @@ fn direct_csmir_rejects_invalid_sunset_and_empty_or_duplicate_governance() {
     }
 }
 
+/// `metric`'s governance and that of each of its components, by label.
+fn governed_family<'m>(
+    model: &'m ModelDefinition,
+    metric: &str,
+) -> (&'m Governance, Vec<&'m Governance>) {
+    let label = |m: &&sef_model_ir::model::Metric| m.metadata.label.clone().unwrap_or_default();
+    let parent = model
+        .metrics
+        .iter()
+        .find(|m| label(m) == metric)
+        .expect("parent");
+    let components = model
+        .metrics
+        .iter()
+        .filter(|m| label(m).starts_with(&format!("{metric}.m")))
+        .map(|m| &m.metadata.governance)
+        .collect();
+    (&parent.metadata.governance, components)
+}
+
+#[test]
+fn components_of_a_composite_metric_inherit_its_governance() {
+    let (mut doc, catalog, options) = fixture();
+    let mut ratio = doc.metrics[0].clone();
+    ratio.name = "ratio".into();
+    ratio.expression.dialects[0].expression =
+        "CAST(SUM(sales.amount) / COUNT(sales.sale_id) AS DECIMAL(18, 4))".into();
+    doc.metrics.push(ratio);
+    extend(
+        &mut doc.metrics[1].custom_extensions,
+        &json!({"sensitivity":"restricted"}),
+    );
+    let model = definition(&doc, &catalog, &options);
+    let (parent, components) = governed_family(&model, "ratio");
+    assert_eq!(parent.classification, Classification::Restricted);
+    assert_eq!(components.len(), 2);
+    for component in components {
+        assert_eq!(component, parent);
+    }
+    // The undeclared metric beside it keeps the defaults.
+    assert_eq!(model.metrics[0].metadata.governance, Governance::default());
+}
+
 proptest! {
+    /// Whatever a composite metric declares, ratio or average, each of its
+    /// components is governed exactly as it, and the model stays valid.
+    #[test]
+    fn any_composite_metric_governs_its_components_as_itself(
+        average in any::<bool>(),
+        owner in proptest::option::of("[a-zA-Z][a-zA-Z0-9 ]{0,20}"),
+        tags in proptest::collection::btree_set("[a-zA-Z][a-zA-Z0-9]{0,20}", 0..8),
+        deprecated in any::<bool>(), has_replacement in any::<bool>(), sensitivity in 0usize..4,
+    ) {
+        let (mut doc, catalog, options) = fixture();
+        let mut composite = doc.metrics[0].clone();
+        composite.name = "composite".into();
+        composite.expression.dialects[0].expression = if average {
+            "CAST(AVG(sales.amount) AS DECIMAL(18, 4))"
+        } else {
+            "CAST(SUM(sales.amount) / COUNT(sales.sale_id) AS DECIMAL(18, 4))"
+        }
+        .into();
+        doc.metrics.push(composite);
+        let status = if deprecated && has_replacement {
+            json!({"state":"deprecated", "replacement": "revenue"})
+        } else if deprecated {
+            json!({"state":"deprecated"})
+        } else {
+            json!({"state":"active"})
+        };
+        extend(&mut doc.metrics[1].custom_extensions, &json!({"owner":owner, "tags":tags,
+            "status":status, "sensitivity":(["public","internal","confidential","restricted"][sensitivity])}));
+        let model = definition(&doc, &catalog, &options);
+        let (parent, components) = governed_family(&model, "composite");
+        prop_assert_eq!(components.len(), 2);
+        for component in components {
+            prop_assert_eq!(component, parent);
+        }
+        model.compile().expect("valid governance");
+    }
+
     #[test]
     fn governance_never_changes_fingerprints(
         owner in proptest::option::of("[a-zA-Z][a-zA-Z0-9 ]{0,20}"), tags in proptest::collection::btree_set("[a-zA-Z][a-zA-Z0-9]{0,20}", 0..8),
