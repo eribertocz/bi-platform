@@ -9,7 +9,7 @@ publish = false
 license = "Apache-2.0"
 
 [workspace.dependencies]
-arrow-array = "58"
+arrow-array = "60"
 arrow-schema = "58"
 axum = "0.8.9"
 cap-std = "4.0.3"
