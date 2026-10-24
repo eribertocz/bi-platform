@@ -1,6 +1,7 @@
 # Each security advisory against what main already has arrives as its own
-# small pull request with CI, verified and merged like any other (#128).
-# Routine patches arrive grouped, once a week. Nothing merges by itself.
+# small pull request with CI, without waiting for the weekly run; routine
+# patches arrive grouped once a week. Nothing merges by itself: Codex
+# verifies and merges like any other pull request (#230).
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -11,12 +12,8 @@ updates:
     labels: [dependencies]
     groups:
       cargo-patches:
+        applies-to: version-updates
         update-types: [patch]
-    ignore:
-      # The engine version follows its own review and Issue (#218): the
-      # bindings must match the libduckdb the image downloads.
-      - dependency-name: duckdb
-      - dependency-name: libduckdb-sys
   - package-ecosystem: npm
     directory: /frontend
     schedule:
@@ -25,4 +22,5 @@ updates:
     labels: [dependencies]
     groups:
       npm-patches:
+        applies-to: version-updates
         update-types: [patch]
