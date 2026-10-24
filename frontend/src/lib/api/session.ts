@@ -25,6 +25,7 @@ export async function apiRequest(
   endpoint: Endpoint,
   init: RequestInit = {},
   request: typeof fetch = fetch,
+  timeoutMs = 5000,
 ): Promise<Response> {
   const headers = new Headers(init.headers);
   if (!headers.has('Accept')) headers.set('Accept', 'application/json');
@@ -34,8 +35,8 @@ export async function apiRequest(
     cache: 'no-store',
     headers,
     signal: init.signal
-      ? AbortSignal.any([init.signal, AbortSignal.timeout(5000)])
-      : AbortSignal.timeout(5000),
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     if (response.status === 401 && !init.signal?.aborted) onUnauthorized?.();
