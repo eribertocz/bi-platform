@@ -25,7 +25,8 @@ use crate::{auth, health, models, oidc, query, semantic};
         query::run,
         models::list,
         semantic::explain,
-        semantic::query
+        semantic::query,
+        semantic::list_catalog
     ),
     components(schemas(crate::problem::Problem)),
     security(),

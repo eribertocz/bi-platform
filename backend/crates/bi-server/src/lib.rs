@@ -91,6 +91,7 @@ pub fn router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Route
             "/api/v1/semantic/explain",
             post(semantic::explain).layer(DefaultBodyLimit::max(QUERY_BODY_LIMIT)),
         )
+        .route("/api/v1/semantic/catalog", get(semantic::list_catalog))
         .route(
             "/api/v1/semantic/query",
             post(semantic::query).layer(DefaultBodyLimit::max(QUERY_BODY_LIMIT)),

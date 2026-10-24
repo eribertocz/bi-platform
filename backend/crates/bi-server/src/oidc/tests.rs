@@ -1141,6 +1141,335 @@ mod real {
         db.close().await;
     }
 
+    /// `GET /api/v1/semantic/catalog` plus `suffix` with `session` and any
+    /// extra headers: a `200` that forbids storing it, and its body.
+    async fn listed_catalog(
+        app: &Router,
+        session: &str,
+        suffix: &str,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
+        let mut request = Request::get(format!("/api/v1/semantic/catalog{suffix}"))
+            .header(header::COOKIE, session);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let cache = response.headers().get(header::CACHE_CONTROL).cloned();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(status, StatusCode::OK, "{suffix} {headers:?}: {text}");
+        assert_eq!(
+            cache.as_ref().map(|v| v.to_str().unwrap()),
+            Some("no-store")
+        );
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// The names of `list` (`metrics` or `fields`) across the catalog.
+    fn catalog_names(catalog: &serde_json::Value, list: &str) -> Vec<String> {
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|model| model[list].as_array().unwrap())
+            .map(|member| member["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// What the viewer of `department_project` is announced, the same for
+    /// every verified department: the oracle written out by hand.
+    fn assert_viewer_catalog(catalog: &serde_json::Value) {
+        assert_eq!(catalog["status"], "ready", "{catalog}");
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1, "{catalog}");
+        assert_eq!(models[0]["model"], "metrics/ventas.yaml");
+        assert_eq!(models[0]["name"], "Ventas");
+        assert_eq!(
+            catalog_names(catalog, "metrics"),
+            ["filas", "importe_total", "margen"]
+        );
+        assert_eq!(
+            catalog_names(catalog, "fields"),
+            ["ventas.ciudad", "ventas.instante", "ventas.region"]
+        );
+        // The confidential metric only masked; the restricted field absent.
+        assert_eq!(
+            models[0]["metrics"][2]["capabilities"]["select"], "masked",
+            "{catalog}"
+        );
+        let text = catalog.to_string();
+        for leaked in ["nota", "Norte", "Sur", "department", "SUM(", "lake.main"] {
+            assert!(!text.contains(leaked), "{leaked}: {text}");
+        }
+    }
+
+    /// Every catalog event, as recorded.
+    async fn catalog_events(pool: &PgPool) -> Vec<serde_json::Value> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT payload::text FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'resource_type' = 'semantic_catalog' ORDER BY sequence",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|text| {
+            // Neither a name of the project nor a verified attribute.
+            for leaked in [
+                "importe_total",
+                "ventas",
+                "margen",
+                "region",
+                "Norte",
+                "Sur",
+                "department",
+            ] {
+                assert!(!text.contains(leaked), "{leaked}: {text}");
+            }
+            serde_json::from_str(text).unwrap()
+        })
+        .collect()
+    }
+
+    /// A completed catalog of `actor`: one `query`/`success` on the
+    /// project's reserved catalog resource, without a query shape, naming
+    /// the decisions it took when it took any.
+    fn assert_catalog_success(event: &serde_json::Value, actor: &str) {
+        assert_eq!(event["actor_id"], actor, "{event}");
+        assert_eq!(event["action"], "query", "{event}");
+        assert_eq!(event["result"], "success", "{event}");
+        assert_eq!(event["resource_type"], "semantic_catalog", "{event}");
+        assert_eq!(event["resource_id"], "semantic:catalog", "{event}");
+        assert_eq!(event["source"], "http", "{event}");
+        assert!(
+            event["metadata_redacted"]["query_shape"].is_null(),
+            "{event}"
+        );
+        let decision = &event["policy_decision_id"];
+        assert!(
+            decision.is_null()
+                || decision
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("catalog-decisions-sha256:")),
+            "{event}"
+        );
+    }
+
+    /// Every denial recorded, whatever its resource.
+    async fn denials(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'action' = 'denial'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// #140 with real identities: Norte and Sur, whose row policy binds the
+    /// provider's verified `department`, get the same catalog of the same
+    /// definition, one after the other and concurrently, each request with
+    /// exactly one `query`/`success` event of its own; their queries still
+    /// answer only their own rows.
+    #[sqlx::test(migrations = false)]
+    async fn real_identities_get_the_same_catalog_of_the_same_definition(pool: PgPool) {
+        let project = department_project();
+        let (db, app) = semantic_app(&pool, project.path()).await;
+        let norte = signed_in_as(&app, "oidc-norte").await;
+        let sur = signed_in_as(&app, "oidc-sur").await;
+        let (norte_id, sur_id) = (user_id(&app, &norte).await, user_id(&app, &sur).await);
+        assert_ne!(norte_id, sur_id);
+
+        let of_norte = listed_catalog(&app, &norte, "", &[]).await;
+        assert_viewer_catalog(&of_norte);
+        let of_sur = listed_catalog(&app, &sur, "", &[]).await;
+        assert_eq!(of_sur, of_norte);
+        let recorded = catalog_events(&pool).await;
+        assert_eq!(recorded.len(), 2, "{recorded:?}");
+        assert_catalog_success(&recorded[0], &norte_id);
+        assert_catalog_success(&recorded[1], &sur_id);
+        // Each catalog decided every announcement through the single path.
+        assert!(recorded.iter().all(|e| e["policy_decision_id"].is_string()));
+
+        // Concurrently: the same catalog, one event per request and actor.
+        for _ in 0..3 {
+            let (a, b) = tokio::join!(
+                listed_catalog(&app, &norte, "", &[]),
+                listed_catalog(&app, &sur, "", &[])
+            );
+            assert_eq!(a, of_norte);
+            assert_eq!(b, of_norte);
+        }
+        let recorded = catalog_events(&pool).await;
+        assert_eq!(recorded.len(), 8, "{recorded:?}");
+        for actor in [&norte_id, &sur_id] {
+            let own: Vec<_> = recorded
+                .iter()
+                .filter(|e| e["actor_id"] == **actor)
+                .collect();
+            assert_eq!(own.len(), 4, "{recorded:?}");
+            for event in own {
+                assert_catalog_success(event, actor);
+            }
+        }
+        assert_eq!(denials(&pool).await, 0);
+
+        // The same cookies carry each verified department: the catalog is
+        // shared, the rows are not.
+        let (status, text) = run_query(&app, &norte, &totals(), &[]).await;
+        assert_eq!(
+            answered_rows(status, &text),
+            serde_json::json!([["100.30", "2"]])
+        );
+        let (status, text) = run_query(&app, &sur, &totals(), &[]).await;
+        assert_eq!(
+            answered_rows(status, &text),
+            serde_json::json!([["200.00", "2"]])
+        );
+        assert_eq!(catalog_events(&pool).await.len(), 8);
+        db.close().await;
+    }
+
+    /// An identity verified by the provider whose group `members.yaml` does
+    /// not map: `200 ready` with no models and nothing more, recorded as a
+    /// completed catalog and never as a denial or a global inspection.
+    #[sqlx::test(migrations = false)]
+    async fn an_unmapped_identity_gets_an_empty_catalog_audited_as_success(pool: PgPool) {
+        let project = department_project();
+        let (db, app) = semantic_app(&pool, project.path()).await;
+        let outsider = signed_in_as(&app, "oidc-outsider").await;
+        let outsider_id = user_id(&app, &outsider).await;
+
+        let empty = listed_catalog(&app, &outsider, "", &[]).await;
+        // Exactly this: no count, no hint of what the project holds.
+        assert_eq!(
+            empty,
+            serde_json::json!({ "status": "ready", "models": [] })
+        );
+        let recorded = catalog_events(&pool).await;
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_catalog_success(&recorded[0], &outsider_id);
+        assert_eq!(denials(&pool).await, 0);
+        let inspections: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM bi_meta.audit_events
+             WHERE (payload::jsonb)->>'resource_id' = 'project:catalog'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(inspections, 0, "no global inspection is fabricated");
+        db.close().await;
+    }
+
+    /// Removing the mapping of a verified group empties the catalog of the
+    /// same session cookie on its next request, with no new login; putting
+    /// it back announces it again: no last valid catalog is kept.
+    #[sqlx::test(migrations = false)]
+    async fn revoking_the_mapping_empties_the_catalog_of_the_same_cookie(pool: PgPool) {
+        let project = department_project();
+        let (db, app) = semantic_app(&pool, project.path()).await;
+        let norte = signed_in_as(&app, "oidc-norte").await;
+        let norte_id = user_id(&app, &norte).await;
+        let members = project.path().join("policies/members.yaml");
+        let mapped = std::fs::read_to_string(&members).unwrap();
+
+        let announced = listed_catalog(&app, &norte, "", &[]).await;
+        assert_viewer_catalog(&announced);
+
+        // Revoked: the mapping goes, the cookie stays.
+        std::fs::write(
+            &members,
+            "version: 1\ngroups:\n  catalog_authors: [viewer]\n",
+        )
+        .unwrap();
+        let revoked = listed_catalog(&app, &norte, "", &[]).await;
+        assert_eq!(
+            revoked,
+            serde_json::json!({ "status": "ready", "models": [] })
+        );
+        assert_eq!(
+            send(&app, "GET", "/api/v1/session", Some(&norte), None)
+                .await
+                .status(),
+            StatusCode::OK,
+            "the session itself is still valid"
+        );
+
+        std::fs::write(&members, mapped).unwrap();
+        assert_eq!(listed_catalog(&app, &norte, "", &[]).await, announced);
+
+        let recorded = catalog_events(&pool).await;
+        assert_eq!(recorded.len(), 3, "{recorded:?}");
+        for event in &recorded {
+            assert_catalog_success(event, &norte_id);
+        }
+        assert_eq!(denials(&pool).await, 0);
+        db.close().await;
+    }
+
+    /// Roles, users, groups, attributes or `skip_security` the client
+    /// claims, in headers or in the query string, change no catalog: the
+    /// mapped identity gets exactly its own, the unmapped one still nothing.
+    #[sqlx::test(migrations = false)]
+    async fn client_claimed_roles_users_or_skip_security_change_no_catalog(pool: PgPool) {
+        let project = department_project();
+        let (db, app) = semantic_app(&pool, project.path()).await;
+        let norte = signed_in_as(&app, "oidc-norte").await;
+        let outsider = signed_in_as(&app, "oidc-outsider").await;
+        let (norte_id, outsider_id) = (user_id(&app, &norte).await, user_id(&app, &outsider).await);
+        let announced = listed_catalog(&app, &norte, "", &[]).await;
+        assert_viewer_catalog(&announced);
+        let empty = serde_json::json!({ "status": "ready", "models": [] });
+
+        let claimed: &[(&str, &[(&str, &str)])] = &[
+            ("", &[("x-roles", "admin"), ("x-role", "catalog_reader")]),
+            (
+                "",
+                &[("x-forwarded-groups", "analysts"), ("x-groups", "admins")],
+            ),
+            (
+                "",
+                &[("x-forwarded-user", "oidc-sur"), ("x-user", "oidc-norte")],
+            ),
+            ("", &[("x-department", "Sur"), ("x-skip-security", "true")]),
+            ("", &[("skip_security", "true")]),
+            ("?role=admin&roles=admin,catalog_reader", &[]),
+            ("?user=oidc-norte&groups=analysts&department=Sur", &[]),
+            ("?skip_security=true&skipSecurity=1", &[]),
+        ];
+        let mut requests = 1;
+        for (suffix, headers) in claimed {
+            assert_eq!(
+                listed_catalog(&app, &norte, suffix, headers).await,
+                announced,
+                "{suffix} {headers:?}"
+            );
+            assert_eq!(
+                listed_catalog(&app, &outsider, suffix, headers).await,
+                empty,
+                "{suffix} {headers:?}"
+            );
+            requests += 2;
+        }
+
+        // Every request recorded once, as its verified actor, never denied.
+        let recorded = catalog_events(&pool).await;
+        assert_eq!(recorded.len(), requests, "{recorded:?}");
+        assert_catalog_success(&recorded[0], &norte_id);
+        for pair in recorded[1..].chunks(2) {
+            assert_catalog_success(&pair[0], &norte_id);
+            assert_catalog_success(&pair[1], &outsider_id);
+        }
+        assert_eq!(denials(&pool).await, 0);
+        db.close().await;
+    }
+
     async fn begin(app: &Router) -> (String, String) {
         let response = send(
             app,

@@ -528,6 +528,72 @@
         ]
       }
     },
+    "/api/v1/semantic/catalog": {
+      "get": {
+        "tags": [
+          "semantic"
+        ],
+        "summary": "Lists what the session can use of the project: the projection of #139,\nanswered once its audit event is confirmed (#140).",
+        "operationId": "listSemanticCatalog",
+        "responses": {
+          "200": {
+            "description": "Modelos, métricas y campos que las consultas de esta sesión aceptan, cada uno con lo que puede hacer con ellos; solo después de confirmar su evento de auditoría. Vacío es válido y no indica qué se oculta. Sin proyecto, `not_configured` vacío",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticCatalog"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sin sesión",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`models_busy`: sin capacidad para compilar el proyecto",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "`policies_invalid`, `catalog_unavailable` (proyecto, archivo o motor no utilizables) o `audit_unavailable`: sin catálogo, ni parcial",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "`semantic_timeout`: el catálogo superó el tiempo máximo",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
     "/api/v1/semantic/explain": {
       "post": {
         "tags": [
@@ -841,6 +907,152 @@
   },
   "components": {
     "schemas": {
+      "Capabilities": {
+        "type": "object",
+        "description": "What a query of this session may do with a member, each decided on its\nown: selecting it never implies filtering, grouping or ordering by it.",
+        "required": [
+          "select",
+          "filter",
+          "group",
+          "order"
+        ],
+        "properties": {
+          "filter": {
+            "type": "boolean"
+          },
+          "group": {
+            "type": "boolean",
+            "description": "Always `false` for a metric: a metric is aggregated, never a group."
+          },
+          "order": {
+            "type": "boolean"
+          },
+          "select": {
+            "$ref": "#/components/schemas/Select"
+          }
+        }
+      },
+      "CatalogLifecycle": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "active"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "replacement": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Only when the replacement is itself in this catalog."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "deprecated"
+                ]
+              },
+              "sunset": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "ISO `YYYY-MM-DD`, when a retirement date is declared."
+              }
+            }
+          }
+        ]
+      },
+      "CatalogMember": {
+        "type": "object",
+        "description": "A metric or field, by the name a query uses for it.",
+        "required": [
+          "name",
+          "type",
+          "lifecycle",
+          "capabilities"
+        ],
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/CatalogLifecycle"
+          },
+          "name": {
+            "type": "string",
+            "description": "The name as written in the model."
+          },
+          "type": {
+            "type": "string",
+            "description": "`DECIMAL(p,s)`, `INT64`, `VARCHAR`, `BOOLEAN`, `DATE` or `TIMESTAMPTZ`,\nas a query result declares it."
+          },
+          "unit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SemanticUnit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "CatalogModel": {
+        "type": "object",
+        "description": "One model with at least one metric the session can use.",
+        "required": [
+          "model",
+          "name",
+          "metrics",
+          "fields"
+        ],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogMember"
+            }
+          },
+          "metrics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogMember"
+            }
+          },
+          "model": {
+            "type": "string",
+            "description": "`metrics/<file>`: what a semantic query names as its `model`."
+          },
+          "name": {
+            "type": "string",
+            "description": "The model's name as written."
+          }
+        }
+      },
+      "CatalogStatus": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "not_configured"
+        ]
+      },
       "ColumnType": {
         "type": "string",
         "description": "Logical type of a result column. Every non-null value travels as a JSON\nstring, so `integer` (64- or 128-bit) and `decimal` stay exact in clients.",
@@ -1615,6 +1827,14 @@
           }
         }
       },
+      "Select": {
+        "type": "string",
+        "description": "How a selection of the member returns its values.",
+        "enum": [
+          "values",
+          "masked"
+        ]
+      },
       "SemanticBlock": {
         "type": "object",
         "required": [
@@ -1664,6 +1884,26 @@
               }
             },
             "description": "One array per row, one cell per column; `null` is a missing value,\nor any value of a masked column."
+          }
+        }
+      },
+      "SemanticCatalog": {
+        "type": "object",
+        "description": "What the session can use of the project, to discover it (#140).",
+        "required": [
+          "status",
+          "models"
+        ],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogModel"
+            },
+            "description": "In the order of their files; only models with a metric the session\ncan use. Empty is a valid answer: it tells nothing of what is hidden."
+          },
+          "status": {
+            "$ref": "#/components/schemas/CatalogStatus"
           }
         }
       },
