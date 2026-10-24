@@ -66,6 +66,101 @@ metrics:
       dialects:
         - dialect: OSSIE_SQL_2026
           expression: COUNT(ventas.id)
+  - name: importe_minimo
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MIN(ventas.importe)
+  - name: importe_maximo
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MAX(ventas.importe)
+  - name: importe_medio
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: CAST(AVG(ventas.importe) AS DECIMAL(18, 2))
+  - name: importe_medio_fino
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: CAST(AVG(ventas.importe) AS DECIMAL(18, 4))
+  - name: importe_por_fila
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: CAST(SUM(ventas.importe) / COUNT(ventas.id) AS DECIMAL(18, 3))
+  - name: importes_contados
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: COUNT(ventas.importe)
+  - name: importe_rango
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MAX(ventas.importe) - MIN(ventas.importe)
+  - name: id_total
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(ventas.id)
+  - name: id_minimo
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MIN(ventas.id)
+  - name: id_maximo
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MAX(ventas.id)
+  - name: id_medio
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: CAST(AVG(ventas.id) AS DECIMAL(18, 2))
+  - name: id_medio_redondeado
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: CAST(AVG(ventas.id) AS DECIMAL(18, 0))
+  - name: id_rango
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MAX(ventas.id) - MIN(ventas.id)
+  - name: importe_extremos
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MAX(ventas.importe) + MIN(ventas.importe)
+  - name: importe_doble
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(ventas.importe) + SUM(ventas.importe)
+  - name: id_doble
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(ventas.id) + SUM(ventas.id)
+  - name: id_extremos
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: MAX(ventas.id) + MIN(ventas.id)
+  - name: id_por_fila
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: CAST(SUM(ventas.id) / COUNT(ventas.id) AS DECIMAL(18, 3))
+  - name: importe_neto
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: SUM(ventas.importe) - MIN(ventas.importe)
   - name: margen
     custom_extensions:
       - vendor_name: bi-platform

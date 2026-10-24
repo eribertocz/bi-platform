@@ -11,7 +11,7 @@ import AxeBuilder from '@axe-core/playwright';
 // (no BI_ANALYTICS=off) and BI_OIDC_ATTRIBUTE_CLAIMS=department,
 // BI_PROJECT_DIR=<abs>/frontend/e2e/semantic/project and BI_LAKE_*; the
 // rows are written once with DuckDB 1.5.6 attaching the same lake and
-// running semantic/ventas.sql. With oidc.spec.ts a run signs in seven times: the server's
+// running semantic/ventas.sql. With oidc.spec.ts a run signs in eight times: the server's
 // OIDC admission (20 per IP, one more every 3 s) asks for a pause between
 // consecutive runs.
 //
@@ -110,6 +110,18 @@ async function openExplore(page: Page) {
 async function chooseVentas(page: Page) {
   await page.getByLabel('Modelo').selectOption('metrics/ventas.yaml');
   await expect(page.getByRole('checkbox', { name: 'filas', exact: true })).toBeChecked();
+  await settled(page, 1);
+}
+
+/**
+ * The question on screen is answered with `metrics` totals and nothing
+ * failed. Each step waits for it, at a person's pace: a request replaced
+ * mid-flight still holds one of the server's two compilation slots.
+ */
+async function settled(page: Page, metrics: number) {
+  await expect(page.locator('[aria-live="polite"]')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.locator('dl.kpis > div')).toHaveCount(metrics);
+  await expect(page.getByRole('alert')).toHaveCount(0);
 }
 
 const kpi = (page: Page, metric: string) =>
@@ -131,8 +143,9 @@ async function bodyRows(page: Page) {
 /** Selects importe_total next to filas and breaks both down by region. */
 async function askByRegion(page: Page, who: typeof NORTE) {
   await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
-  await page.getByRole('checkbox', { name: 'ventas.region', exact: true }).check();
   await expect(kpi(page, 'importe_total')).toHaveText(who.shown);
+  await settled(page, 2);
+  await page.getByRole('checkbox', { name: 'ventas.region', exact: true }).check();
   await expect(kpi(page, 'filas')).toHaveText('2');
   await expect.poll(() => bodyRows(page)).toEqual([[who.region, '2', who.shown]]);
   await expect(page.getByRole('heading', { name: 'Recibo de los totales' })).toBeVisible();
@@ -188,34 +201,38 @@ test('Norte and Sur see only their rows, and logout leaves nothing of A to B', a
   await noLeaks(page, SUR);
   await axe(page);
 
-  // A real refusal of the server: a metric the session may only see masked.
-  const refused = page.waitForResponse(
-    (response) => response.url().endsWith('/api/v1/semantic/query') && response.status() === 422,
-  );
-  await page.getByRole('checkbox', { name: /^margen/ }).check();
-  const problem = await refused;
-  const alert = page.getByRole('alert');
-  await expect(alert).toContainText('HTTP 422');
-  await expect(alert).toContainText('Código: masked_unsupported');
-  await expect(alert).toContainText(`Solicitud: ${problem.headers()['x-request-id']}`);
-  expect((await problem.json()).request_id).toBe(problem.headers()['x-request-id']);
-  // The failed attempt withdraws its whole presentation.
-  await expect(page.locator('dl.kpis')).toHaveCount(0);
-  await expect(breakdown(page)).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: /^Recibo/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Reintentar' })).toHaveCount(0);
-  await noLeaks(page, SUR);
-  await axe(page);
-  // Recovery: changing the question asks again.
-  await page.getByRole('checkbox', { name: /^margen/ }).uncheck();
+  // A metric the session may only see masked: the page offers it marked and
+  // disabled, never asks it, and the server refuses it anyway.
+  const margen = page.getByRole('checkbox', { name: /^margen/ });
+  await expect(margen).toBeDisabled();
+  await expect(margen).toHaveAccessibleName(/solo valores ocultos/);
+  const refused = await page.evaluate(async () => {
+    const response = await fetch('/api/v1/semantic/query', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'metrics/ventas.yaml',
+        query: { selections: [{ id: 'm0', kind: 'metric', name: 'margen' }] },
+      }),
+    });
+    return {
+      status: response.status,
+      header: response.headers.get('x-request-id'),
+      body: await response.json(),
+    };
+  });
+  expect(refused.status).toBe(422);
+  expect(refused.body.code).toBe('masked_unsupported');
+  expect(refused.body.request_id).toBe(refused.header);
+  expect(JSON.stringify(refused.body)).not.toMatch(/\d+\.\d{2}/);
+  // The page's answer is untouched by a request it never made.
   await expect.poll(() => bodyRows(page)).toEqual([[NORTE.region, '2', NORTE.shown]]);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  const norteAgain = await receiptIds(page);
 
   // A signs out; B signs in on the same browser context.
   await signOut(page);
   const leftover = await page.content();
-  for (const id of [...ofNorte, ...norteAgain]) expect(leftover).not.toContain(id);
+  for (const id of ofNorte) expect(leftover).not.toContain(id);
   expect(leftover).not.toContain(NORTE.amount);
   expect(leftover).not.toContain(NORTE.shown);
   const storage = await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }));
@@ -230,7 +247,7 @@ test('Norte and Sur see only their rows, and logout leaves nothing of A to B', a
   await expect(breakdown(page)).toHaveCount(0);
   const ofSur = await page.locator('dt:text-is("Identificador") + dd code').allTextContents();
   expect(ofSur).toHaveLength(1);
-  for (const id of [...ofNorte, ...norteAgain]) expect(ofSur).not.toContain(id);
+  for (const id of ofNorte) expect(ofSur).not.toContain(id);
   await noLeaks(page, NORTE);
   await chooseVentas(page);
   await expect(
@@ -322,4 +339,144 @@ test('keyboard only: choose the model, toggle metrics and a breakdown, read the 
   await noLeaks(page, SUR);
   await axe(page);
   onlySemantic(network.sent);
+});
+
+/**
+ * The 21 metrics of `semantic/project/metrics/ventas.yaml` the viewer may
+ * select, in the catalog's order; `margen` (masked) is not among them.
+ */
+const SELECTABLE = [
+  'filas',
+  'id_doble',
+  'id_extremos',
+  'id_maximo',
+  'id_medio',
+  'id_medio_redondeado',
+  'id_minimo',
+  'id_por_fila',
+  'id_rango',
+  'id_total',
+  'importe_doble',
+  'importe_extremos',
+  'importe_maximo',
+  'importe_medio',
+  'importe_medio_fino',
+  'importe_minimo',
+  'importe_neto',
+  'importe_por_fila',
+  'importe_rango',
+  'importe_total',
+  'importes_contados',
+];
+const TWENTY = SELECTABLE.slice(0, 20);
+const MANY =
+  'Muchas métricas pueden dificultar la lectura. Puedes quitar algunas para comparar mejor.';
+const MAX = 'Máximo 20 métricas: quita una para agregar otra.';
+
+test('20 metrics and 2 breakdowns: exact Norte values, the help from 10, the limit at 20', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const network = watch(page);
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  const metric = (name: string) => page.getByRole('checkbox', { name, exact: true });
+  /** Adds `name` with the keyboard: Tab to its checkbox, Space. */
+  const add = async (name: string) => {
+    await tabTo(page, metric(name));
+    await page.keyboard.press('Space');
+    await expect(metric(name)).toBeChecked();
+    await expect(kpi(page, name)).toBeVisible();
+    await settled(page, TWENTY.indexOf(name) + 1);
+  };
+
+  await signIn(page, NORTE.user, NORTE.name);
+  await openExplore(page);
+  await chooseVentas(page);
+  // Every selectable metric is offered, and `filas` starts the question.
+  for (const name of SELECTABLE) await expect(metric(name)).toBeEnabled();
+
+  for (const name of TWENTY.slice(1, 9)) await add(name);
+  await expect(page.getByText(MANY)).toHaveCount(0);
+  // 9 → 10: the help appears, without blocking anything.
+  await add(TWENTY[9]!);
+  await expect(page.getByText(MANY)).toBeVisible();
+  await expect(metric(TWENTY[10]!)).toBeEnabled();
+  // 10 → 9 (Space on the same checkbox): the help leaves; back to 10, it returns.
+  await page.keyboard.press('Space');
+  await expect(metric(TWENTY[9]!)).not.toBeChecked();
+  await expect(page.getByText(MANY)).toHaveCount(0);
+  await settled(page, 9);
+  await page.keyboard.press('Space');
+  await expect(metric(TWENTY[9]!)).toBeChecked();
+  await expect(page.getByText(MANY)).toBeVisible();
+  await settled(page, 10);
+
+  await expect(page.getByText(MAX)).toHaveCount(0);
+  for (const name of TWENTY.slice(10)) await add(name);
+  // At 20: the 21st cannot be added, every chosen one can still be removed.
+  const extra = metric(SELECTABLE[20]!);
+  await expect(extra).toBeDisabled();
+  await expect(extra).not.toBeChecked();
+  await expect(page.getByText(MAX)).toBeVisible();
+  for (const name of TWENTY) await expect(metric(name)).toBeEnabled();
+  await expect(page.getByText(MANY)).toBeVisible();
+
+  for (const name of ['ventas.region', 'ventas.ciudad']) {
+    const field = page.getByRole('checkbox', { name, exact: true });
+    await tabTo(page, field);
+    await page.keyboard.press('Space');
+    await expect(field).toBeChecked();
+    await settled(page, 20);
+  }
+
+  // The KPIs: 20 totals over Norte's two rows (La Paz 100.10, El Alto 0.20; ids 1 and 2).
+  await expect(page.locator('dl.kpis > div')).toHaveCount(20);
+  const totals: Record<string, string> = {
+    filas: '2',
+    id_total: '3',
+    id_medio: '1,50',
+    // AVG(1, 2) = 1.5 cast to DECIMAL(18, 0), half-even.
+    id_medio_redondeado: '2',
+    id_rango: '1',
+    importe_total: NORTE.shown,
+    importe_minimo: '0,20',
+    importe_maximo: '100,10',
+    importe_medio: '50,15',
+    importe_medio_fino: '50,1500',
+    importe_por_fila: '50,150',
+    importe_rango: '99,90',
+    importe_neto: '100,10',
+    importe_doble: '200,60',
+  };
+  for (const [name, value] of Object.entries(totals))
+    await expect(kpi(page, name)).toHaveText(value);
+
+  // The breakdown: 2 fields and the 20 metrics, in the order they were chosen.
+  await expect(breakdown(page).getByRole('columnheader')).toHaveText([
+    'ventas.region',
+    'ventas.ciudad',
+    ...TWENTY,
+  ]);
+  await expect
+    .poll(() => bodyRows(page))
+    .toEqual([
+      [
+        ...['Norte', 'El Alto', '1', '4', '4', '2', '2,00', '2', '2', '2,000', '0', '2'],
+        ...['0,40', '0,40', '0,20', '0,20', '0,2000', '0,20', '0,00', '0,200', '0,00', '0,20'],
+      ],
+      [
+        ...['Norte', 'La Paz', '1', '2', '2', '1', '1,00', '1', '1', '1,000', '0', '1'],
+        ...['200,20', '200,20', '100,10', '100,10', '100,1000', '100,10', '0,00', '100,100'],
+        ...['0,00', '100,10'],
+      ],
+    ]);
+  await receiptIds(page);
+  await noLeaks(page, SUR);
+  await axe(page);
+
+  onlySemantic(network.sent);
+  // Each question: the total, then the breakdown; never two answered at once.
+  expect(network.concurrent()).toEqual([]);
+  expect(errors).toEqual([]);
 });
