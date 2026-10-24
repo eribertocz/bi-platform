@@ -621,9 +621,168 @@ fn prepare_file(
 }
 
 /// Who asks and what the model's resources are, computed once per request.
-struct Decided<'a> {
-    resources: &'a Resources,
-    principal: &'a sef_authz::Principal,
+pub(super) struct Decided<'a> {
+    pub(super) resources: &'a Resources,
+    pub(super) principal: &'a sef_authz::Principal,
+}
+
+/// A bound query the single path accepted: allowed on what it asks for,
+/// validated, planned and allowed again on everything its plan reads, all
+/// on one snapshot.
+pub(super) struct Governed {
+    pub(super) uses: access::Uses,
+    pub(super) validated: ValidatedQuery,
+    pub(super) planned: sef_planner::PlannedQuery,
+    /// The final decision, on everything the plan reads.
+    pub(super) decision: QueryDecision,
+}
+
+/// Where the single path stopped a bound query.
+pub(super) enum Ungoverned {
+    /// The first decision, on what the query asks for, refused it.
+    Asked {
+        decision: QueryDecision,
+        uses: access::Uses,
+    },
+    /// Allowed as asked, but without a correct result on this model.
+    Incorrect {
+        diagnostics: Vec<sef_model_ir::diagnostic::Diagnostic>,
+        asked: QueryDecision,
+        uses: access::Uses,
+    },
+    /// Allowed and valid, but the planner cannot guarantee its result.
+    Unplannable {
+        diagnostics: Vec<sef_model_ir::diagnostic::Diagnostic>,
+        asked: QueryDecision,
+        uses: access::Uses,
+    },
+    /// The final decision, on everything the plan reads, refused it.
+    Read {
+        decision: QueryDecision,
+        uses: access::Uses,
+    },
+}
+
+/// The single path of a bound query (ADR 0010): what its first block asks
+/// for is decided, then it is validated with the verified `context` and
+/// planned, then everything the plan reads is decided again on the same
+/// snapshot. Every consumer (explain, execution, the session's catalog)
+/// goes through here; nothing executes.
+pub(super) fn govern(
+    model: &CompiledSemanticModel,
+    bound: &SemanticQuerySet,
+    access: &Access,
+    decided: &Decided<'_>,
+    context: &SemanticContext,
+) -> Result<Governed, Box<Ungoverned>> {
+    let definition = model.definition();
+    let (resources, principal) = (decided.resources, decided.principal);
+    let request = sef_authz::Context::new();
+    let mut uses = bound
+        .blocks
+        .first()
+        .map_or_else(access::Uses::default, |block| {
+            access::requested(resources, definition, block)
+        });
+    // First what the query asks for, before validating anything.
+    let asked = authorize_query(&access.snapshot, principal, &uses.list, &request);
+    if !asked.allowed {
+        return Err(Box::new(Ungoverned::Asked {
+            decision: asked,
+            uses,
+        }));
+    }
+    let validated = match sef_correctness::validate(model, bound, context) {
+        Ok(validated) => validated,
+        Err(diagnostics) => {
+            return Err(Box::new(Ungoverned::Incorrect {
+                diagnostics,
+                asked,
+                uses,
+            }));
+        }
+    };
+    let planned = match sef_planner::plan(model, &validated) {
+        Ok(planned) => planned,
+        Err(diagnostics) => {
+            return Err(Box::new(Ungoverned::Unplannable {
+                diagnostics,
+                asked,
+                uses,
+            }));
+        }
+    };
+    // Then everything the plan reads, on the same snapshot.
+    access::read_by_plan(&mut uses, resources, definition, &planned.plan);
+    let decision = authorize_query(&access.snapshot, principal, &uses.list, &request);
+    if !decision.allowed {
+        return Err(Box::new(Ungoverned::Read { decision, uses }));
+    }
+    Ok(Governed {
+        uses,
+        validated,
+        planned,
+        decision,
+    })
+}
+
+/// The answer for a query the single path stopped, as much as `input`'s
+/// disclosure allows, with the audit of the decision it stopped at.
+fn refusal(
+    stopped: Ungoverned,
+    definition: &sef_model_ir::model::ModelDefinition,
+    input: &Input<'_>,
+    principal: &sef_authz::Principal,
+    audit: &dyn Fn(&QueryDecision, bool) -> Audit,
+) -> Outcome {
+    let (access, disclosure) = (input.access, input.disclosure);
+    match stopped {
+        Ungoverned::Asked {
+            decision: asked,
+            uses,
+        } => {
+            let audit = audit(&asked, true);
+            // Named only when everything the request refers to is visible to
+            // it: the first refused use never decides for the others.
+            if !disclosure.inspects()
+                && (asked.denied.is_none() || !request_is_disclosable(access, principal, &uses))
+            {
+                Outcome::Undisclosed { audit: Some(audit) }
+            } else {
+                denied(&asked, definition, &uses, audit)
+            }
+        }
+        Ungoverned::Incorrect {
+            diagnostics,
+            asked,
+            uses,
+        } => Outcome::Invalid {
+            code: "query_incorrect",
+            message: "La consulta no tiene un resultado correcto con este modelo.".to_owned(),
+            diagnostics: diagnostics
+                .into_iter()
+                .map(|d| semantic_diagnostic(d, definition, &uses))
+                .collect(),
+            audit: Some(audit(&asked, false)),
+        },
+        Ungoverned::Unplannable {
+            diagnostics,
+            asked,
+            uses,
+        } => Outcome::Invalid {
+            code: "query_unplannable",
+            message: "El planificador no puede garantizar el resultado de esta consulta."
+                .to_owned(),
+            diagnostics: diagnostics
+                .into_iter()
+                .map(|d| semantic_diagnostic(d, definition, &uses))
+                .collect(),
+            audit: Some(audit(&asked, false)),
+        },
+        Ungoverned::Read { decision, uses } => {
+            denied(&decision, definition, &uses, audit(&decision, true))
+        }
+    }
 }
 
 /// Authorizes, validates and plans a bound query.
@@ -633,17 +792,15 @@ fn decide(
     input: &Input<'_>,
     decided: &Decided<'_>,
 ) -> Result<Prepared, Box<Outcome>> {
-    let (access, session, disclosure) = (input.access, input.session, input.disclosure);
+    let (access, session) = (input.access, input.session);
     let model = &compiled.document.semantic;
     let definition = model.definition();
-    let Some(block) = bound.blocks.first() else {
+    if bound.blocks.is_empty() {
         return Err(Box::new(Outcome::Refused(
             "La consulta no tiene bloques.".to_owned(),
         )));
-    };
+    }
     let (resources, principal) = (decided.resources, decided.principal);
-    let context = sef_authz::Context::new();
-    let mut uses = access::requested(resources, definition, block);
     let model_hash = model.content_hash().to_string();
     let audit = |decision: &QueryDecision, valid: bool| Audit {
         allowed: decision.allowed,
@@ -652,60 +809,21 @@ fn decide(
         decision: decision.fingerprint.to_string(),
         shape: input.shape,
     };
-    // First what the query asks for, before validating anything.
-    let asked = authorize_query(&access.snapshot, principal, &uses.list, &context);
-    if !asked.allowed {
-        let audit = audit(&asked, true);
-        // Named only when everything the request refers to is visible to
-        // it: the first refused use never decides for the others.
-        if !disclosure.inspects()
-            && (asked.denied.is_none() || !request_is_disclosable(access, principal, &uses))
-        {
-            return Err(Box::new(Outcome::Undisclosed { audit: Some(audit) }));
-        }
-        return Err(Box::new(denied(&asked, definition, &uses, audit)));
-    }
     let slots = context_slots(definition, &session.attributes);
-    let validated = match sef_correctness::validate(model, &bound, &slots) {
-        Ok(validated) => validated,
-        Err(diagnostics) => {
-            return Err(Box::new(Outcome::Invalid {
-                code: "query_incorrect",
-                message: "La consulta no tiene un resultado correcto con este modelo.".to_owned(),
-                diagnostics: diagnostics
-                    .into_iter()
-                    .map(|d| semantic_diagnostic(d, definition, &uses))
-                    .collect(),
-                audit: Some(audit(&asked, false)),
-            }));
+    let governed = match govern(model, &bound, access, decided, &slots) {
+        Ok(governed) => governed,
+        Err(stopped) => {
+            return Err(Box::new(refusal(
+                *stopped, definition, input, principal, &audit,
+            )));
         }
     };
-    let planned = match sef_planner::plan(model, &validated) {
-        Ok(planned) => planned,
-        Err(diagnostics) => {
-            return Err(Box::new(Outcome::Invalid {
-                code: "query_unplannable",
-                message: "El planificador no puede garantizar el resultado de esta consulta."
-                    .to_owned(),
-                diagnostics: diagnostics
-                    .into_iter()
-                    .map(|d| semantic_diagnostic(d, definition, &uses))
-                    .collect(),
-                audit: Some(audit(&asked, false)),
-            }));
-        }
-    };
-    // Then everything the plan reads, on the same snapshot.
-    access::read_by_plan(&mut uses, resources, definition, &planned.plan);
-    let decision = authorize_query(&access.snapshot, principal, &uses.list, &context);
-    if !decision.allowed {
-        return Err(Box::new(denied(
-            &decision,
-            definition,
-            &uses,
-            audit(&decision, true),
-        )));
-    }
+    let Governed {
+        validated,
+        planned,
+        decision,
+        ..
+    } = governed;
     let (Ok(query), Ok(plan)) = (bound.fingerprint(), planned.plan.fingerprint()) else {
         return Err(Box::new(Outcome::Failed(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -9,6 +9,7 @@
 //! or the base roles. An unreadable or invalid policy set closes the path.
 
 pub mod access;
+pub mod catalog;
 pub mod context;
 pub mod envelope;
 pub mod prepare;

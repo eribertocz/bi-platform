@@ -345,7 +345,7 @@ fn contract(
 }
 
 /// The public label, and the one the adapter writes in `sef.value_type`.
-fn type_labels(value_type: &ValueType) -> Result<(String, String), CodecError> {
+pub(super) fn type_labels(value_type: &ValueType) -> Result<(String, String), CodecError> {
     Ok(match value_type {
         ValueType::Decimal(d) => {
             let label = format!("DECIMAL({},{})", d.precision(), d.scale());
