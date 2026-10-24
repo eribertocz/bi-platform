@@ -23,7 +23,8 @@ git commit -q -m base
 
 failures=0
 # Runs `change` on a branch with `commits` commits, merges it into main
-# without fast-forward, and expects `rule` to answer `expected` for `area`.
+# without fast-forward, and expects `rule` to answer `expected` for the
+# `area` job (a label: both jobs share one rule).
 check() {
   local name=$1 area=$2 expected=$3
   shift 3
@@ -33,7 +34,7 @@ check() {
   git checkout -q -b "merge-$name-$area" main
   git merge -q --no-ff --no-edit "pr-$name-$area"
   local got
-  got=$(bash "$rule" "$area" pull_request HEAD^1)
+  got=$(bash "$rule" pull_request HEAD^1)
   git checkout -q main
   if [ "$got" = "$expected" ]; then
     echo "ok   $name ($area): $got"
@@ -61,24 +62,69 @@ check deny-policy backend true edit backend/deny.toml
 check earlier-commit backend true earlier_commit
 check package-json frontend true edit frontend/package.json
 check package-lock frontend true edit frontend/package-lock.json
-check package-lock-not-backend backend false edit frontend/package-lock.json
-check lockfile-not-frontend frontend false edit backend/Cargo.lock
+check package-lock-turns-on-backend backend true edit frontend/package-lock.json
+check lockfile-turns-on-frontend frontend true edit backend/Cargo.lock
+check package-json-turns-on-backend backend true edit frontend/package.json
+check deny-policy-turns-on-frontend frontend true edit backend/deny.toml
 
 # Every event other than a pull request audits in full, with no change.
 for event in push schedule workflow_dispatch; do
   for area in backend frontend; do
-    got=$(bash "$rule" "$area" "$event" HEAD^1)
+    got=$(bash "$rule" "$event" HEAD^1)
     if [ "$got" = true ]; then echo "ok   $event ($area): true"; else
       echo "FAIL $event ($area): expected true, got $got"; failures=$((failures + 1)); fi
   done
 done
 # Fails closed: a base that cannot be diffed, no base, or an unknown area.
-for args in "backend pull_request no-such-commit" "frontend pull_request" "other pull_request HEAD"; do
+for args in "pull_request no-such-commit" "pull_request" "" ; do
   # shellcheck disable=SC2086
   got=$(bash "$rule" $args)
   if [ "$got" = true ]; then echo "ok   fails closed ($args): true"; else
     echo "FAIL fails closed ($args): expected true, got $got"; failures=$((failures + 1)); fi
 done
+
+# The workflow's own step, as written in dependencies.yml, fails closed: a
+# missing detector or an answer other than true/false fails the job, and
+# never writes a value that would skip an audit.
+workflow="$(cd "$(dirname "$rule")/../workflows" && pwd)/dependencies.yml"
+python=
+for candidate in python3 python; do
+  if "$candidate" -c '' 2>/dev/null; then python=$candidate; break; fi
+done
+step=$("$python" - "$workflow" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding='utf-8').read()
+match = re.search(r"\n        run: \|\n((?:          .*\n)+?)(?=      - )", text[text.index('Do known vulnerabilities apply'):])
+print('\n'.join(line[10:] for line in match.group(1).splitlines()))
+PY
+)
+step_run() {
+  # $1: directory holding .github/scripts/dependency-changes.sh (or not).
+  local output
+  output=$(mktemp)
+  (cd "$1" && EVENT=pull_request GITHUB_OUTPUT="$output" bash -c "$step") >/dev/null 2>&1
+  local status=$?
+  echo "$status $(cat "$output")"
+  rm -f "$output"
+}
+fake=$(mktemp -d)
+mkdir -p "$fake/.github/scripts"
+got=$(step_run "$fake")
+case "$got" in
+  "0 "*) echo "FAIL step without a detector: $got"; failures=$((failures + 1)) ;;
+  *) echo "ok   step without a detector fails: ${got%% *}" ;;
+esac
+printf '#!/usr/bin/env bash\necho maybe\n' > "$fake/.github/scripts/dependency-changes.sh"
+got=$(step_run "$fake")
+case "$got" in
+  "0 "* | *advisories=*) echo "FAIL step with an invalid answer: $got"; failures=$((failures + 1)) ;;
+  *) echo "ok   step with an invalid answer fails: ${got%% *}" ;;
+esac
+printf '#!/usr/bin/env bash\necho false\n' > "$fake/.github/scripts/dependency-changes.sh"
+got=$(step_run "$fake")
+if [ "$got" = "0 advisories=false" ]; then echo "ok   step with a valid answer: $got"; else
+  echo "FAIL step with a valid answer: $got"; failures=$((failures + 1)); fi
+rm -rf "$fake"
 
 if [ "$failures" -ne 0 ]; then
   echo "$failures failing case(s)"

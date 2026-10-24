@@ -6,8 +6,9 @@ name: dependencies
 # published without any change on our side.
 #
 # A pull request answers for what it changes (#230): licenses, bans and
-# sources always; known vulnerabilities only when it changes dependencies
-# (.github/scripts/dependency-changes.sh, which fails closed). Push, the
+# sources always; known vulnerabilities, both audits, whenever it changes
+# any dependency (.github/scripts/dependency-changes.sh, which fails
+# closed; so does the step that reads it). Push, the
 # daily run and a manual run audit everything. An advisory against what
 # main already has is fixed by its own pull request (Dependabot), never by
 # stopping unrelated work.
@@ -57,7 +58,15 @@ jobs:
         working-directory: .
         env:
           EVENT: ${{ github.event_name }}
-        run: echo "advisories=$(bash .github/scripts/dependency-changes.sh backend "$EVENT" HEAD^1)" >> "$GITHUB_OUTPUT"
+        # Fails closed: a detector that fails or answers anything but
+        # true/false fails this job instead of skipping an audit.
+        run: |
+          set -euo pipefail
+          advisories=$(bash .github/scripts/dependency-changes.sh "$EVENT" HEAD^1)
+          case "$advisories" in
+            true | false) echo "advisories=$advisories" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::the dependency detector answered '$advisories'"; exit 1 ;;
+          esac
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - name: Install cargo-deny (pinned release, verified checksum)
@@ -71,10 +80,10 @@ jobs:
       - name: Licenses, bans and sources (always)
         run: cargo deny --locked check bans licenses sources
       - name: Known vulnerabilities
-        if: steps.scope.outputs.advisories == 'true'
+        if: steps.scope.outputs.advisories != 'false'
         run: cargo deny --locked check advisories
       - name: Known vulnerabilities skipped
-        if: steps.scope.outputs.advisories != 'true'
+        if: steps.scope.outputs.advisories == 'false'
         run: echo "Skipped - this pull request changes no backend dependency; main is audited on every push, daily at 05:41 UTC, and Dependabot opens its fixes."
 
   npm-audit:
@@ -92,18 +101,26 @@ jobs:
         working-directory: .
         env:
           EVENT: ${{ github.event_name }}
-        run: echo "advisories=$(bash .github/scripts/dependency-changes.sh frontend "$EVENT" HEAD^1)" >> "$GITHUB_OUTPUT"
+        # Fails closed: a detector that fails or answers anything but
+        # true/false fails this job instead of skipping an audit.
+        run: |
+          set -euo pipefail
+          advisories=$(bash .github/scripts/dependency-changes.sh "$EVENT" HEAD^1)
+          case "$advisories" in
+            true | false) echo "advisories=$advisories" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::the dependency detector answered '$advisories'"; exit 1 ;;
+          esac
       - uses: actions/setup-node@v6
-        if: steps.scope.outputs.advisories == 'true'
+        if: steps.scope.outputs.advisories != 'false'
         with:
           node-version: '24.21.0'
       # Every package, not --omit=dev: the app is a static build, so all of
       # them are devDependencies, including the code bundled into it.
       - name: Known vulnerabilities
-        if: steps.scope.outputs.advisories == 'true'
+        if: steps.scope.outputs.advisories != 'false'
         run: npm audit
       - name: Known vulnerabilities skipped
-        if: steps.scope.outputs.advisories != 'true'
+        if: steps.scope.outputs.advisories == 'false'
         run: echo "Skipped - this pull request changes no frontend dependency; main is audited on every push, daily at 05:41 UTC, and Dependabot opens its fixes."
 
   # The rule that decides what a pull request is audited for, on a real git
