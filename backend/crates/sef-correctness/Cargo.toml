@@ -15,7 +15,7 @@ sef-query-ir = { path = "../sef-query-ir" }
 proptest.workspace = true
 # The corpus models, written as Ossie documents, compile to the frozen CSMIR.
 sef-ossie = { path = "../sef-ossie" }
-serde-saphyr = "=1.3.0"
+serde-saphyr = "=2.0.0"
 
 # The workspace set plus SEF's: no unwrap, expect or panic in library code.
 [lints.rust]
