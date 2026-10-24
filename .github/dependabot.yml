@@ -1,0 +1,26 @@
+# Each security advisory against what main already has arrives as its own
+# small pull request with CI, without waiting for the weekly run; routine
+# patches arrive grouped once a week. Nothing merges by itself: Codex
+# verifies and merges like any other pull request (#230).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    groups:
+      cargo-patches:
+        applies-to: version-updates
+        update-types: [patch]
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies]
+    groups:
+      npm-patches:
+        applies-to: version-updates
+        update-types: [patch]
