@@ -13,7 +13,7 @@ chrono-tz = "=0.10.4"
 getrandom.workspace = true
 hmac = "0.13.0"
 sha2.workspace = true
-num-bigint = "0.4.8"
+num-bigint = "0.5.1"
 sef-ossie = { path = "../sef-ossie" }
 sef-model-ir = { path = "../sef-model-ir" }
 sef-exec-ir = { path = "../sef-exec-ir" }
