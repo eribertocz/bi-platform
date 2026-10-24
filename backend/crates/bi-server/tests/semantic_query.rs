@@ -845,6 +845,40 @@ async fn a_masked_metric_is_refused_with_a_decided_failure_event_then_queries_re
     h.db.close().await;
 }
 
+/// A restricted and a confidential ratio: each splits into the components
+/// `<ratio>.m1` (the sum) and `<ratio>.m2` (the count).
+const RATIOS: &str = "  - name: reserva_ratio\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"restricted\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: CAST(SUM(ventas.importe) / COUNT(ventas.id) AS DECIMAL(18, 4))\n  - name: margen_ratio\n    custom_extensions:\n      - vendor_name: bi-platform\n        data: '{\"version\": 1, \"sensitivity\": \"confidential\"}'\n    expression:\n      dialects:\n        - dialect: OSSIE_SQL_2026\n          expression: CAST(SUM(ventas.importe) / COUNT(ventas.id) AS DECIMAL(18, 4))\n";
+
+#[sqlx::test(migrations = false)]
+async fn a_component_never_runs_for_whom_its_metric_would_not(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    h.write("metrics/ventas.yaml", &format!("{MODEL}{RATIOS}"));
+    let ana = h.login("ana").await;
+    let analista = h.login("analista").await;
+    for (name, value) in [("m1", "300.30"), ("m2", "4")] {
+        // The viewer never runs a restricted ratio's component, neutrally.
+        let restricted = selections(&json!([metric("m", &format!("reserva_ratio.{name}"))]));
+        assert_undisclosed(&h.query(&ana, &restricted).await);
+        // Nor a confidential one's: she sees it only masked.
+        let confidential = selections(&json!([metric("m", &format!("margen_ratio.{name}"))]));
+        assert_problem(
+            &h.query(&ana, &confidential).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "masked_unsupported",
+        );
+        // The analyst runs the confidential one exactly.
+        let answer = h.query(&analista, &confidential).await;
+        assert_eq!(answer.status, StatusCode::OK, "{:#}", answer.body);
+        assert_eq!(
+            rows(&answer),
+            &json!([[value]]),
+            "{name}: {:#}",
+            answer.body
+        );
+    }
+    h.db.close().await;
+}
+
 #[sqlx::test(migrations = false)]
 async fn an_ungoverned_day_bucket_is_refused_with_a_decided_failure_event_then_queries_recover(
     pool: sqlx::PgPool,

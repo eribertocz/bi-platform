@@ -487,7 +487,10 @@ impl Builder<'_, '_> {
         if segment == self.metric.segment {
             metadata.description.clone_from(&self.metric.description);
         }
-        if kind == "metric" && segment == self.metric.segment {
+        // Every metric this one is computed through, itself and its
+        // components `<metric>.m<k>`, is governed as it: a component reads
+        // the same data, so it is exactly as sensitive, owned and deprecated.
+        if kind == "metric" {
             let extension = &self.metric.extension;
             metadata.governance = extension.governance(&self.converter.ids, "metric", None)?;
         }

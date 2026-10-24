@@ -332,7 +332,7 @@ fn project_model(
     for metric in &definition.metrics {
         let id = metric.metadata.id();
         // Only what the file declares: an aggregate the compiler split out
-        // of a metric carries none of its governance, nor is it a name the
+        // of a metric is governed as that metric, but it is no name the
         // model's author wrote.
         if !id
             .as_str()
