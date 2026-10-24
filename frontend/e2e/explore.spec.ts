@@ -499,7 +499,10 @@ async function askDirectly(page: Page, origin: string, metric: string) {
  * The neutral 404: its code, its fixed detail and its correlation, nothing
  * that names what was asked. Returns the body without the correlation.
  */
-function neutral({ response, body }: { response: Response; body: Record<string, unknown> }) {
+/** What a page response and a direct API response have in common. */
+type Answered = { status(): number; headers(): Record<string, string> };
+
+function neutral({ response, body }: { response: Answered; body: Record<string, unknown> }) {
   expect(response.status()).toBe(404);
   expect(Object.keys(body).sort()).toEqual([
     'code',
