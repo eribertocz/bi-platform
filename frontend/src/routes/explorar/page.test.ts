@@ -166,8 +166,7 @@ describe('answers of a former question never show', () => {
     await screen.findByTestId('kpi-t');
     await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('HTTP 503');
-    expect(alert.textContent).toContain('analytics_failed');
+    expect(alert.textContent).toContain('HTTP 503 · Código: analytics_failed');
     expect(alert.textContent).toContain('Solicitud: req-1');
     expect(screen.queryByTestId('kpi-t')).toBeNull();
     const before = api.calls.length;

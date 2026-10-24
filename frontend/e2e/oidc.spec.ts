@@ -1,4 +1,4 @@
-import { expect, test, type Response } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
 test.beforeEach(async ({ request }) => {
@@ -54,20 +54,18 @@ test('corporate login with real Keycloak, Strict session and local logout', asyn
   ).toBe(200);
 });
 
-test('after corporate login, Explore explains the closed demo query without data or retry', async ({
+test('after corporate login, Explore asks only the semantic catalog and shows what it answers', async ({
   page,
 }) => {
-  const closed =
-    'Esta consulta de demostración solo está disponible en desarrollo sintético local. El flujo semántico de consulta aún no está disponible.';
   // Observed, never intercepted: the real server decides and answers.
-  let sent = 0;
+  const sent: string[] = [];
   page.on('request', (request) => {
-    if (request.url().endsWith('/api/v1/queries')) sent++;
+    const { pathname } = new URL(request.url());
+    if (pathname.startsWith('/api/')) sent.push(pathname);
   });
-  const responses: Response[] = [];
-  page.on('response', (response) => {
-    if (response.url().endsWith('/api/v1/queries')) responses.push(response);
-  });
+  const catalog = page.waitForResponse((response) =>
+    response.url().endsWith('/api/v1/semantic/catalog'),
+  );
   await page.goto('/login');
   await page.getByRole('button', { name: 'Entrar con mi empresa' }).click();
   await page.getByLabel('Username or email').fill('oidc-user');
@@ -80,34 +78,25 @@ test('after corporate login, Explore explains the closed demo query without data
   await expect(explore).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL('/explorar');
-  const alert = page.getByRole('alert');
-  await expect(alert).toContainText(closed);
-  await expect(alert).toContainText('HTTP 403 · Código: legacy_query_disabled');
-  const shown = (await alert.getByText(/^Solicitud: /).textContent())!
-    .replace('Solicitud:', '')
-    .trim();
-  const served = responses.find((response) => response.headers()['x-request-id'] === shown);
-  expect(served?.status()).toBe(403);
-  expect(served?.headers()['content-type']).toContain('application/problem+json');
-  expect(await served!.json()).toMatchObject({
-    status: 403,
-    code: 'legacy_query_disabled',
-    detail: closed,
-    request_id: shown,
-  });
-  const requests = sent;
-  await expect(page.getByRole('button', { name: 'Reintentar' })).toHaveCount(0);
-  await expect(page.getByTestId('kpi-count')).toHaveCount(0);
-  await expect(page.getByTestId('kpi-amount')).toHaveCount(0);
-  await expect(page.getByRole('table')).toHaveCount(0);
-  await expect(page.getByRole('img')).toHaveCount(0);
-  // The alert holds no controls: nothing to retry, nothing for the keyboard to reach.
-  await expect(alert.locator('a[href], button, input, select, textarea, [tabindex]')).toHaveCount(
-    0,
-  );
+  const answered = await catalog;
+  expect(answered.status()).toBe(200);
+  const body = await answered.json();
+  // Without a project (the dedicated CI job) the page says so; with the
+  // governed project of explore.spec.ts it offers the models it lists.
+  if (body.status === 'not_configured') {
+    await expect(page.getByRole('status')).toHaveText(
+      'Esta instancia todavía no tiene un proyecto configurado.',
+    );
+    await expect(page.getByLabel('Modelo')).toHaveCount(0);
+  } else {
+    await expect(page.getByLabel('Modelo').getByRole('option')).toHaveText(
+      body.models.map((model: { name: string }) => model.name),
+    );
+  }
+  await expect(page.getByRole('alert')).toHaveCount(0);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-  // The page never retries by itself while the rejection is shown.
-  expect(sent).toBe(requests);
+  // The G1 routes are gone from this page: no query or model inspection.
+  expect(sent.filter((path) => /^\/api\/v1\/(queries|models)(\/|$)/.test(path))).toEqual([]);
 });
 
 test('a real provider token without nonce cannot create a session', async ({ page, baseURL }) => {

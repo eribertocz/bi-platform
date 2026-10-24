@@ -114,8 +114,7 @@
     <h2>{title}</h2>
     <p>{failed.message}</p>
     {#if failed.status}<p>
-        HTTP {failed.status}{#if failed.code}
-          · Código: {failed.code}{/if}
+        {failed.code ? `HTTP ${failed.status} · Código: ${failed.code}` : `HTTP ${failed.status}`}
       </p>{/if}
     {#if failed.requestId}<p>Solicitud: {failed.requestId}</p>{/if}
   </div>
@@ -145,7 +144,7 @@
         }}
       >
         {#each catalog.value.models as option (option.model)}
-          <option value={option.model}>{option.name}</option>
+          <option value={option.model}>{option.name} · {option.model}</option>
         {/each}
       </select>
       <button type="button" onclick={() => catalogRevision++}>Actualizar catálogo</button>
