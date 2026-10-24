@@ -328,6 +328,59 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Any integer of at most `digits` digits, as a `BigInt`, by its digits.
+    fn up_to(digits: usize) -> impl Strategy<Value = BigInt> {
+        (
+            any::<bool>(),
+            proptest::string::string_regex(&format!("[0-9]{{1,{digits}}}"))
+                .expect("generated test value"),
+        )
+            .prop_map(|(negative, d)| {
+                let value: BigInt = d.parse().expect("generated test value");
+                if negative { -value } else { value }
+            })
+    }
+
+    proptest! {
+        /// Exact sums and differences of carriers equal integer arithmetic
+        /// on coefficients, and beyond the precision they are refused (#261).
+        #[test]
+        fn combine_is_integer_arithmetic_or_out_of_range(
+            a in up_to(39), b in up_to(39), subtract: bool, scale in 0_u8..6,
+        ) {
+            let precision = 39_u8;
+            let expected = if subtract { &a - &b } else { &a + &b };
+            let got = combine(&carrier(&a, scale), &carrier(&b, scale), subtract, precision, scale);
+            if expected.magnitude().to_string().len() > usize::from(precision) {
+                prop_assert_eq!(got, Err(ExecutionError::ResultOutOfRange));
+            } else {
+                prop_assert_eq!(got, Ok(carrier(&expected, scale)));
+            }
+        }
+
+        /// The sort key orders carriers exactly as their numeric values.
+        #[test]
+        fn the_sort_key_orders_as_the_numbers(a in up_to(76), b in up_to(76), scale in 0_u8..6) {
+            let (ka, kb) = (
+                sort_key(&carrier(&a, scale), scale).expect("generated test value"),
+                sort_key(&carrier(&b, scale), scale).expect("generated test value"),
+            );
+            prop_assert_eq!(ka.cmp(&kb), a.cmp(&b));
+        }
+    }
+
+    #[test]
+    fn a_malformed_carrier_is_no_decimal_of_the_contract() {
+        for text in ["", "-", "1.234", "1e3", "١٢", "1.2.3"] {
+            assert_eq!(
+                coefficient(text, 2),
+                Err(ExecutionError::SourceContract),
+                "{text}"
+            );
+        }
+        assert_eq!(coefficient("-12.3", 2), Ok(BigInt::from(-1230)));
+    }
+
     #[test]
     fn rounding_respects_sign_ties_and_scales() {
         for (mode, positive, negative) in [

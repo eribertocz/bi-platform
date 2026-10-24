@@ -213,11 +213,14 @@ impl Aggregation {
                             sums[index]
                                 .as_ref()
                                 .map(|value| {
-                                    check_decimal(value, ty.precision())?;
+                                    // A sum past its certified precision is
+                                    // a result out of range (#261).
+                                    check_decimal(value, ty.precision())
+                                        .map_err(|_| ExecutionError::ResultOutOfRange)?;
                                     value
                                         .to_string()
                                         .parse::<i256>()
-                                        .map_err(|_| ExecutionError::NumericOverflow)
+                                        .map_err(|_| ExecutionError::ResultOutOfRange)
                                 })
                                 .transpose()
                         })

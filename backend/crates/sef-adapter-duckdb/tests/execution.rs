@@ -508,9 +508,11 @@ fn wide_sum_checks_final_precision_and_preserves_cancellation() {
     let plan = lower_model(2, &common::model(2), &SemanticContext::default());
     let largest = (i64::MAX, 999_999_999_999_999_999_i128);
     let mut data = vec![largest; 110];
+    // A sum past its certified precision is a result out of range (#261),
+    // distinct from any other numeric failure.
     assert!(matches!(
         plan.execute(&star_database(&data), &SemanticContext::default()),
-        Err(ExecutionError::NumericOverflow)
+        Err(ExecutionError::ResultOutOfRange)
     ));
     data.extend(vec![(-largest.0, largest.1); 110]);
     let result = plan
