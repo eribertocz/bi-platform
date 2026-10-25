@@ -27,6 +27,20 @@ export function operators(member: CatalogMember): Operator[] {
   return [...COMPARISONS, 'between', 'in', ...NULLS];
 }
 
+/** How each operator reads, for the editor and the summary of a filter. */
+export const OPERATOR_LABELS: Record<Operator, string> = {
+  '=': 'es igual a',
+  '<>': 'es distinto de',
+  '<': 'es menor que',
+  '<=': 'es menor o igual que',
+  '>': 'es mayor que',
+  '>=': 'es mayor o igual que',
+  between: 'está entre',
+  in: 'es uno de',
+  is_null: 'no tiene valor (nulo)',
+  is_not_null: 'tiene valor (no nulo)',
+};
+
 /** The fields a condition may name: those the session may filter. */
 export const filterable = (model: CatalogModel) =>
   model.fields.filter((f) => f.capabilities.filter);

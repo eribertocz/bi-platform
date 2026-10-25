@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { listCatalog, type SemanticCatalog } from '#lib/api/semantic.ts';
   import {
     answer,
@@ -11,12 +11,15 @@
     MANY_METRICS,
     MAX_DIMENSIONS,
     MAX_METRICS,
+    questionProblems,
     reconcile,
     requests,
     type Answer,
     type Choice,
     type Failure,
   } from '#lib/features/semantic/explore.ts';
+  import FilterTreeEditor from '#lib/features/semantic/FilterTreeEditor.svelte';
+  import { summarize, type TreeChange } from '#lib/features/semantic/filterTree.ts';
   import KpiStrip from '#lib/features/semantic/KpiStrip.svelte';
   import ReceiptPanel from '#lib/features/semantic/ReceiptPanel.svelte';
   import ResultChart from '#lib/features/semantic/ResultChart.svelte';
@@ -29,6 +32,11 @@
   >({ kind: 'loading' });
   let catalogRevision = $state(0);
   let choice = $state<Choice | null>(null);
+  // The person's row filters being edited, apart from the applied ones: no
+  // edit asks anything; only «Aplicar filtros» changes the question (#265).
+  let draft = $state<TreeChange | null>(null);
+  let editorRevision = $state(0);
+  let filterNotice = $state<string | null>(null);
   let attempt = $state(0);
   let view = $state<
     | { kind: 'idle' }
@@ -44,14 +52,60 @@
   );
   // The question as data: a change of selection or model is a new question.
   const question = $derived(askable(choice, model) ? JSON.stringify(choice) : null);
+  const applied = $derived(choice?.filters?.where ?? null);
+  const appliedProblems = $derived(choice && model ? questionProblems(choice, model) : []);
+  const pending = $derived(
+    draft !== null && JSON.stringify(draft.filter) !== JSON.stringify(applied),
+  );
+
+  /** The same question without the person's filters. */
+  const unfiltered = (c: Choice): Choice => ({
+    model: c.model,
+    metrics: c.metrics,
+    dimensions: c.dimensions,
+  });
+
+  /** Applies the draft when it can be sent; otherwise says why, where. */
+  async function applyFilters() {
+    if (!choice || !draft) return;
+    if (draft.problems.length > 0) {
+      filterNotice = 'Corrige los errores marcados en los filtros antes de aplicarlos.';
+      await tick();
+      const invalid = document.querySelector<HTMLElement>('#filter-section [aria-invalid="true"]');
+      (invalid ?? document.getElementById('filters-notice'))?.focus();
+      return;
+    }
+    const rest = unfiltered(choice);
+    filterNotice = null;
+    pick(draft.filter ? { ...rest, filters: { where: draft.filter, having: null } } : rest);
+    draft = null;
+    await tick();
+    document.getElementById('filters-applied')?.focus();
+  }
+
+  /** Withdraws the person's filters only: the model's and the policies stay. */
+  async function clearFilters() {
+    if (!choice) return;
+    const rest = unfiltered(choice);
+    filterNotice = null;
+    draft = null;
+    editorRevision++;
+    pick(rest);
+    await tick();
+    document.getElementById('filters-add')?.focus();
+  }
 
   // The catalog first, and again only on an explicit refresh: while it
-  // loads, no question runs and the previous answer is withdrawn.
+  // loads, no question runs and the previous answer is withdrawn. The editor
+  // starts again from the applied filters, so an unapplied draft goes too:
+  // only the tree on screen, checked against this catalog, can be applied.
   $effect(() => {
     void catalogRevision;
     const controller = new AbortController();
     catalog = { kind: 'loading' };
     view = { kind: 'idle' };
+    draft = null;
+    filterNotice = null;
     void listCatalog(controller.signal)
       .then((value) => {
         if (controller.signal.aborted) return;
@@ -146,7 +200,12 @@
         onchange={(event) => {
           if (catalog.kind !== 'ready') return;
           const next = catalog.value.models.find((m) => m.model === event.currentTarget.value);
-          if (next) pick(initialChoice({ status: 'ready', models: [next] })!);
+          if (next) {
+            // Another model is another question: its filters start empty.
+            draft = null;
+            filterNotice = null;
+            pick(initialChoice({ status: 'ready', models: [next] })!);
+          }
         }}
       >
         {#each catalog.value.models as option (option.model)}
@@ -222,6 +281,46 @@
         {:else}<p class="text-sm text-slate-600">Este modelo no tiene campos para desglosar.</p>
         {/each}
       </fieldset>
+      <section id="filter-section" class="grid gap-3" aria-labelledby="filters-title">
+        <h2 id="filters-title" class="font-semibold">Filtros de filas</h2>
+        <p class="text-sm text-slate-700">
+          Se aplican antes de agregar, además de tus permisos y de los filtros del modelo, que no se
+          cambian aquí.
+        </p>
+        {#key `${choice.model}:${editorRevision}`}
+          <FilterTreeEditor
+            {model}
+            initial={applied}
+            id="filters"
+            onchange={(change) => {
+              draft = change;
+              filterNotice = null;
+            }}
+          />
+        {/key}
+        <div class="flex flex-wrap gap-2">
+          <button type="button" onclick={applyFilters} disabled={!pending}>Aplicar filtros</button>
+          <button type="button" onclick={clearFilters} disabled={!applied && draft === null}>
+            Limpiar filtros
+          </button>
+        </div>
+        {#if filterNotice}
+          <p id="filters-notice" class="text-sm text-red-800" role="alert" tabindex="-1">
+            {filterNotice}
+          </p>
+        {/if}
+        {#if pending}<p class="text-sm text-slate-700">Hay cambios sin aplicar.</p>{/if}
+        <p id="filters-applied" class="text-sm" tabindex="-1">
+          {applied ? `Filtros aplicados: ${summarize(applied)}.` : 'Sin filtros aplicados.'}
+        </p>
+        {#if appliedProblems.length > 0}
+          <p class="text-sm text-red-800" role="alert">
+            Los filtros aplicados ya no se pueden consultar: {appliedProblems
+              .map((p) => p.message)
+              .join(' ')} Corrígelos o límpialos.
+          </p>
+        {/if}
+      </section>
     {/if}
   </form>
 
