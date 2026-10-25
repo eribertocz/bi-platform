@@ -339,23 +339,112 @@ impl VArrowScalar for Combine {
 /// The base of the three parts a wide SUM input is split into (#261).
 const PART: i64 = 1_000_000_000_000_000_000;
 
-/// Part `index` (0, 1, 2: units of 10^36, 10^18, 1) of the coefficient of
-/// `text` at `scale` digits, truncated toward zero so that every part has
-/// the value's sign. Each part stays below 10^18 in magnitude, so DuckDB
-/// sums them in 128 bits for any feasible number of rows.
-pub(super) fn part(text: &str, scale: u8, index: u8) -> Result<i64, ExecutionError> {
-    let value = coefficient(text, scale)?;
-    let base = BigInt::from(PART);
-    let high = &value / (&base * &base);
-    let rest = &value % (&base * &base);
-    let part = match index {
-        0 => high,
-        1 => &rest / &base,
-        2 => &rest % &base,
-        _ => return Err(ExecutionError::Engine),
-    };
-    // A DECIMAL of at most 38 digits keeps every part within i64.
-    i64::try_from(part).map_err(|_| ExecutionError::SourceContract)
+/// The three parts of the coefficient of `expr`, a DECIMAL of at most 38
+/// digits, computed by DuckDB from its digits: units of 10^36, 10^18 and 1,
+/// truncated toward zero so that every part has the value's sign and stays
+/// below 10^18 in magnitude, summed by DuckDB in 128 bits. The fallback of
+/// `split_sql` past 22 decimals (#261).
+pub(super) fn part_sql(expr: &str) -> [String; 3] {
+    let power = |digits: usize| format!("CAST(1{} AS HUGEINT)", "0".repeat(digits));
+    // Below 10^38, the coefficient fits a HUGEINT exactly.
+    let coefficient = format!("CAST(replace(CAST({expr} AS VARCHAR), '.', '') AS HUGEINT)");
+    [
+        format!("({coefficient}) // {}", power(36)),
+        format!("(({coefficient}) % {}) // {}", power(36), power(18)),
+        format!("({coefficient}) % {}", power(18)),
+    ]
+}
+
+/// `expr`, a DECIMAL(`precision`,`scale`) of at most 38 digits, as a count
+/// of units of 2^k and an exact remainder, both summed natively by DuckDB
+/// without overflow; `None` past 22 decimals (see `part_sql`). With
+/// `k` such that every value is below 2^(53+k), the count is a truncation
+/// of the value's double, shrunk by 10^-15 so that it never passes the
+/// value: below 2^53 it is exact, and so is its multiple of 2^k, which
+/// DuckDB turns into a DECIMAL exactly. The remainder `expr - count * 2^k`
+/// is exact decimal arithmetic, has the value's sign and stays below
+/// 10^scale + 2*10^(precision-15) in coefficient: sums of up to 10^14 rows
+/// per group stay far within 128 bits. A value below 2^k in magnitude, the
+/// common case, is its own remainder and costs nothing more (#261).
+pub(super) fn split_sql(expr: &str, precision: u8, scale: u8) -> Option<([String; 2], u32)> {
+    if scale > 22 {
+        return None;
+    }
+    let digits = u32::from(precision - scale);
+    let bits = 128 - 10_u128.pow(digits).leading_zeros();
+    let k = bits.saturating_sub(53);
+    let unit = 1_u128 << k;
+    let bound = |sign: &str| format!("CAST('{sign}{unit}' AS DECIMAL(38,{scale}))");
+    let small = format!("({expr} > {} AND {expr} < {})", bound("-"), bound(""));
+    let factor = 0.999_999_999_999_999 / f64::from(2_u32).powi(i32::try_from(k).ok()?);
+    let count = format!("trunc(CAST({expr} AS DOUBLE) * CAST('{factor:e}' AS DOUBLE))");
+    let multiple = format!(
+        "CAST(CAST({count} * CAST('{unit}' AS DOUBLE) AS DECIMAL(38,0)) AS DECIMAL({precision},{scale}))"
+    );
+    Some((
+        [
+            format!("CASE WHEN {small} THEN 0 ELSE CAST({count} AS BIGINT) END"),
+            format!("CASE WHEN {small} THEN {expr} ELSE {expr} - {multiple} END"),
+        ],
+        k,
+    ))
+}
+
+/// The exact SUM from the sum of the counts of 2^k (`high`) and the sum of
+/// the remainders (`low`, a DECIMAL at `scale`) of `split_sql`, as a carrier
+/// of `scale` digits, or `None` past `precision` digits (#261).
+pub(super) fn sum_split(
+    high: &str,
+    low: &str,
+    precision: u8,
+    scale: u8,
+    k: u32,
+) -> Result<Option<String>, ExecutionError> {
+    let total =
+        coefficient(high, 0)? * (BigInt::from(1) << k) * BigInt::from(10).pow(u32::from(scale))
+            + coefficient(low, scale)?;
+    Ok(within(&total, precision).then(|| carrier(&total, scale)))
+}
+
+/// `sef_exact_sum_split(high, low, 'precision:scale:k')`: the exact SUM of
+/// `split_sql` as a carrier, `'!'` when it is out of its certified range,
+/// NULL when there was nothing to sum.
+pub(super) struct SumSplit;
+
+impl VArrowScalar for SumSplit {
+    type State = ();
+    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+        let (high, low, options) = (
+            strings(&input, 0)?,
+            strings(&input, 1)?,
+            strings(&input, 2)?,
+        );
+        let values = (0..input.num_rows())
+            .map(|i| {
+                if high.is_null(i) || low.is_null(i) || options.is_null(i) {
+                    return Ok(None);
+                }
+                let mut fields = options.value(i).split(':');
+                let mut next = || fields.next().ok_or(ExecutionError::Engine);
+                let (precision, scale, k) = (next()?, next()?, next()?);
+                let sum = sum_split(
+                    high.value(i),
+                    low.value(i),
+                    precision.parse().map_err(|_| ExecutionError::Engine)?,
+                    scale.parse().map_err(|_| ExecutionError::Engine)?,
+                    k.parse().map_err(|_| ExecutionError::Engine)?,
+                )?;
+                Ok(Some(sum.unwrap_or_else(|| "!".to_owned())))
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        Ok(Arc::new(StringArray::from(values)))
+    }
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(
+            vec![DataType::Utf8; 3],
+            DataType::Utf8,
+        )]
+    }
 }
 
 /// The exact sum of three part sums, as a carrier of `scale` digits, or
@@ -372,36 +461,6 @@ pub(super) fn sum_parts(
     let base = BigInt::from(PART);
     let total = integer(high)? * &base * &base + integer(middle)? * &base + integer(low)?;
     Ok(within(&total, precision).then(|| carrier(&total, scale)))
-}
-
-/// `sef_exact_part(text, 'scale:index')`: one part of a wide SUM input.
-pub(super) struct Part;
-
-impl VArrowScalar for Part {
-    type State = ();
-    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
-        let (text, options) = (strings(&input, 0)?, strings(&input, 1)?);
-        let values = (0..input.num_rows())
-            .map(|i| {
-                if text.is_null(i) || options.is_null(i) {
-                    return Ok(None);
-                }
-                let (scale, index) = options
-                    .value(i)
-                    .split_once(':')
-                    .ok_or(ExecutionError::Engine)?;
-                let number = |s: &str| s.parse::<u8>().map_err(|_| ExecutionError::Engine);
-                part(text.value(i), number(scale)?, number(index)?).map(Some)
-            })
-            .collect::<Result<Vec<_>, ExecutionError>>()?;
-        Ok(Arc::new(Int64Array::from(values)))
-    }
-    fn signatures() -> Vec<ArrowFunctionSignature> {
-        vec![ArrowFunctionSignature::exact(
-            vec![DataType::Utf8; 2],
-            DataType::Int64,
-        )]
-    }
 }
 
 /// `sef_exact_sum_parts(high, middle, low, 'precision:scale')`: the exact
@@ -511,6 +570,25 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Part `index` (0, 1, 2: units of 10^36, 10^18, 1) of the coefficient of
+    /// `text` at `scale` digits, truncated toward zero so that every part has
+    /// the value's sign. Each part stays below 10^18 in magnitude, so DuckDB
+    /// sums them in 128 bits for any feasible number of rows.
+    fn part(text: &str, scale: u8, index: u8) -> Result<i64, ExecutionError> {
+        let value = coefficient(text, scale)?;
+        let base = BigInt::from(PART);
+        let high = &value / (&base * &base);
+        let rest = &value % (&base * &base);
+        let part = match index {
+            0 => high,
+            1 => &rest / &base,
+            2 => &rest % &base,
+            _ => return Err(ExecutionError::Engine),
+        };
+        // A DECIMAL of at most 38 digits keeps every part within i64.
+        i64::try_from(part).map_err(|_| ExecutionError::SourceContract)
+    }
+
     /// Any integer of at most `digits` digits, as a `BigInt`, by its digits.
     fn up_to(digits: usize) -> impl Strategy<Value = BigInt> {
         (
@@ -560,6 +638,65 @@ mod tests {
                 sum_parts(&high.to_string(), &middle.to_string(), &low.to_string(), 38, scale),
                 Ok(expected)
             );
+        }
+
+        /// DuckDB's own split of any DECIMAL of 19 to 38 digits, at any
+        /// scale, is the exact one (#261).
+        #[test]
+        fn the_native_split_is_the_exact_one(
+            (precision, scale, value) in (19_u8..=38)
+                .prop_flat_map(|p| (Just(p), 0..=p))
+                .prop_flat_map(|(p, s)| (Just(p), Just(s), up_to(usize::from(p))))
+        ) {
+            let text = carrier(&value, scale);
+            let parts = part_sql(&format!("CAST('{text}' AS DECIMAL({precision},{scale}))"))
+                .map(|part| format!("CAST({part} AS VARCHAR)"));
+            let connection = duckdb::Connection::open_in_memory().expect("DuckDB");
+            let native: [String; 3] = connection
+                .query_row(&format!("SELECT {}", parts.join(", ")), [], |row| {
+                    Ok([row.get(0)?, row.get(1)?, row.get(2)?])
+                })
+                .expect("the split runs");
+            for (index, got) in (0_u8..).zip(native) {
+                prop_assert_eq!(got, part(&text, scale, index).expect("a carrier").to_string());
+            }
+        }
+
+        /// DuckDB's split of any DECIMAL of 19 to 38 digits and up to 22
+        /// decimals, summed and recomposed, is the exact SUM with its exact
+        /// range, extremes of either sign included (#261).
+        #[test]
+        fn the_native_sum_split_is_exact(
+            (precision, scale, values, extremes) in (19_u8..=38)
+                .prop_flat_map(|p| (Just(p), 0..=p.min(22)))
+                .prop_flat_map(|(p, s)| (
+                    Just(p), Just(s),
+                    prop::collection::vec(up_to(usize::from(p)), 1..6),
+                    prop::collection::vec(any::<bool>(), 0..3),
+                ))
+        ) {
+            let largest: BigInt = BigInt::from(10).pow(u32::from(precision)) - 1;
+            let values: Vec<BigInt> = values
+                .into_iter()
+                .chain(extremes.into_iter().map(|negative| if negative { -&largest } else { largest.clone() }))
+                .collect();
+            let rows = values
+                .iter()
+                .map(|v| format!("(CAST('{}' AS DECIMAL({precision},{scale})))", carrier(v, scale)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ([high, low], k) = split_sql("v", precision, scale).expect("up to 22 decimals");
+            let connection = duckdb::Connection::open_in_memory().expect("DuckDB");
+            let (high, low): (String, String) = connection
+                .query_row(
+                    &format!("SELECT CAST(SUM({high}) AS VARCHAR), CAST(SUM({low}) AS VARCHAR) FROM (VALUES {rows}) t(v)"),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the split runs");
+            let total: BigInt = values.iter().sum();
+            let expected = within(&total, 38).then(|| carrier(&total, scale));
+            prop_assert_eq!(sum_split(&high, &low, 38, scale, k), Ok(expected));
         }
 
         /// `within` is the digit count, exactly at the edge.

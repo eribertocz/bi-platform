@@ -319,8 +319,8 @@ impl DuckDbPlan {
         let combine = format!("sef_exact_combine_{suffix}");
         let sort_key = format!("sef_exact_sort_key_{suffix}");
         let cmp = format!("sef_exact_cmp_{suffix}");
-        let part = format!("sef_exact_part_{suffix}");
         let sum_parts = format!("sef_exact_sum_parts_{suffix}");
+        let sum_split = format!("sef_exact_sum_split_{suffix}");
         let uses = |name: &str| {
             self.sql.iter().any(|(_, sql)| sql.contains(name))
                 || self.checks.iter().any(|sql| sql.contains(name))
@@ -331,9 +331,9 @@ impl DuckDbPlan {
                 .register_scalar_function::<exact::Combine>(&combine)
                 .map_err(|_| ExecutionError::Engine)?;
         }
-        if uses("sef_exact_part(") {
+        if uses("sef_exact_sum_split(") {
             connection
-                .register_scalar_function::<exact::Part>(&part)
+                .register_scalar_function::<exact::SumSplit>(&sum_split)
                 .map_err(|_| ExecutionError::Engine)?;
         }
         if uses("sef_exact_sum_parts(") {
@@ -367,8 +367,8 @@ impl DuckDbPlan {
                 .replace("sef_exact_combine(", &format!("{combine}("))
                 .replace("sef_exact_sort_key(", &format!("{sort_key}("))
                 .replace("sef_exact_cmp(", &format!("{cmp}("))
-                .replace("sef_exact_part(", &format!("{part}("))
                 .replace("sef_exact_sum_parts(", &format!("{sum_parts}("))
+                .replace("sef_exact_sum_split(", &format!("{sum_split}("))
         };
         let engine_version = connection
             .query_row("SELECT version()", [], |row| row.get(0))
@@ -2176,28 +2176,45 @@ impl Lowering<'_> {
                         AggregateFunction::Min => "MIN",
                         AggregateFunction::Max => "MAX",
                     };
-                    let wide_input = measure.aggregation == AggregateFunction::Sum
-                        && matches!(
-                            measure.scalar_expression.as_ref().map(|e| &e.value_type),
-                            Some(ValueType::Decimal(d)) if d.precision() > 18
-                        );
-                    if let (true, ValueType::Decimal(ty)) = (wide_input, &measure.value_type) {
-                        // Summed in three exact parts (#261): DuckDB's 128-bit
+                    let wide_input = match measure.scalar_expression.as_ref().map(|e| &e.value_type)
+                    {
+                        Some(ValueType::Decimal(d))
+                            if measure.aggregation == AggregateFunction::Sum
+                                && d.precision() > 18 =>
+                        {
+                            Some(*d)
+                        }
+                        _ => None,
+                    };
+                    if let (Some(input), ValueType::Decimal(ty)) = (wide_input, &measure.value_type)
+                    {
+                        // Summed in exact parts (#261): DuckDB's 128-bit
                         // accumulator never overflows, and the range of the
                         // sum is decided exactly on its total.
-                        let part = |index: u8| {
+                        let sum = |part: &String| format!("CAST(SUM({part}) AS VARCHAR)");
+                        let total = if let Some(([high, low], k)) =
+                            exact::split_sql(&expr, input.precision(), input.scale())
+                        {
                             format!(
-                                "CAST(SUM(sef_exact_part(CAST({expr} AS VARCHAR), '{}:{index}')) AS VARCHAR)",
+                                "sef_exact_sum_split({}, {}, '{}:{}:{k}')",
+                                sum(&high),
+                                sum(&low),
+                                ty.precision(),
+                                ty.scale()
+                            )
+                        } else {
+                            let [high, middle, low] = exact::part_sql(&expr);
+                            format!(
+                                "sef_exact_sum_parts({}, {}, {}, '{}:{}')",
+                                sum(&high),
+                                sum(&middle),
+                                sum(&low),
+                                ty.precision(),
                                 ty.scale()
                             )
                         };
                         projections.push(format!(
-                            "sef_exact_sum_parts({}, {}, {}, '{}:{}') AS {}",
-                            part(0),
-                            part(1),
-                            part(2),
-                            ty.precision(),
-                            ty.scale(),
+                            "{total} AS {}",
                             quote(&format!("{}__sum", reference.id))
                         ));
                         exact_sums.push((reference.id.to_string(), *ty));
