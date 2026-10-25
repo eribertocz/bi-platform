@@ -171,5 +171,6 @@
       <button type="button" onclick={() => start('group')}>Añadir grupo</button>
     </div>
   {/if}
-  <p class="sr-only" aria-live="polite">{announcement}</p>
+  <!-- `status` is a polite live region; the page keeps `aria-live` for its own answer. -->
+  <p class="sr-only" role="status">{announcement}</p>
 </div>

@@ -866,14 +866,25 @@ const focusedId = (page: Page) => page.evaluate(() => document.activeElement?.id
 
 /** Writes `field operator value` into the condition whose field select is `index`. */
 async function writeCondition(page: Page, index: number, field: string, value?: string) {
-  await page.getByLabel('Campo').nth(index).selectOption(field);
-  if (value !== undefined) await page.getByLabel('Valor').nth(index).fill(value);
+  await page.getByLabel('Campo', { exact: true }).nth(index).selectOption(field);
+  if (value !== undefined) await page.getByLabel('Valor', { exact: true }).nth(index).fill(value);
 }
 
 async function applyFilters(page: Page) {
   await page.getByRole('button', { name: 'Aplicar filtros' }).click();
   await expect.poll(() => focusedId(page)).toBe('filters-applied');
   await expect(page.locator('[aria-live="polite"]').first()).toHaveAttribute('aria-busy', 'false');
+}
+
+/**
+ * No figure of `other`'s rows nor any restricted text on the page. Its region's
+ * name may appear: the person typed it as a filter value (#265).
+ */
+async function noFiguresOf(page: Page, other: typeof NORTE) {
+  const html = await page.content();
+  expect(html).not.toMatch(SENTINELS);
+  for (const figure of [other.amount, other.shown]) expect(html).not.toContain(figure);
+  expect((await bodyRows(page).catch(() => [])).every((row) => row[0] !== other.region)).toBe(true);
 }
 
 test('row filters: applied explicitly, exact under the row policy, cleared, by keyboard and axe', async ({
@@ -915,7 +926,7 @@ test('row filters: applied explicitly, exact under the row policy, cleared, by k
   await page.keyboard.press('Tab');
   await expect.poll(() => focusedId(page)).toMatch(/^filters-n\d+-operator$/);
   await writeCondition(page, 1, 'ventas.region', 'Sur');
-  await page.getByLabel('Tipo de grupo').selectOption('or');
+  await page.getByLabel('Tipo de grupo', { exact: true }).selectOption('or');
   await applyFilters(page);
   await expect.poll(() => bodyRows(page)).toEqual([['Norte', '1', '0,20']]);
   await page.getByRole('button', { name: 'Negar esta condición' }).first().click();
@@ -925,7 +936,7 @@ test('row filters: applied explicitly, exact under the row policy, cleared, by k
   );
   await expect(kpi(page, 'importe_total')).toHaveText('100,10');
   await expect.poll(() => bodyRows(page)).toEqual([['Norte', '1', '100,10']]);
-  await noLeaks(page, SUR);
+  await noFiguresOf(page, SUR);
   // Nested groups, with the keyboard: add a group inside and reach it by Enter.
   await page.getByRole('button', { name: 'Añadir grupo dentro' }).focus();
   await page.keyboard.press('Enter');
@@ -956,7 +967,7 @@ test('row filters: applied explicitly, exact under the row policy, cleared, by k
   await writeCondition(page, 0, 'ventas.region', 'Norte');
   await applyFilters(page);
   await expect(kpi(page, 'filas')).toHaveText('0');
-  await noLeaks(page, NORTE);
+  await noFiguresOf(page, NORTE);
 });
 
 test('a NULL row filter on a declared test field: Norte 100,10 and Sur -0,20', async ({ page }) => {
@@ -972,8 +983,8 @@ test('a NULL row filter on a declared test field: Norte 100,10 and Sur -0,20', a
     await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
     await settled(page, 2);
     await page.getByRole('button', { name: 'Añadir condición' }).click();
-    await page.getByLabel('Campo').selectOption('ventas.observacion');
-    await page.getByLabel('Operador').selectOption('is_null');
+    await page.getByLabel('Campo', { exact: true }).selectOption('ventas.observacion');
+    await page.getByLabel('Operador', { exact: true }).selectOption('is_null');
     await applyFilters(page);
     await expect(kpi(page, 'importe_total')).toHaveText(amount);
     await expect(kpi(page, 'filas')).toHaveText('1');
