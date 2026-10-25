@@ -1,5 +1,5 @@
 import { ApiError } from '#lib/api/session.ts';
-import { checkBlock, IncompatibleResult, kpis } from './exact';
+import { checkBlock, IncompatibleResult, totals } from './exact';
 import {
   dimensionId,
   filterProblems,
@@ -148,6 +148,9 @@ export function requests(choice: Choice) {
   return { kpi, table, labels };
 }
 
+/** Whether `choice` may legitimately get no total: it filters after aggregating. */
+export const emptyTotalAllowed = (choice: Choice) => Boolean(choice.filters?.having);
+
 /** One answered question: each request with its own receipt. */
 export type Answer = { kpi: SemanticRun; table: SemanticRun | null };
 
@@ -169,7 +172,9 @@ export async function answer(
   // One question, one block each: anything else is shown nowhere. An
   // invalid total ends the attempt before the breakdown is asked.
   if (total.result.blocks.length !== 1) throw new IncompatibleResult();
-  kpis(total);
+  // A total excluded by a filter after aggregating is an answer, and the
+  // breakdown is still asked: it is checked on its own, never inferred.
+  totals(total, emptyTotalAllowed(choice));
   const grouped = table && (await run(table, signal));
   signal.throwIfAborted();
   if (grouped) {

@@ -5,6 +5,7 @@
     answer,
     askable,
     consistency,
+    emptyTotalAllowed,
     failure,
     groupable,
     initialChoice,
@@ -41,7 +42,7 @@
   let view = $state<
     | { kind: 'idle' }
     | { kind: 'loading' }
-    | { kind: 'ready'; answer: Answer; labels: Record<string, string> }
+    | { kind: 'ready'; answer: Answer; labels: Record<string, string>; emptyAllowed: boolean }
     | { kind: 'error'; failure: Failure }
   >({ kind: 'idle' });
 
@@ -134,7 +135,12 @@
     void answer(current, controller.signal)
       .then((value) => {
         if (!controller.signal.aborted)
-          view = { kind: 'ready', answer: value, labels: requests(current).labels };
+          view = {
+            kind: 'ready',
+            answer: value,
+            labels: requests(current).labels,
+            emptyAllowed: emptyTotalAllowed(current),
+          };
       })
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
@@ -343,7 +349,7 @@
           Calculados por el servidor sobre todos los datos que puedes ver, sin desglose; no son la
           suma de las filas de la tabla.
         </p>
-        <KpiStrip run={result.kpi} labels={view.labels} />
+        <KpiStrip run={result.kpi} labels={view.labels} emptyAllowed={view.emptyAllowed} />
       </section>
       {#if result.table}
         {@const block = result.table.result.blocks[0]!}

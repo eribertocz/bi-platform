@@ -190,17 +190,31 @@ export function columnLabel(column: SemanticColumn, labels: Record<string, strin
 const isGrain = (column: SemanticColumn) => column.kind !== 'metric';
 
 /**
- * The metrics of a result already aggregated without a grain: one block,
- * no dimension, exactly one row. Anything else is refused, never summed.
+ * The totals of a result aggregated without a grain: its values, or none
+ * when a filter after aggregating excluded the whole total (#266).
  */
-export function kpis(run: SemanticRun): { column: SemanticColumn; value: Shown }[] {
+export type Totals =
+  { kind: 'values'; items: { column: SemanticColumn; value: Shown }[] } | { kind: 'empty' };
+
+/**
+ * The totals of `run`: one block, no dimension, exactly one row. Zero rows
+ * is a total only when the question may exclude it after aggregating
+ * (`emptyAllowed`, a HAVING): never inferred from any empty answer. The
+ * block is checked whole either way; anything else is refused, never summed.
+ */
+export function totals(run: SemanticRun, emptyAllowed = false): Totals {
   const [block, ...rest] = run.result.blocks;
-  if (!block || rest.length > 0 || block.columns.some(isGrain) || block.row_count !== 1) {
+  const rows = emptyAllowed ? [0, 1] : [1];
+  if (!block || rest.length > 0 || block.columns.some(isGrain) || !rows.includes(block.row_count)) {
     throw new IncompatibleResult('Este resultado no es un total sin desglose.');
   }
   checkBlock(block);
-  const row = block.rows[0]!;
-  return block.columns.map((column, i) => ({ column, value: shown(column, row[i] ?? null) }));
+  const row = block.rows[0];
+  if (!row) return { kind: 'empty' };
+  return {
+    kind: 'values',
+    items: block.columns.map((column, i) => ({ column, value: shown(column, row[i] ?? null) })),
+  };
 }
 
 /** The most bars a chart draws before it gives way to the table. */
