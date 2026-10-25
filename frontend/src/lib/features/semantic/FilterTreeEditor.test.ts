@@ -179,6 +179,46 @@ describe('problems shown where they are, nothing trimmed', () => {
     );
   });
 
+  // Codex's review of #276: a saved condition shows its own literals' errors.
+  it.each([
+    ['NULL compared', { type: 'null' as const }, /NULL no se compara/],
+    ['a number on a text field', { type: 'number' as const, value: '5' }, /texto de 256/],
+  ])('a saved condition shows why it cannot be sent: %s', (_, value, message) => {
+    const saved: SemanticFilter = { op: 'compare', target: region, comparison: '=', value };
+    tree({ op: 'and', filters: [saved] });
+    const node = screen.getByRole('group', { name: 'Condición guardada' });
+    const errors = document.getElementById(node.getAttribute('aria-describedby')!)!;
+    expect(errors.textContent).toMatch(message);
+  });
+
+  it('a saved range, list or target shows its errors, and only its own', () => {
+    const range: SemanticFilter = {
+      op: 'between',
+      target: region,
+      low: { type: 'null' },
+      high: { type: 'number', value: '9' },
+    };
+    const list: SemanticFilter = {
+      op: 'in',
+      target: { ...region, roles: ['facturacion'] },
+      values: [{ type: 'number', value: '1' }],
+    };
+    const hidden: SemanticFilter = {
+      op: 'is_null',
+      target: { kind: 'dimension', name: 'ventas.oculto', roles: ['x'] },
+    };
+    const filler = Array.from({ length: 9 }, (_, i) => is(region, `ok${i}`));
+    // Ten siblings: the node at /filters/1 must not take /filters/10's errors.
+    tree({ op: 'and', filters: [is(region, 'a'), list, ...filler.slice(0, 8), range, hidden] });
+    const [first, second, third] = screen
+      .getAllByRole('group', { name: 'Condición guardada' })
+      .map((g) => document.getElementById(g.getAttribute('aria-describedby')!)!.textContent!);
+    expect(first).toMatch(/texto de 256/);
+    expect(first).not.toMatch(/NULL no se compara/);
+    expect(second).toMatch(/NULL no se compara/);
+    expect(third).toMatch(/No se puede filtrar/);
+  });
+
   it('a field the session may not filter stays named and invalid', async () => {
     const { last } = tree({
       op: 'and',

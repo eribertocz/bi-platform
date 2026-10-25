@@ -27,6 +27,14 @@
   const here = $derived(
     problems.filter((p) => p.path === paths.get(node.key)).map((p) => p.message),
   );
+  // A saved condition has no editor to show its literals: every problem at
+  // it or inside it, by exact path segments (`/filters/1` never takes `/10`).
+  const saved = $derived.by(() => {
+    const at = paths.get(node.key) ?? '';
+    return problems
+      .filter((p) => p.path === at || p.path.startsWith(`${at}/`))
+      .map((p) => p.message);
+  });
 </script>
 
 {#if node.kind === 'condition'}
@@ -47,11 +55,17 @@
     class="grid gap-1 rounded border border-slate-300 p-3"
     role="group"
     aria-label="Condición guardada"
+    aria-describedby={saved.length > 0 ? `${nodeId}-errors` : undefined}
   >
     <p class="text-sm">
       Condición guardada que este editor no puede modificar sin cambiarla; se conserva tal cual.
     </p>
     <code class="text-sm break-all">{JSON.stringify(node.filter)}</code>
+    {#if saved.length > 0}
+      <ul id="{nodeId}-errors" class="text-sm text-red-800">
+        {#each saved as message, i (i)}<li>{message}</li>{/each}
+      </ul>
+    {/if}
     <button type="button" class="justify-self-start" onclick={() => actions.remove(node.key)}>
       Quitar condición guardada
     </button>
@@ -96,6 +110,6 @@
     </button>
   </fieldset>
 {/if}
-{#if node.kind !== 'group' && node.kind !== 'not' && here.length > 0}
+{#if node.kind === 'condition' && here.length > 0}
   <p class="text-sm text-red-800" role="status">{here.join(' ')}</p>
 {/if}
