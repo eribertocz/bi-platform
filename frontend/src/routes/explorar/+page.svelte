@@ -43,7 +43,7 @@
       : undefined,
   );
   // The question as data: a change of selection or model is a new question.
-  const question = $derived(askable(choice) ? JSON.stringify(choice) : null);
+  const question = $derived(askable(choice, model) ? JSON.stringify(choice) : null);
 
   // The catalog first, and again only on an explicit refresh: while it
   // loads, no question runs and the previous answer is withdrawn.
@@ -155,6 +155,12 @@
       </select>
       <button type="button" onclick={() => catalogRevision++}>Actualizar catálogo</button>
     </div>
+    {#if choice && !model}
+      <p class="text-sm text-red-800" role="alert">
+        El modelo de esta pregunta ya no está en tu catálogo; sus filtros no se aplican a otro.
+        Elige un modelo para empezar otra pregunta.
+      </p>
+    {/if}
     {#if model && choice}
       <fieldset aria-describedby="metrics-limit">
         <legend class="font-semibold">Métricas (1 a {MAX_METRICS})</legend>
@@ -221,7 +227,9 @@
 
   <div aria-busy={view.kind === 'loading'} aria-live="polite">
     {#if view.kind === 'idle'}
-      {#if !askable(choice)}<p role="status">Elige al menos una métrica.</p>{/if}
+      {#if !choice || choice.metrics.length === 0}<p role="status">
+          Elige al menos una métrica.
+        </p>{/if}
     {:else if view.kind === 'loading'}<p role="status">Consultando…</p>
     {:else if view.kind === 'error'}
       {@render problem(view.failure, 'No se pudo responder la consulta')}

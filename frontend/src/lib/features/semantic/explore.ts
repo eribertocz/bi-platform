@@ -1,6 +1,15 @@
 import { ApiError } from '#lib/api/session.ts';
 import { checkBlock, IncompatibleResult, kpis } from './exact';
 import {
+  dimensionId,
+  filterProblems,
+  filterQuery,
+  metricId,
+  selectionProblems,
+  type FilterProblem,
+  type UserFilters,
+} from './filters';
+import {
   InvalidAnswer,
   runSemantic,
   type CatalogModel,
@@ -15,8 +24,16 @@ export const MAX_METRICS = 20;
 export const MANY_METRICS = 10;
 export const MAX_DIMENSIONS = 2;
 
-/** What the person asks: one model, 1 to 20 metrics, 0 to 2 fields to break them down by. */
-export type Choice = { model: string; metrics: string[]; dimensions: string[] };
+/**
+ * What the person asks: one model, 1 to 20 metrics, 0 to 2 fields to break
+ * them down by, and their own filters of this session, if any (#142).
+ */
+export type Choice = {
+  model: string;
+  metrics: string[];
+  dimensions: string[];
+  filters?: UserFilters;
+};
 
 /** The fields a question may break down by: those the session may group. */
 export const groupable = (model: CatalogModel) =>
@@ -48,48 +65,86 @@ export function initialChoice(catalog: SemanticCatalog): Choice | null {
 /**
  * `choice` on a refreshed catalog: what is no longer selectable is dropped;
  * a model left without metrics starts over on itself, and only a model that
- * is gone starts over on the catalog.
+ * is gone starts over on the catalog. The person's filters stay as they
+ * were: one that names what is gone becomes a problem to see, never a
+ * clause removed to ask something else (#142).
  */
 export function reconcile(choice: Choice | null, catalog: SemanticCatalog): Choice | null {
-  const model = catalog.models.find((m) => m.model === choice?.model);
-  if (!choice || !model) return initialChoice(catalog);
+  if (!choice) return initialChoice(catalog);
+  // A question with filters never starts over by itself: it stays, blocked,
+  // until the person resolves it (#142). One without keeps doing so.
+  const filtered = hasFilters(choice);
+  const model = catalog.models.find((m) => m.model === choice.model);
+  if (!model) return filtered ? choice : initialChoice(catalog);
   const metrics = choice.metrics.filter((name) => selectable(model).some((m) => m.name === name));
   const dimensions = choice.dimensions.filter((name) =>
     groupable(model).some((f) => f.name === name),
   );
-  return metrics.length > 0
-    ? { model: model.model, metrics, dimensions }
-    : (startOn(model) ?? initialChoice(catalog));
+  if (metrics.length > 0 || filtered) {
+    return {
+      model: model.model,
+      metrics,
+      dimensions,
+      ...(filtered ? { filters: choice.filters } : {}),
+    };
+  }
+  return startOn(model) ?? initialChoice(catalog);
 }
 
-/** Whether `choice` is a question the page may send. */
-export const askable = (choice: Choice | null): choice is Choice =>
+/** Whether `choice` carries any filter of the person. */
+const hasFilters = (choice: Choice) => Boolean(choice.filters?.where || choice.filters?.having);
+
+/**
+ * Why `choice` cannot be sent on `model`: selections that would share an id,
+ * or the person's filters, checked only against the question's own model.
+ */
+export function questionProblems(choice: Choice, model: CatalogModel): FilterProblem[] {
+  if (model.model !== choice.model) {
+    return [{ path: '/model', message: 'El modelo de esta pregunta ya no está en tu catálogo.' }];
+  }
+  return [
+    ...selectionProblems(choice.metrics, choice.dimensions),
+    ...(choice.filters ? filterProblems(choice.filters, model, choice.metrics) : []),
+  ];
+}
+
+/**
+ * Whether `choice` is a question the page may send: its filters, if any,
+ * valid on `model`, which they need to be checked against.
+ */
+export const askable = (choice: Choice | null, model?: CatalogModel): choice is Choice =>
   choice !== null &&
   choice.metrics.length >= 1 &&
   choice.metrics.length <= MAX_METRICS &&
-  choice.dimensions.length <= MAX_DIMENSIONS;
+  choice.dimensions.length <= MAX_DIMENSIONS &&
+  selectionProblems(choice.metrics, choice.dimensions).length === 0 &&
+  (!hasFilters(choice) || (model !== undefined && questionProblems(choice, model).length === 0));
 
 /**
  * The requests of a question: the total without a grain (the KPIs) and, with
- * a breakdown, the grouped table; and the label of every selection id.
+ * a breakdown, the grouped table; and the label of every selection id. Ids
+ * are stable by name, so a filter's reference never moves to another
+ * metric. The person's filters are the question's: both reads carry them,
+ * each at its own grain.
  */
 export function requests(choice: Choice) {
-  const metrics = choice.metrics.map((name, i) => ({
-    id: `m${i}`,
+  const metrics = choice.metrics.map((name) => ({
+    id: metricId(name),
     kind: 'metric' as const,
     name,
   }));
-  const dimensions = choice.dimensions.map((name, i) => ({
-    id: `d${i}`,
+  const dimensions = choice.dimensions.map((name) => ({
+    id: dimensionId(name),
     kind: 'dimension' as const,
     name,
   }));
   const labels = Object.fromEntries([...metrics, ...dimensions].map((s) => [s.id, s.name]));
-  const kpi: SemanticRequest = { model: choice.model, query: { selections: metrics } };
+  const filters = choice.filters ? filterQuery(choice.filters) : {};
+  const kpi: SemanticRequest = { model: choice.model, query: { selections: metrics, ...filters } };
   const table: SemanticRequest | null =
     dimensions.length === 0
       ? null
-      : { model: choice.model, query: { selections: [...dimensions, ...metrics] } };
+      : { model: choice.model, query: { selections: [...dimensions, ...metrics], ...filters } };
   return { kpi, table, labels };
 }
 

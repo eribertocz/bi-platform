@@ -94,13 +94,13 @@ describe('requests', () => {
     });
     expect(kpi).toEqual({
       model: 'metrics/v',
-      query: { selections: [{ id: 'm0', kind: 'metric', name: 'importe' }] },
+      query: { selections: [{ id: 'm:importe', kind: 'metric', name: 'importe' }] },
     });
     expect(table!.query.selections.map((s) => [s.kind, s.name])).toEqual([
       ['dimension', 'region'],
       ['metric', 'importe'],
     ]);
-    expect(labels).toEqual({ m0: 'importe', d0: 'region' });
+    expect(labels).toEqual({ 'm:importe': 'importe', 'd:region': 'region' });
     expect(requests({ model: 'metrics/v', metrics: ['importe'], dimensions: [] }).table).toBeNull();
   });
 
