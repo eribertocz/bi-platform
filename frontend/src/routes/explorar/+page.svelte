@@ -96,12 +96,16 @@
   }
 
   // The catalog first, and again only on an explicit refresh: while it
-  // loads, no question runs and the previous answer is withdrawn.
+  // loads, no question runs and the previous answer is withdrawn. The editor
+  // starts again from the applied filters, so an unapplied draft goes too:
+  // only the tree on screen, checked against this catalog, can be applied.
   $effect(() => {
     void catalogRevision;
     const controller = new AbortController();
     catalog = { kind: 'loading' };
     view = { kind: 'idle' };
+    draft = null;
+    filterNotice = null;
     void listCatalog(controller.signal)
       .then((value) => {
         if (controller.signal.aborted) return;

@@ -466,6 +466,62 @@ describe('row filters: drafted, applied explicitly, cleared (#265)', () => {
     expect(api.calls.length).toBe(before);
   });
 
+  it('Codex #277: refreshing the catalog cannot apply a draft absent from the editor', async () => {
+    const api = server(answering(() => ['ventas.region', 'ventas.ciudad']));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.input(screen.getByLabelText('Valor'), { target: { value: 'Sur' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Actualizar catálogo' }));
+    await screen.findByRole('button', { name: 'Añadir condición' });
+    expect(screen.queryByLabelText('Valor')).toBeNull();
+    const before = api.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(filtersSent(api.calls.slice(before))).not.toContainEqual(sur);
+  });
+
+  it('refreshing with an unapplied draft offers nothing to apply and asks without it', async () => {
+    const api = server(answering(() => ['ventas.region', 'ventas.ciudad']));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.input(screen.getByLabelText('Valor'), { target: { value: 'Sur' } });
+    const before = api.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Actualizar catálogo' }));
+    await screen.findByTestId('kpi-t');
+    expect(screen.getByText('Sin filtros aplicados.')).toBeTruthy();
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: 'Aplicar filtros' }).disabled,
+    ).toBe(true);
+    const sent = filtersSent(api.calls.slice(before).filter((c) => !c.url.endsWith('/catalog')));
+    expect(sent).toEqual([null]);
+  });
+
+  it('refreshing while editing applied filters keeps them as applied and drops the edit', async () => {
+    const api = server(answering(() => ['ventas.region', 'ventas.ciudad']));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.input(screen.getByLabelText('Valor'), { target: { value: 'Sur' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await waitFor(() => expect(filtersSent(api.calls).at(-1)).toEqual(sur));
+    await fireEvent.input(screen.getByLabelText('Valor'), { target: { value: 'Norte' } });
+    expect(screen.getByText('Hay cambios sin aplicar.')).toBeTruthy();
+    const before = api.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Actualizar catálogo' }));
+    await screen.findByTestId('kpi-t');
+    expect(screen.getByLabelText<HTMLInputElement>('Valor').value).toBe('Sur');
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    expect(
+      screen.getByRole<HTMLButtonElement>('button', { name: 'Aplicar filtros' }).disabled,
+    ).toBe(true);
+    // The question asked again is the applied one, never the edit.
+    const sent = filtersSent(api.calls.slice(before).filter((c) => !c.url.endsWith('/catalog')));
+    expect(sent).toEqual([sur]);
+  });
+
   it('applied filters the refreshed catalog no longer allows are shown, never sent', async () => {
     let fields = ['ventas.region', 'ventas.ciudad'];
     const api = server(answering(() => fields));
