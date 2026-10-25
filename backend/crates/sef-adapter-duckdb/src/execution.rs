@@ -729,6 +729,7 @@ pub fn lower(
         unique: std::collections::BTreeSet::new(),
         temporal: std::collections::BTreeSet::new(),
         allocations: std::collections::BTreeSet::new(),
+        scalar: std::collections::BTreeSet::new(),
         filter_targets: BTreeMap::new(),
         wide: None,
         carriers: BTreeMap::new(),
@@ -1059,6 +1060,9 @@ struct Lowering<'a> {
     unique: std::collections::BTreeSet<StableId>,
     temporal: std::collections::BTreeSet<StableId>,
     allocations: std::collections::BTreeSet<StableId>,
+    /// Nodes that yield exactly one row: aggregations without a grain, and
+    /// alignments of them (#258).
+    scalar: std::collections::BTreeSet<NodeId>,
     filter_targets: BTreeMap<String, StableId>,
     wide: Option<wide::Aggregation>,
     /// Per node, the output selections carried as exact decimal text
@@ -2119,6 +2123,11 @@ impl Lowering<'_> {
                     return Ok(format!("SELECT * FROM {}", self.node(input)?));
                 }
                 let keys = Self::grain(grain)?;
+                if keys.is_empty() {
+                    // An aggregation without GROUP BY: one row, even empty.
+                    self.scalar
+                        .insert(self.current.ok_or(ExecutionError::UnknownNode)?);
+                }
                 let mut projections = keys.clone();
                 let mut exact_sums = Vec::new();
                 for reference in measures {
@@ -2330,8 +2339,15 @@ impl Lowering<'_> {
                     ));
                 }
                 let keys = Self::grain(grain)?;
-                if keys.is_empty() {
-                    return Err(ExecutionError::Unsupported("scalar alignment"));
+                // Totals align side by side only when each branch provably
+                // yields exactly one row: nothing to multiply nor to lose.
+                let scalar = keys.is_empty();
+                if scalar {
+                    if !inputs.iter().all(|input| self.scalar.contains(input)) {
+                        return Err(ExecutionError::Unsupported("scalar alignment"));
+                    }
+                    self.scalar
+                        .insert(self.current.ok_or(ExecutionError::UnknownNode)?);
                 }
                 let mut projections: Vec<String> = keys
                     .iter()
@@ -2350,16 +2366,21 @@ impl Lowering<'_> {
                         projections.push(format!("{alias}.{quoted} AS {quoted}"));
                     }
                 }
-                let on = keys
-                    .iter()
-                    .map(|key| format!("a.{key} IS NOT DISTINCT FROM b.{key}"))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
+                let right = self.node(&inputs[1])?;
+                let join = if scalar {
+                    format!("CROSS JOIN {right} b")
+                } else {
+                    let on = keys
+                        .iter()
+                        .map(|key| format!("a.{key} IS NOT DISTINCT FROM b.{key}"))
+                        .collect::<Vec<_>>()
+                        .join(" AND ");
+                    format!("FULL OUTER JOIN {right} b ON {on}")
+                };
                 Ok(format!(
-                    "SELECT {} FROM {} a FULL OUTER JOIN {} b ON {on}",
+                    "SELECT {} FROM {} a {join}",
                     projections.join(", "),
-                    self.node(&inputs[0])?,
-                    self.node(&inputs[1])?
+                    self.node(&inputs[0])?
                 ))
             }
             Operator::ProjectSemanticOutput {
