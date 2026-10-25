@@ -262,3 +262,26 @@ describe('columns are addressed by their selection', () => {
     expect(screen.queryByRole('table')).toBeNull();
   });
 });
+
+describe('an excluded total (#266)', () => {
+  const empty = () => {
+    const run = real(total);
+    run.result.blocks[0]!.rows = [];
+    run.result.blocks[0]!.row_count = 0;
+    return run;
+  };
+
+  it('says there is no total, with no invented card, when the question may exclude it', () => {
+    render(KpiStrip, { run: empty(), emptyAllowed: true });
+    expect(screen.getByTestId('kpi-empty').textContent).toBe(
+      'No hay un total que cumpla este filtro.',
+    );
+    expect(screen.queryByRole('term')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    cleanup();
+    // The same answer to a question without that filter is incompatible.
+    render(KpiStrip, { run: empty() });
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(screen.queryByTestId('kpi-empty')).toBeNull();
+  });
+});

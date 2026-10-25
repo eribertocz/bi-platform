@@ -6,7 +6,7 @@ import {
   groupExact,
   IncompatibleResult,
   instantText,
-  kpis,
+  totals,
   MAX_BARS,
   MAX_DECIMAL_PRECISION,
   shown,
@@ -104,10 +104,10 @@ describe('KPIs come only from a total without a grain', () => {
         ['Sur', '2'],
       ],
     );
-    expect(() => kpis(run(grouped))).toThrow(IncompatibleResult);
+    expect(() => totals(run(grouped))).toThrow(IncompatibleResult);
     const oneRow = block([region, column({})], [['Norte', '2']]);
-    expect(() => kpis(run(oneRow))).toThrow(IncompatibleResult);
-    expect(() => kpis({ result: { blocks: [] } } as unknown as SemanticRun)).toThrow();
+    expect(() => totals(run(oneRow))).toThrow(IncompatibleResult);
+    expect(() => totals({ result: { blocks: [] } } as unknown as SemanticRun)).toThrow();
   });
 });
 
@@ -357,5 +357,56 @@ describe('dates and instants are real ones of the calendar and the clock', () =>
         },
       ),
     );
+  });
+});
+
+describe('a total excluded after aggregating (#266)', () => {
+  const metric = column({ selection_id: 't', type: 'DECIMAL(38,2)' });
+  const count = column({ selection_id: 'f', id: 'sef:metric/filas', type: 'INT64' });
+  const total = (rows: SemanticBlock['rows']) => run(block([metric, count], rows));
+
+  it('is empty only for a question that may exclude it, checked whole', () => {
+    expect(totals(total([]), true)).toEqual({ kind: 'empty' });
+    // Without that context, no answer is ever taken for an empty total.
+    expect(() => totals(total([]))).toThrow(IncompatibleResult);
+  });
+
+  it('a NULL row and a zero row are values, never «empty»', () => {
+    const nulls = totals(total([[null, '0']]), true);
+    expect(nulls.kind).toBe('values');
+    expect(nulls.kind === 'values' && nulls.items.map((i) => i.value.kind)).toEqual([
+      'missing',
+      'value',
+    ]);
+    const zeros = totals(total([['0.00', '0']]), true);
+    expect(zeros.kind === 'values' && zeros.items.map((i) => shownText(i.value))).toEqual([
+      '0,00',
+      '0',
+    ]);
+  });
+
+  it('still refuses more rows, a grain, other blocks or an inconsistent count', () => {
+    expect(() =>
+      totals(
+        total([
+          ['1.00', '1'],
+          ['2.00', '1'],
+        ]),
+        true,
+      ),
+    ).toThrow(IncompatibleResult);
+    expect(() => totals(run(block([region, metric], [])), true)).toThrow(IncompatibleResult);
+    const two = { result: { blocks: [block([metric], []), block([metric], [])] } };
+    expect(() => totals(two as unknown as SemanticRun, true)).toThrow(IncompatibleResult);
+    const lying = { ...block([metric, count], [['1.00', '1']]), row_count: 0 };
+    expect(() => totals(run(lying), true)).toThrow(IncompatibleResult);
+    const hollow = { ...block([metric, count], []), row_count: 1 };
+    expect(() => totals(run(hollow), true)).toThrow(IncompatibleResult);
+  });
+
+  it('Codex #278: a total without any metric column is incompatible even with HAVING', () => {
+    expect(() => totals(run(block([], [])), true)).toThrow(IncompatibleResult);
+    expect(() => totals(run(block([], [[]])), true)).toThrow(IncompatibleResult);
+    expect(() => totals(run(block([], [])))).toThrow(IncompatibleResult);
   });
 });

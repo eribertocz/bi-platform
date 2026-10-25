@@ -1,6 +1,7 @@
 import fc from 'fast-check';
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '#lib/api/session.ts';
+import { IncompatibleResult } from './exact';
 import type { CatalogModel, SemanticCatalog, SemanticRun } from '#lib/api/semantic.ts';
 import {
   answer,
@@ -229,4 +230,65 @@ it('explains a total out of range as such, not as an impossible selection', () =
   const message = failure(new ApiError(422, 'r', 'result_out_of_range')).message;
   expect(message).toContain('demasiado grande');
   expect(message).not.toContain('no se puede consultar en el modelo');
+});
+
+describe('a total excluded after aggregating, then the breakdown (#266)', () => {
+  const emptyTotal = () => {
+    const run = structuredClone(total) as unknown as SemanticRun;
+    run.result.blocks[0]!.rows = [];
+    run.result.blocks[0]!.row_count = 0;
+    return run;
+  };
+  const having = {
+    op: 'compare' as const,
+    target: { kind: 'metric' as const, selection: 'm:importe' },
+    comparison: '<' as const,
+    value: { type: 'number' as const, value: '100.20' },
+  };
+
+  it('accepts it for a HAVING question and still asks and checks the breakdown', async () => {
+    const run = vi.fn(async (request: { query: { selections: { kind: string }[] } }) =>
+      request.query.selections.some((s) => s.kind === 'dimension')
+        ? (region as unknown as SemanticRun)
+        : emptyTotal(),
+    );
+    const choice = {
+      model: 'm',
+      metrics: ['importe'],
+      dimensions: ['region'],
+      filters: { where: null, having },
+    };
+    const answered = await answer(choice, new AbortController().signal, run as never);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(answered.kpi.result.blocks[0]!.row_count).toBe(0);
+    // The breakdown is its own read: never assumed empty nor summed.
+    expect(answered.table?.result.blocks[0]!.rows.length).toBeGreaterThan(0);
+  });
+
+  it('refuses a total without columns even with HAVING, before the breakdown is asked', async () => {
+    const run = vi.fn(async () => {
+      const hollow = emptyTotal();
+      hollow.result.blocks[0]!.columns = [];
+      return hollow;
+    });
+    const choice = {
+      model: 'm',
+      metrics: ['importe'],
+      dimensions: ['region'],
+      filters: { where: null, having },
+    };
+    await expect(answer(choice, new AbortController().signal, run)).rejects.toThrow(
+      IncompatibleResult,
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses it without HAVING, before the breakdown is asked', async () => {
+    const run = vi.fn(async () => emptyTotal());
+    const choice = { model: 'm', metrics: ['importe'], dimensions: ['region'] };
+    await expect(answer(choice, new AbortController().signal, run)).rejects.toThrow(
+      IncompatibleResult,
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
 });
