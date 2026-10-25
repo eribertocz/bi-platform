@@ -437,7 +437,9 @@ describe('row filters: drafted, applied explicitly, cleared (#265)', () => {
     // The total and the breakdown, each with the filter, in sequence.
     expect(filtersSent(api.calls.slice(before))).toEqual([sur, sur]);
     expect(document.activeElement?.id).toBe('filters-applied');
-    expect(screen.getByText('Filtros aplicados: ventas.region es igual a «Sur».')).toBeTruthy();
+    expect(
+      screen.getByText('Filtros aplicados: antes de agregar, ventas.region es igual a «Sur».'),
+    ).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Limpiar filtros' }));
     await waitFor(() => expect(api.calls.length).toBe(before + 4));
     expect(filtersSent(api.calls.slice(before + 2))).toEqual([null, null]);
@@ -539,5 +541,302 @@ describe('row filters: drafted, applied explicitly, cleared (#265)', () => {
     );
     // Only the catalog was asked: no query with the clause removed.
     expect(api.calls.slice(before).map((c) => c.url)).toEqual(['/api/v1/semantic/catalog']);
+  });
+});
+
+describe('metric filters after aggregating, with the same editor (#149)', () => {
+  const ids = { importe_total: 'm:importe_total', filas: 'm:filas' } as const;
+  const over = (metric: keyof typeof ids, comparison: string, value: string) => ({
+    op: 'compare',
+    target: { kind: 'metric', selection: ids[metric] },
+    comparison,
+    value: { type: 'number', value },
+  });
+  const norte = {
+    op: 'compare',
+    target: { kind: 'dimension', name: 'ventas.region' },
+    comparison: '=',
+    value: { type: 'text', value: 'Norte' },
+  };
+  const typed = (metrics = ventas.metrics) => ({
+    ...ventas,
+    metrics,
+    fields: ['ventas.region', 'ventas.ciudad'].map((name) => ({
+      ...member(name, 'values', true),
+      type: 'VARCHAR',
+    })),
+  });
+  /** The recorded total, without its row: a total excluded by `having`. */
+  const excluded = () => {
+    const copy = structuredClone(total);
+    copy.result.blocks[0]!.rows = [];
+    copy.result.blocks[0]!.row_count = 0;
+    return copy;
+  };
+  const answering =
+    (models = () => [typed()], kpi = (): object => total) =>
+    (call: Call) =>
+      call.url.endsWith('/catalog')
+        ? catalog(models())
+        : Response.json(grouped(call) ? region : kpi());
+  type Sent = { filter?: unknown; having?: unknown; selections: { name: string }[] };
+  const queries = (calls: Call[]) =>
+    calls.filter((c) => !c.url.endsWith('/catalog')).map((c) => c.body!.query as Sent);
+  const sent = (calls: Call[]) => queries(calls).map((q) => [q.filter ?? null, q.having ?? null]);
+  const metrics = () => within(screen.getByRole('region', { name: 'Filtros de métricas' }));
+  const rows = () => within(screen.getByRole('region', { name: 'Filtros de filas' }));
+  const applyButton = () =>
+    screen.getByRole<HTMLButtonElement>('button', { name: 'Aplicar filtros' });
+  /** Clicks «Aplicar» as a person can: jsdom would deliver a click to a disabled button. */
+  async function apply() {
+    expect(applyButton().disabled).toBe(false);
+    await fireEvent.click(applyButton());
+  }
+  /** Writes one condition after aggregating, starting the tree if it is empty. */
+  async function writeMetric(metric: string, operator: string, value: string) {
+    const start = metrics().queryByRole('button', { name: 'Añadir condición de métrica' });
+    if (start) await fireEvent.click(start);
+    await fireEvent.change(metrics().getAllByLabelText('Métrica').at(-1)!, {
+      target: { value: metric },
+    });
+    await fireEvent.change(metrics().getAllByLabelText('Operador').at(-1)!, {
+      target: { value: operator },
+    });
+    await fireEvent.input(metrics().getAllByLabelText('Valor').at(-1)!, { target: { value } });
+  }
+  const check = (name: string) => fireEvent.click(screen.getByRole('checkbox', { name }));
+
+  it('offers only the selected metrics the session may filter and sends them as having', async () => {
+    const unfilterable = {
+      ...member('filas'),
+      capabilities: { ...member('filas').capabilities, filter: false },
+    };
+    const api = server(
+      answering(() => [typed([member('importe_total'), unfilterable, member('margen', 'masked')])]),
+    );
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await check('filas');
+    await check('ventas.region');
+    await screen.findByRole('table', { name: 'Desglose' });
+    await fireEvent.click(metrics().getByRole('button', { name: 'Añadir condición de métrica' }));
+    // Selected and filterable only: neither `filas` (no filter) nor `margen` (withheld).
+    const options = [...metrics().getByLabelText<HTMLSelectElement>('Métrica').options];
+    expect(options.map((o) => o.value)).toEqual(['importe_total']);
+    // The rows' editor still names fields only.
+    expect(rows().queryByLabelText('Métrica')).toBeNull();
+    const before = api.calls.length;
+    await writeMetric('importe_total', '>', '100.00');
+    expect(api.calls.length).toBe(before);
+    await apply();
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    // Both reads, in sequence, each with the same `having` and no `where`.
+    expect(sent(api.calls.slice(before))).toEqual([
+      [null, over('importe_total', '>', '100.00')],
+      [null, over('importe_total', '>', '100.00')],
+    ]);
+    expect(api.overlapped()).toBe(false);
+    expect(document.activeElement?.id).toBe('filters-applied');
+    expect(document.activeElement?.textContent?.trim()).toBe(
+      'Filtros aplicados: después de agregar, importe_total es mayor que 100.00.',
+    );
+  });
+
+  it('before and after aggregating apply together, at their places, and clear together', async () => {
+    const api = server(answering());
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await check('ventas.region');
+    await screen.findByRole('table', { name: 'Desglose' });
+    await fireEvent.click(rows().getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.input(rows().getByLabelText('Valor'), { target: { value: 'Norte' } });
+    await writeMetric('importe_total', '>', '100.00');
+    const before = api.calls.length;
+    await apply();
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    const both = [norte, over('importe_total', '>', '100.00')];
+    expect(sent(api.calls.slice(before))).toEqual([both, both]);
+    expect(document.getElementById('filters-applied')!.textContent!.trim()).toBe(
+      'Filtros aplicados: antes de agregar, ventas.region es igual a «Norte»; después de agregar, importe_total es mayor que 100.00.',
+    );
+    await fireEvent.click(screen.getByRole('button', { name: 'Limpiar filtros' }));
+    await waitFor(() => expect(api.calls.length).toBe(before + 4));
+    expect(sent(api.calls.slice(before + 2))).toEqual([
+      [null, null],
+      [null, null],
+    ]);
+    expect(metrics().getByRole('button', { name: 'Añadir condición de métrica' })).toBeTruthy();
+    expect(api.overlapped()).toBe(false);
+  });
+
+  it('a total excluded after aggregating says so, invents no figure, and shows the breakdown', async () => {
+    let filtered = false;
+    server(answering(undefined, () => (filtered ? excluded() : total)));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await check('ventas.region');
+    await screen.findByRole('table', { name: 'Desglose' });
+    await writeMetric('importe_total', '<', '100.20');
+    filtered = true;
+    await apply();
+    expect((await screen.findByTestId('kpi-empty')).textContent).toBe(
+      'No hay un total que cumpla este filtro.',
+    );
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    // The breakdown is the server's, read on its own: never summed into a total.
+    expect(screen.getByRole('table', { name: 'Desglose' })).toBeTruthy();
+    expect(document.body.textContent).not.toContain('300,30');
+  });
+
+  it('removing the filtered metric invalidates its clause; nothing is asked until it is back', async () => {
+    const api = server(answering());
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await check('filas');
+    await writeMetric('importe_total', '>', '100.00');
+    await apply();
+    await waitFor(() => expect(queries(api.calls).at(-1)!.having).toBeTruthy());
+    const before = api.calls.length;
+    await check('importe_total');
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('La métrica no está seleccionada en esta consulta.');
+    const select = metrics().getByLabelText<HTMLSelectElement>('Métrica');
+    expect(select.getAttribute('aria-invalid')).toBe('true');
+    expect(select.selectedOptions[0]!.textContent!.trim()).toBe('importe_total (no disponible)');
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // No clause dropped, none moved to `filas`: nothing is asked.
+    expect(api.calls.length).toBe(before);
+    // Nothing was edited, so nothing can be applied: only correcting or clearing it.
+    expect(applyButton().disabled).toBe(true);
+    // Back, now second in the order: the clause still names it, never `filas`.
+    await check('importe_total');
+    await waitFor(() => expect(api.calls.length).toBe(before + 1));
+    const asked = queries(api.calls).at(-1)!;
+    expect(asked.selections.map((s) => s.name)).toEqual(['filas', 'importe_total']);
+    expect(asked.having).toEqual(over('importe_total', '>', '100.00'));
+    expect(select.getAttribute('aria-invalid')).toBeNull();
+  });
+
+  it('a drafted metric condition whose metric is removed is never sent', async () => {
+    const api = server(answering());
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await check('filas');
+    await writeMetric('importe_total', '>', '100.00');
+    await check('importe_total');
+    // The question changed and is asked without the unapplied draft.
+    await waitFor(() =>
+      expect(
+        queries(api.calls)
+          .at(-1)!
+          .selections.map((s) => s.name),
+      ).toEqual(['filas']),
+    );
+    expect(queries(api.calls).some((q) => q.having)).toBe(false);
+    const before = api.calls.length;
+    await apply();
+    expect(screen.getByRole('alert').textContent).toMatch(/Corrige los errores/);
+    expect(document.activeElement).toBe(metrics().getByLabelText('Métrica'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(api.calls.length).toBe(before);
+  });
+
+  it('literals at the metric type, exactly: an INT64 past 2^53 travels as text, a lost digit never', async () => {
+    const counted = { ...member('filas'), type: 'INT64' };
+    const api = server(answering(() => [typed([member('importe_total'), counted])]));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await check('filas');
+    await writeMetric('importe_total', '=', '1.234');
+    const before = api.calls.length;
+    await apply();
+    const value = metrics().getByLabelText<HTMLInputElement>('Valor');
+    expect(document.activeElement).toBe(value);
+    expect(document.getElementById(value.getAttribute('aria-describedby')!)!.textContent).toBe(
+      'El valor no cabe exacto en DECIMAL(18,2).',
+    );
+    expect(api.calls.length).toBe(before);
+    await writeMetric('filas', '>=', '9007199254740993');
+    await apply();
+    await waitFor(() => expect(api.calls.length).toBe(before + 1));
+    expect(queries(api.calls).at(-1)!.having).toEqual(over('filas', '>=', '9007199254740993'));
+  });
+
+  it('a neutral 404 retires the selection, never the filters the editors show', async () => {
+    let revoked = false;
+    const api = server((call) =>
+      call.url.endsWith('/catalog')
+        ? catalog([typed()])
+        : revoked
+          ? problem(404, 'model_not_found')
+          : Response.json(grouped(call) ? region : total),
+    );
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await writeMetric('importe_total', '>', '100.00');
+    await apply();
+    await waitFor(() => expect(queries(api.calls).at(-1)!.having).toBeTruthy());
+    revoked = true;
+    await check('ventas.region');
+    expect((await screen.findAllByRole('alert')).map((a) => a.textContent).join(' ')).toContain(
+      'ya no está disponible',
+    );
+    expect(screen.getByText(/^Filtros aplicados:/).textContent).toContain(
+      'después de agregar, importe_total es mayor que 100.00',
+    );
+    revoked = false;
+    await check('importe_total');
+    await screen.findByTestId('kpi-t');
+    // Asked with the clause on screen, never silently without it.
+    expect(metrics().getByLabelText<HTMLInputElement>('Valor').value).toBe('100.00');
+    expect(queries(api.calls).at(-1)!.having).toEqual(over('importe_total', '>', '100.00'));
+  });
+
+  it('a late answer of a former filter never shows; a denial or an unconfirmed audit shows no figure', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let answer: (call: Call) => Response | Promise<Response> = answering();
+    // The held answer ignores its abort, as a slow network may: only the page discards it.
+    server((call) => answer(call));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await writeMetric('importe_total', '>', '100.00');
+    answer = async () => {
+      await held;
+      const late = structuredClone(total);
+      late.result.blocks[0]!.rows = [['999.99', '9']];
+      return Response.json(late);
+    };
+    await apply();
+    await waitFor(() => expect(screen.getByText('Consultando…')).toBeTruthy());
+    // Another question before it arrives: the late answer is discarded.
+    answer = answering();
+    await fireEvent.click(screen.getByRole('button', { name: 'Limpiar filtros' }));
+    await screen.findByTestId('kpi-t');
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.body.textContent).not.toContain('999,99');
+    expect(screen.getByTestId('kpi-t').textContent!.trim()).toBe('300,30');
+    // Denied: the neutral failure, nothing of the former answer kept.
+    answer = (call) =>
+      call.url.endsWith('/catalog') ? catalog([typed()]) : problem(403, 'denied');
+    await writeMetric('importe_total', '>', '100.00');
+    await apply();
+    expect((await screen.findByRole('alert')).textContent).toContain('HTTP 403 · Código: denied');
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+    // The audit of the breakdown not confirmed: the whole answer is withdrawn.
+    answer = (call) =>
+      call.url.endsWith('/catalog')
+        ? catalog([typed()])
+        : grouped(call)
+          ? problem(503, 'audit_unavailable')
+          : Response.json(total);
+    await check('ventas.region');
+    expect((await screen.findByRole('alert')).textContent).toContain('audit_unavailable');
+    expect(screen.queryByTestId('kpi-t')).toBeNull();
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/300,30|100,30|200,00/);
   });
 });

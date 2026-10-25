@@ -95,6 +95,16 @@ export function reconcile(choice: Choice | null, catalog: SemanticCatalog): Choi
 const hasFilters = (choice: Choice) => Boolean(choice.filters?.where || choice.filters?.having);
 
 /**
+ * The same question with the person's `filters`, before and after
+ * aggregating, as one: checked together, on one budget (`questionProblems`).
+ * Without any, the question carries none.
+ */
+export function withFilters(choice: Choice, filters: UserFilters): Choice {
+  const rest = { model: choice.model, metrics: choice.metrics, dimensions: choice.dimensions };
+  return filters.where || filters.having ? { ...rest, filters } : rest;
+}
+
+/**
  * Why `choice` cannot be sent on `model`: selections that would share an id,
  * or the person's filters, checked only against the question's own model.
  */
@@ -106,6 +116,22 @@ export function questionProblems(choice: Choice, model: CatalogModel): FilterPro
     ...selectionProblems(choice.metrics, choice.dimensions),
     ...(choice.filters ? filterProblems(choice.filters, model, choice.metrics) : []),
   ];
+}
+
+/**
+ * Problems of `choice` that its filters have only together, such as the
+ * budget both share: each editor checks its own alone and cannot mark them.
+ */
+export function jointProblems(choice: Choice, model: CatalogModel): FilterProblem[] {
+  const alone = choice.filters
+    ? [
+        ...filterProblems({ where: choice.filters.where, having: null }, model, choice.metrics),
+        ...filterProblems({ where: null, having: choice.filters.having }, model, choice.metrics),
+      ]
+    : [];
+  const key = (p: FilterProblem) => `${p.path}\n${p.message}`;
+  const marked = new Set(alone.map(key));
+  return questionProblems(choice, model).filter((p) => !marked.has(key(p)));
 }
 
 /**

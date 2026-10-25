@@ -1,24 +1,23 @@
 <script lang="ts">
-  import type { CatalogModel } from '#lib/api/semantic.ts';
   import {
     arity,
     condition,
-    conditionProblems,
-    filterable,
     OPERATOR_LABELS,
     operators,
     type ConditionChange,
+    type Domain,
     type Draft,
   } from './condition';
 
   let {
-    model,
+    domain,
     initial,
     id,
     onchange,
     onremove,
   }: {
-    model: CatalogModel;
+    /** What the condition may name: the rows' fields or the question's metrics. */
+    domain: Domain;
     initial: Draft;
     /** Unique prefix of this editor's element ids. */
     id: string;
@@ -31,34 +30,35 @@
   // A plain copy: `initial` may be another component's reactive state.
   let draft = $state<Draft>($state.snapshot(initial) as Draft);
 
-  const fields = $derived(filterable(model));
+  const fields = $derived(domain.members);
   const member = $derived(fields.find((f) => f.name === draft.field));
-  const allowed = $derived(member ? operators(member) : []);
-  const written = $derived(condition(draft, model));
-  const problems = $derived(conditionProblems(written, model));
+  // A member no longer offered keeps its type: its operator is not what is wrong.
+  const type = $derived(member?.type ?? domain.type(draft.field));
+  const allowed = $derived(operators({ type }));
+  const written = $derived(condition(draft, domain));
+  const problems = $derived(domain.problems(written));
   const count = $derived(arity(draft.operator, draft.values));
 
   const LABELS = OPERATOR_LABELS;
 
   /** The problems shown beside one control, by their path in the condition. */
   function at(...paths: string[]) {
-    return problems.filter((p) => paths.includes(p.path)).map((p) => p.message);
+    return problems
+      .filter((p) => paths.some((path) => p.path === `${domain.at}${path}`))
+      .map((p) => p.message);
   }
   const valuePaths = (i: number) =>
     draft.operator === 'between'
-      ? [i === 0 ? '/filter/low' : '/filter/high']
+      ? [i === 0 ? '/low' : '/high']
       : draft.operator === 'in'
-        ? [`/filter/values/${i}`]
-        : ['/filter/value'];
-  const general = $derived(at('/filter', '/filter/values', '/filter/comparison'));
+        ? [`/values/${i}`]
+        : ['/value'];
+  const general = $derived(at('', '/values', '/comparison'));
 
   function changed() {
     const snapshot = $state.snapshot(draft);
-    onchange({
-      draft: snapshot,
-      condition: condition(snapshot, model),
-      problems: conditionProblems(condition(snapshot, model), model),
-    });
+    const next = condition(snapshot, domain);
+    onchange({ draft: snapshot, condition: next, problems: domain.problems(next) });
   }
 
   function setValue(i: number, text: string) {
@@ -80,9 +80,9 @@
   }
 
   const placeholder = $derived(
-    member?.type === 'DATE'
+    type === 'DATE'
       ? 'AAAA-MM-DD'
-      : member?.type === 'INT64' || member?.type.startsWith('DECIMAL(')
+      : type === 'INT64' || type.startsWith('DECIMAL(')
         ? 'Número exacto, con punto decimal'
         : undefined,
   );
@@ -91,18 +91,18 @@
 <fieldset class="grid gap-2 rounded border border-slate-300 p-3">
   <legend class="font-semibold">Condición</legend>
   <div class="flex flex-wrap items-center gap-3">
-    <label for="{id}-field">Campo</label>
+    <label for="{id}-field">{domain.words.member}</label>
     <select
       id="{id}-field"
       class="rounded border border-slate-400 bg-white p-2"
       bind:value={draft.field}
       onchange={changed}
-      aria-invalid={at('/filter/target').length > 0 ? 'true' : undefined}
-      aria-describedby={at('/filter/target').length > 0 ? `${id}-field-error` : undefined}
+      aria-invalid={at('/target').length > 0 ? 'true' : undefined}
+      aria-describedby={at('/target').length > 0 ? `${id}-field-error` : undefined}
     >
       {#if !member}
         <option value={draft.field} disabled
-          >{draft.field || 'Elige un campo'} (no disponible)</option
+          >{draft.field || domain.words.pick} (no disponible)</option
         >
       {/if}
       {#each fields as field (field.name)}
@@ -128,8 +128,8 @@
       {/each}
     </select>
   </div>
-  {#if at('/filter/target').length > 0}
-    <p id="{id}-field-error" class="text-sm text-red-800">{at('/filter/target').join(' ')}</p>
+  {#if at('/target').length > 0}
+    <p id="{id}-field-error" class="text-sm text-red-800">{at('/target').join(' ')}</p>
   {/if}
   {#if member && !allowed.includes(draft.operator)}
     <p id="{id}-operator-error" class="text-sm text-red-800">
@@ -147,7 +147,7 @@
             : 'Hasta'
           : `Valor${count > 1 ? ` ${i + 1}` : ''}`}
       </label>
-      {#if member?.type === 'BOOLEAN'}
+      {#if type === 'BOOLEAN'}
         <select
           id="{id}-value-{i}"
           class="rounded border border-slate-400 bg-white p-2"
