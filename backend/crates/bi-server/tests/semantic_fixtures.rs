@@ -787,9 +787,8 @@ async fn real_semantic_answers_match_the_frontend_fixtures(pool: sqlx::PgPool) {
     );
     fixture("limited", &limited);
 
-    // Beyond DECIMAL(38): the cube of `importe`, aggregated without a grain
-    // (the emulation neither orders nor limits, so it answers no grouped
-    // block yet). Written out by hand: 100.10³ + 0.20³ + 200.20³ + (-0.20)³.
+    // Beyond DECIMAL(38): the cube of `importe`, aggregated exactly by the
+    // emulation. Written out by hand: 100.10³ + 0.20³ + 200.20³ + (-0.20)³.
     let wide = h
         .query(
             &ana,
@@ -805,6 +804,50 @@ async fn real_semantic_answers_match_the_frontend_fixtures(pool: sqlx::PgPool) {
     );
     assert_eq!(rows(&wide), &json!([["9027027.009000"]]));
     fixture("wide", &wide);
+
+    // The same cube by region, in the API's canonical order and limit
+    // (#256): Norte = 100.10³ + 0.20³, Sur = 200.20³ + (-0.20)³.
+    let cube_by_region = |extra: Value| {
+        let mut query = json!({
+            "selections": [dimension("r", "ventas.region"), metric("c", "cubo")]
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            query[key] = value.clone();
+        }
+        request("metrics/anchos.yaml", query)
+    };
+    let grouped = h.query(&ana, &cube_by_region(json!({}))).await;
+    let block = &grouped["result"]["blocks"][0];
+    assert_eq!(block["columns"][1]["type"], "DECIMAL(56,6)");
+    assert_eq!(
+        rows(&grouped),
+        &json!([["Norte", "1003003.009000"], ["Sur", "8024024.000000"]])
+    );
+    assert_eq!(
+        (&block["row_count"], &block["limit"]),
+        (&json!(2), &json!(1000))
+    );
+    fixture("wide_grouped", &grouped);
+    // Ordered by the cube descending, then cut: limit 1 is Sur, offset 1
+    // Norte, an offset past both no rows.
+    let order = json!([{ "selection": "c", "descending": true }, { "selection": "r" }]);
+    for (window, expected) in [
+        (json!({ "limit": 1 }), json!([["Sur", "8024024.000000"]])),
+        (
+            json!({ "limit": 1, "offset": 1 }),
+            json!([["Norte", "1003003.009000"]]),
+        ),
+        (json!({ "limit": 1, "offset": 2 }), json!([])),
+    ] {
+        let mut extra = window.clone();
+        extra["order_by"] = order.clone();
+        let cut = h.query(&ana, &cube_by_region(extra)).await;
+        assert_eq!(rows(&cut), &expected, "{window}");
+        assert_eq!(
+            cut["result"]["blocks"][0]["columns"][1]["type"],
+            "DECIMAL(56,6)"
+        );
+    }
 
     // A masked column is still refused whole: there is no `masked.json`
     // until the server can answer one.

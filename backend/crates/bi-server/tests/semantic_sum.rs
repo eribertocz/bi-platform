@@ -32,7 +32,8 @@ const TABLES: &str = "ATTACH ':memory:' AS lake;
 CREATE TABLE lake.main.n18 (id BIGINT NOT NULL, caso VARCHAR NOT NULL, v DECIMAL(18,2));
 CREATE TABLE lake.main.n38 (id BIGINT NOT NULL, caso VARCHAR NOT NULL, v DECIMAL(38,2));
 CREATE TABLE lake.main.ni (id BIGINT NOT NULL, caso VARCHAR NOT NULL, v BIGINT);
-CREATE TABLE lake.main.nw (id BIGINT NOT NULL, caso VARCHAR NOT NULL, a DECIMAL(38,0), b DECIMAL(37,0));";
+CREATE TABLE lake.main.nw (id BIGINT NOT NULL, caso VARCHAR NOT NULL, a DECIMAL(38,0), b DECIMAL(37,0));
+CREATE TABLE lake.main.orden (id BIGINT NOT NULL, caso VARCHAR, a DECIMAL(38,0), b DECIMAL(37,0));";
 
 fn rows() -> String {
     format!(
@@ -53,7 +54,12 @@ fn rows() -> String {
             (5, 'js', 9007199254740993), (6, 'js', 1);
         INSERT INTO lake.main.nw SELECT 1, 'uno', {N}, {N37}
             UNION ALL SELECT 10 + i, 'diez', {N}, {N37} FROM range(10) t(i)
-            UNION ALL SELECT 30 + i, 'once', {N}, {N37} FROM range(11) t(i);"
+            UNION ALL SELECT 30 + i, 'once', {N}, {N37} FROM range(11) t(i);
+        INSERT INTO lake.main.orden VALUES
+            (1, 'grande', {N}, {N37}), (2, 'p53a', 9007199254740993, 1),
+            (3, 'p53b', 9007199254740992, 1), (4, 'neg', -5, 1),
+            (5, 'empate1', 7, 1), (6, 'empate2', 7, 1), (7, NULL, 3, 1),
+            (8, 'nulo', NULL, 1);"
     )
 }
 
@@ -124,6 +130,14 @@ fn project() -> tempfile::TempDir {
     write(
         "nw.yaml",
         model("nw", &["a", "b"], &[("producto", "SUM(nw.a * nw.b)")]),
+    );
+    write(
+        "orden.yaml",
+        model(
+            "orden",
+            &["a", "b"],
+            &[("producto", "SUM(orden.a * orden.b)")],
+        ),
     );
     std::fs::write(
         p.path().join("policies/members.yaml"),
@@ -633,6 +647,116 @@ async fn having_on_a_widened_derived_metric_compares_exactly(pool: sqlx::PgPool)
             .iter()
             .all(|row| row[2] != json!("propietario")),
         "{body:#}"
+    );
+    h.db.close().await;
+}
+
+/// A DECIMAL(76,0) sum by `caso`, emulated exactly, ordered and cut by the
+/// API (#256): negatives, a NULL key, a NULL sum, a tie broken by an
+/// explicit second term and integers past 2^53 one unit apart.
+#[sqlx::test(migrations = false)]
+async fn a_wide_grouped_sum_is_ordered_and_cut_exactly(pool: sqlx::PgPool) {
+    const GRANDE: &str =
+        "999999999999999999999999999999999999890000000000000000000000000000000000001";
+    let h = harness(pool).await;
+    let ana = h.login().await;
+    let by = |selection: &str, descending: bool, nulls_first: bool| json!({ "selection": selection, "descending": descending, "nulls_first": nulls_first });
+    let ask = |order: Value, limit: Option<u64>, offset: Option<u64>| {
+        json!({
+            "model": "metrics/orden.yaml",
+            "query": {
+                "selections": [
+                    {"id": "c", "kind": "dimension", "name": "orden.caso"},
+                    {"id": "p", "kind": "metric", "name": "producto"}
+                ],
+                "order_by": order,
+                "limit": limit,
+                "offset": offset
+            }
+        })
+    };
+    let names = |body: &Value| -> Vec<Value> { table(body).iter().map(|r| r[0].clone()).collect() };
+
+    // Sum descending, NULL sums last; the tie on 7 by `caso` ascending.
+    let first = json!([by("p", true, false), by("c", false, false)]);
+    let (status, body) = h.query(&ana, &ask(first.clone(), None, None)).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    let block = &body["result"]["blocks"][0];
+    let types: Vec<&str> = block["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types, ["VARCHAR", "DECIMAL(76,0)"]);
+    assert_eq!(
+        table(&body),
+        vec![
+            json!(["grande", GRANDE]),
+            json!(["p53a", "9007199254740993"]),
+            json!(["p53b", "9007199254740992"]),
+            json!(["empate1", "7"]),
+            json!(["empate2", "7"]),
+            json!([null, "3"]),
+            json!(["neg", "-5"]),
+            json!(["nulo", null]),
+        ]
+    );
+    // Ascending with NULL sums first; the tie by `caso` descending.
+    let (status, body) = h
+        .query(
+            &ana,
+            &ask(
+                json!([by("p", false, true), by("c", true, true)]),
+                None,
+                None,
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(
+        names(&body),
+        [
+            json!("nulo"),
+            json!("neg"),
+            json!(null),
+            json!("empate2"),
+            json!("empate1"),
+            json!("p53b"),
+            json!("p53a"),
+            json!("grande"),
+        ]
+    );
+    // By the key alone, NULL first, in byte order.
+    let (status, body) = h
+        .query(&ana, &ask(json!([by("c", false, true)]), None, None))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(
+        names(&body),
+        [
+            json!(null),
+            json!("empate1"),
+            json!("empate2"),
+            json!("grande"),
+            json!("neg"),
+            json!("nulo"),
+            json!("p53a"),
+            json!("p53b"),
+        ]
+    );
+    // The window comes after aggregation and order.
+    let (status, body) = h.query(&ana, &ask(first.clone(), Some(2), Some(1))).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(names(&body), [json!("p53a"), json!("p53b")]);
+    assert_eq!(body["result"]["blocks"][0]["limit"], json!(2));
+    // Past the last group: no rows, the same typed columns.
+    let (status, body) = h.query(&ana, &ask(first, Some(5), Some(8))).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(table(&body), Vec::<Value>::new());
+    assert_eq!(
+        body["result"]["blocks"][0]["columns"][1]["type"],
+        "DECIMAL(76,0)"
     );
     h.db.close().await;
 }
