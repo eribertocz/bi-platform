@@ -155,6 +155,12 @@
       </select>
       <button type="button" onclick={() => catalogRevision++}>Actualizar catálogo</button>
     </div>
+    {#if choice && !model}
+      <p class="text-sm text-red-800" role="alert">
+        El modelo de esta pregunta ya no está en tu catálogo; sus filtros no se aplican a otro.
+        Elige un modelo para empezar otra pregunta.
+      </p>
+    {/if}
     {#if model && choice}
       <fieldset aria-describedby="metrics-limit">
         <legend class="font-semibold">Métricas (1 a {MAX_METRICS})</legend>

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { CatalogModel } from '#lib/api/semantic.ts';
 import { askable, reconcile, requests, type Choice } from './explore';
 import {
+  dimensionId,
   filterProblems,
   filterQuery,
   InvalidFilters,
@@ -359,5 +360,111 @@ describe('properties', () => {
       having: null,
     });
     expect(() => restoreFilters(tampered)).toThrow(InvalidFilters);
+  });
+});
+
+// Reproductions of Codex's review of #274, kept as regressions.
+describe('a filtered question is never asked as another one (Codex review of #274)', () => {
+  const plain = (name: string) => ({
+    name,
+    type: 'INT64',
+    lifecycle: { state: 'active' as const },
+    capabilities: { select: 'values' as const, filter: true, group: true, order: true },
+  });
+  const ventas: CatalogModel = {
+    model: 'metrics/ventas.yaml',
+    name: 'Ventas',
+    fields: [],
+    metrics: [plain('old'), plain('new')],
+  };
+  const choice: Choice = {
+    model: ventas.model,
+    metrics: ['old'],
+    dimensions: [],
+    filters: {
+      where: null,
+      having: {
+        op: 'compare',
+        target: { kind: 'metric', selection: metricId('old') },
+        comparison: '>',
+        value: { type: 'number', value: '100' },
+      },
+    },
+  };
+
+  it('keeps the predicate, blocked, when the last selected metric disappears', () => {
+    const updated = { ...ventas, metrics: [plain('new')] };
+    const next = reconcile(choice, { status: 'ready', models: [updated] });
+    expect(next?.filters).toEqual(choice.filters);
+    expect(next?.metrics).toEqual([]);
+    expect(askable(next, updated)).toBe(false);
+  });
+
+  it('never asks another model, nor the same one with no catalog left', () => {
+    const other = { ...ventas, model: 'metrics/other.yaml' };
+    const moved = reconcile(choice, { status: 'ready', models: [other] });
+    expect(moved).toEqual(choice);
+    expect(askable(moved, other)).toBe(false);
+    expect(reconcile(choice, { status: 'ready', models: [] })).toEqual(choice);
+  });
+
+  it('a question without filters starts over as before', () => {
+    const plainChoice = { model: ventas.model, metrics: ['gone'], dimensions: [] };
+    expect(reconcile(plainChoice, { status: 'ready', models: [ventas] })).toEqual({
+      model: ventas.model,
+      metrics: ['old'],
+      dimensions: [],
+    });
+  });
+});
+
+describe('stable ids within the bound (Codex review of #274)', () => {
+  const long = (n: number, tail = '') => 'a'.repeat(n - tail.length) + tail;
+  const catalogWith = (metric: string, field: string): CatalogModel => ({
+    model: 'metrics/m.yaml',
+    name: 'm',
+    fields: [member(field, 'VARCHAR')],
+    metrics: [member(metric, 'INT64')],
+  });
+
+  it.each([254, 255, MAX_TEXT])('a name of %i characters keeps an id of at most 256', (n) => {
+    for (const id of [metricId(long(n)), dimensionId(long(n))]) {
+      expect([...id].length).toBeLessThanOrEqual(MAX_TEXT);
+    }
+    // Names that only differ past the kept start still get different ids.
+    expect(metricId(long(n, 'x'))).not.toBe(metricId(long(n, 'y')));
+  });
+
+  it('asks a question over the longest names, its HAVING by the same id', () => {
+    const [metric, field] = [long(MAX_TEXT, 'm'), `d.${long(MAX_TEXT - 2)}`];
+    const current = catalogWith(metric, field);
+    const choice: Choice = {
+      model: current.model,
+      metrics: [metric],
+      dimensions: [field],
+      filters: {
+        where: null,
+        having: eq({ kind: 'metric', selection: metricId(metric) }, num('1')),
+      },
+    };
+    expect(askable(choice, current)).toBe(true);
+    const { table, labels } = requests(choice);
+    for (const s of table!.query.selections) expect([...s.id].length).toBeLessThanOrEqual(MAX_TEXT);
+    expect(labels[metricId(metric)]).toBe(metric);
+    expect(table!.query.having).toEqual(choice.filters!.having);
+  });
+
+  it('refuses a question whose selections would share an id', () => {
+    const name = long(MAX_TEXT);
+    const twin = `${[...name].slice(0, MAX_TEXT - 19).join('')}~${metricId(name).slice(-16)}`;
+    const current: CatalogModel = {
+      model: 'metrics/m.yaml',
+      name: 'm',
+      fields: [],
+      metrics: [member(name, 'INT64'), member(twin, 'INT64')],
+    };
+    const choice = { model: current.model, metrics: [name, twin], dimensions: [] };
+    expect(metricId(twin)).toBe(metricId(name));
+    expect(askable(choice, current)).toBe(false);
   });
 });

@@ -21,11 +21,43 @@ export const MAX_FILTER_NODES = 256;
 export const MAX_FILTER_DEPTH = 16;
 export const MAX_TEXT = 256;
 
+/** FNV-1a (64 bits) of the UTF-8 bytes of `text`, as 16 hex digits. */
+function fingerprint(text: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(text)) {
+    hash = ((hash ^ BigInt(byte)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+/**
+ * A selection id stable by name and within the contract's bound: the name
+ * itself when `prefix:name` fits; otherwise its start and a fingerprint of
+ * the whole name, exactly `MAX_TEXT` characters. Ids the question would
+ * repeat are refused by `selectionProblems`, never truncated into one.
+ */
+function stableId(prefix: 'm' | 'd', name: string): string {
+  const id = `${prefix}:${name}`;
+  if ([...id].length <= MAX_TEXT) return id;
+  return `${prefix}:${[...name].slice(0, MAX_TEXT - 19).join('')}~${fingerprint(name)}`;
+}
+
 /** The selection id of a metric in a question: stable by its name, so a
  *  removed metric leaves its `having` an orphan instead of moving it. */
-export const metricId = (name: string) => `m:${name}`;
+export const metricId = (name: string) => stableId('m', name);
 /** The selection id of a dimension in a question, stable by its name. */
-export const dimensionId = (name: string) => `d:${name}`;
+export const dimensionId = (name: string) => stableId('d', name);
+
+/** Two selections of a question that would share an id: never sent. */
+export function selectionProblems(
+  metrics: readonly string[],
+  dimensions: readonly string[],
+): FilterProblem[] {
+  const ids = [...metrics.map(metricId), ...dimensions.map(dimensionId)];
+  return new Set(ids).size === ids.length
+    ? []
+    : [{ path: '/selections', message: 'Dos selecciones tendrían el mismo identificador.' }];
+}
 
 /** Why a filter cannot be sent, at a JSON pointer into the query. */
 export type FilterProblem = { path: string; message: string };

@@ -5,6 +5,7 @@ import {
   filterProblems,
   filterQuery,
   metricId,
+  selectionProblems,
   type FilterProblem,
   type UserFilters,
 } from './filters';
@@ -69,21 +70,43 @@ export function initialChoice(catalog: SemanticCatalog): Choice | null {
  * clause removed to ask something else (#142).
  */
 export function reconcile(choice: Choice | null, catalog: SemanticCatalog): Choice | null {
-  const model = catalog.models.find((m) => m.model === choice?.model);
-  if (!choice || !model) return initialChoice(catalog);
+  if (!choice) return initialChoice(catalog);
+  // A question with filters never starts over by itself: it stays, blocked,
+  // until the person resolves it (#142). One without keeps doing so.
+  const filtered = hasFilters(choice);
+  const model = catalog.models.find((m) => m.model === choice.model);
+  if (!model) return filtered ? choice : initialChoice(catalog);
   const metrics = choice.metrics.filter((name) => selectable(model).some((m) => m.name === name));
   const dimensions = choice.dimensions.filter((name) =>
     groupable(model).some((f) => f.name === name),
   );
-  const filters = choice.filters ? { filters: choice.filters } : {};
-  return metrics.length > 0
-    ? { model: model.model, metrics, dimensions, ...filters }
-    : (startOn(model) ?? initialChoice(catalog));
+  if (metrics.length > 0 || filtered) {
+    return {
+      model: model.model,
+      metrics,
+      dimensions,
+      ...(filtered ? { filters: choice.filters } : {}),
+    };
+  }
+  return startOn(model) ?? initialChoice(catalog);
 }
 
-/** Why the person's filters of `choice` cannot be sent on `model`. */
-export const questionProblems = (choice: Choice, model: CatalogModel): FilterProblem[] =>
-  choice.filters ? filterProblems(choice.filters, model, choice.metrics) : [];
+/** Whether `choice` carries any filter of the person. */
+const hasFilters = (choice: Choice) => Boolean(choice.filters?.where || choice.filters?.having);
+
+/**
+ * Why `choice` cannot be sent on `model`: selections that would share an id,
+ * or the person's filters, checked only against the question's own model.
+ */
+export function questionProblems(choice: Choice, model: CatalogModel): FilterProblem[] {
+  if (model.model !== choice.model) {
+    return [{ path: '/model', message: 'El modelo de esta pregunta ya no está en tu catálogo.' }];
+  }
+  return [
+    ...selectionProblems(choice.metrics, choice.dimensions),
+    ...(choice.filters ? filterProblems(choice.filters, model, choice.metrics) : []),
+  ];
+}
 
 /**
  * Whether `choice` is a question the page may send: its filters, if any,
@@ -94,8 +117,8 @@ export const askable = (choice: Choice | null, model?: CatalogModel): choice is 
   choice.metrics.length >= 1 &&
   choice.metrics.length <= MAX_METRICS &&
   choice.dimensions.length <= MAX_DIMENSIONS &&
-  (!(choice.filters?.where || choice.filters?.having) ||
-    (model !== undefined && questionProblems(choice, model).length === 0));
+  selectionProblems(choice.metrics, choice.dimensions).length === 0 &&
+  (!hasFilters(choice) || (model !== undefined && questionProblems(choice, model).length === 0));
 
 /**
  * The requests of a question: the total without a grain (the KPIs) and, with
