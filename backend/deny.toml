@@ -11,7 +11,6 @@ yanked = "deny"
 # and what removes it. Re-checked whenever the dependency is upgraded.
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "openidconnect 4.0.1 uses rsa 0.9.10 only for public JWKS signature verification; the server has no RSA private key, signing or decryption path. The private-key timing attack is unreachable. Remove when upstream switches or a fixed rsa release exists (#70)." },
-    { id = "RUSTSEC-2024-0436", reason = "paste (unmaintained) is a compile-time macro of parquet 58; no runtime code. Remove when arrow-rs drops it." },
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 arrives only through openidconnect 4.0.1 (latest) -> p256/p384 0.13 -> elliptic-curve 0.13, which has no release on the fixed 0.7.6 line. The server only verifies public ES256 JWKS signatures; it holds no EC private key and has no signing, ECDH or decryption path, so no secret integer reaches the affected constant-time operations. Remove when openidconnect moves to elliptic-curve >= 0.14 (#70)." },
 ]
 
