@@ -183,6 +183,8 @@ pub struct DuckDbPlan {
     certificate: Certificate,
     checks: Vec<String>,
     wide: Option<wide::Aggregation>,
+    /// Exact range checks of every wide-input SUM, with the CTEs they read.
+    range_checks: Vec<String>,
     /// Per block, the certified (precision, scale) of each decimal output
     /// column, parsed once at lowering (#261).
     decimals: BTreeMap<String, Vec<Option<(u8, u8)>>>,
@@ -317,13 +319,26 @@ impl DuckDbPlan {
         let combine = format!("sef_exact_combine_{suffix}");
         let sort_key = format!("sef_exact_sort_key_{suffix}");
         let cmp = format!("sef_exact_cmp_{suffix}");
+        let part = format!("sef_exact_part_{suffix}");
+        let sum_parts = format!("sef_exact_sum_parts_{suffix}");
         let uses = |name: &str| {
             self.sql.iter().any(|(_, sql)| sql.contains(name))
                 || self.checks.iter().any(|sql| sql.contains(name))
+                || self.range_checks.iter().any(|sql| sql.contains(name))
         };
         if uses("sef_exact_combine(") {
             connection
                 .register_scalar_function::<exact::Combine>(&combine)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_part(") {
+            connection
+                .register_scalar_function::<exact::Part>(&part)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_sum_parts(") {
+            connection
+                .register_scalar_function::<exact::SumParts>(&sum_parts)
                 .map_err(|_| ExecutionError::Engine)?;
         }
         if uses("sef_exact_cmp(") {
@@ -352,6 +367,8 @@ impl DuckDbPlan {
                 .replace("sef_exact_combine(", &format!("{combine}("))
                 .replace("sef_exact_sort_key(", &format!("{sort_key}("))
                 .replace("sef_exact_cmp(", &format!("{cmp}("))
+                .replace("sef_exact_part(", &format!("{part}("))
+                .replace("sef_exact_sum_parts(", &format!("{sum_parts}("))
         };
         let engine_version = connection
             .query_row("SELECT version()", [], |row| row.get(0))
@@ -382,6 +399,21 @@ impl DuckDbPlan {
                 .map_err(|_| ExecutionError::Engine)?;
             if violated {
                 return Err(ExecutionError::ContractViolation);
+            }
+        }
+        // A SUM past its certified range in any group fails the whole
+        // execution before any data leaves, selected or not (#261).
+        for check in &self.range_checks {
+            limits.checkpoint()?;
+            let mut statement = transaction
+                .prepare(&physical_sql(check))
+                .map_err(|_| ExecutionError::Engine)?;
+            let bound = statement_values(&statement, &values)?;
+            let overflowed: bool = statement
+                .query_row(duckdb::params_from_iter(bound), |row| row.get(0))
+                .map_err(|_| ExecutionError::Engine)?;
+            if overflowed {
+                return Err(ExecutionError::ResultOutOfRange);
             }
         }
         let mut rows = 0_usize;
@@ -701,6 +733,8 @@ pub fn lower(
         wide: None,
         carriers: BTreeMap::new(),
         current: None,
+        current_name: String::new(),
+        range_checks: Vec::new(),
     };
     let mut ctes = Vec::new();
     for node in plan.graph.topological(&roots) {
@@ -730,6 +764,7 @@ pub fn lower(
         }
         let name = format!("n{}", ctes.len());
         lowering.current = Some(node.id);
+        lowering.current_name.clone_from(&name);
         let body = lowering.operator(&node.operator)?;
         if !lowering.carriers.contains_key(&node.id)
             && let [input] = node.operator.inputs().as_slice()
@@ -799,6 +834,11 @@ pub fn lower(
             .collect(),
         wide: lowering.wide,
         decimals: decimal_outputs(&metadata),
+        range_checks: lowering
+            .range_checks
+            .iter()
+            .map(|check| format!("WITH {} {check}", ctes.join(",\n")))
+            .collect(),
         definitions,
         output_grains: validated
             .query
@@ -1026,8 +1066,12 @@ struct Lowering<'a> {
     /// scale. Selection ids are unique only within a block, so carriers
     /// follow the node that projected them, never another block.
     carriers: BTreeMap<NodeId, BTreeMap<String, u8>>,
-    /// The node being lowered.
+    /// The node being lowered, and the name of its CTE.
     current: Option<NodeId>,
+    current_name: String,
+    /// Checks that a SUM stayed within its certified range in every group
+    /// of the node computing it, evaluated before any data leaves (#261).
+    range_checks: Vec<String>,
 }
 
 /// The decimal type of `ty` when DuckDB cannot represent it natively.
@@ -1185,6 +1229,17 @@ impl Lowering<'_> {
         Ok(format!("CAST(${} AS {ty})", self.parameters.len()))
     }
 
+    /// A literal bound as its exact decimal text, never through a native
+    /// decimal type: it may need more than 38 digits (#261).
+    fn carrier_literal(&mut self, value: &Literal) -> Result<String, ExecutionError> {
+        if matches!(value, Literal::Null(_)) {
+            return Ok("NULL".into());
+        }
+        bind_literal(value)?;
+        self.parameters.push(Parameter::Literal(value.clone()));
+        Ok(format!("CAST(${} AS VARCHAR)", self.parameters.len()))
+    }
+
     /// `column op value` for a metric carried as exact decimal text (#261).
     fn exact_compare(
         &mut self,
@@ -1192,10 +1247,8 @@ impl Lowering<'_> {
         op: &str,
         value: &Literal,
     ) -> Result<String, ExecutionError> {
-        let value = self.literal(value)?;
-        Ok(format!(
-            "(sef_exact_cmp({column}, CAST({value} AS VARCHAR)) {op} 0)"
-        ))
+        let value = self.carrier_literal(value)?;
+        Ok(format!("(sef_exact_cmp({column}, {value}) {op} 0)"))
     }
 
     fn filter(&mut self, predicate: &FilterExpr) -> Result<String, ExecutionError> {
@@ -2064,6 +2117,7 @@ impl Lowering<'_> {
                 }
                 let keys = Self::grain(grain)?;
                 let mut projections = keys.clone();
+                let mut exact_sums = Vec::new();
                 for reference in measures {
                     let measure = self
                         .model
@@ -2122,6 +2176,33 @@ impl Lowering<'_> {
                         AggregateFunction::Min => "MIN",
                         AggregateFunction::Max => "MAX",
                     };
+                    let wide_input = measure.aggregation == AggregateFunction::Sum
+                        && matches!(
+                            measure.scalar_expression.as_ref().map(|e| &e.value_type),
+                            Some(ValueType::Decimal(d)) if d.precision() > 18
+                        );
+                    if let (true, ValueType::Decimal(ty)) = (wide_input, &measure.value_type) {
+                        // Summed in three exact parts (#261): DuckDB's 128-bit
+                        // accumulator never overflows, and the range of the
+                        // sum is decided exactly on its total.
+                        let part = |index: u8| {
+                            format!(
+                                "CAST(SUM(sef_exact_part(CAST({expr} AS VARCHAR), '{}:{index}')) AS VARCHAR)",
+                                ty.scale()
+                            )
+                        };
+                        projections.push(format!(
+                            "sef_exact_sum_parts({}, {}, {}, '{}:{}') AS {}",
+                            part(0),
+                            part(1),
+                            part(2),
+                            ty.precision(),
+                            ty.scale(),
+                            quote(&format!("{}__sum", reference.id))
+                        ));
+                        exact_sums.push((reference.id.to_string(), *ty));
+                        continue;
+                    }
                     projections.push(format!(
                         "CAST({function}({}{expr}) AS {}) AS {}",
                         if measure.aggregation == AggregateFunction::CountDistinct {
@@ -2138,11 +2219,38 @@ impl Lowering<'_> {
                 } else {
                     format!(" GROUP BY {}", keys.join(", "))
                 };
-                let aggregated = format!(
+                let mut aggregated = format!(
                     "SELECT {} FROM {}{grouped}",
                     projections.join(", "),
                     self.node(input)?
                 );
+                if !exact_sums.is_empty() {
+                    // Each exact sum becomes its native value within range,
+                    // and an overflow flag the plan checks in every group.
+                    let mut excluded = Vec::new();
+                    let mut columns = Vec::new();
+                    for (id, ty) in &exact_sums {
+                        let sum = quote(&format!("{id}__sum"));
+                        let flag = quote(&format!("{id}__overflow"));
+                        excluded.push(sum.clone());
+                        columns.push(format!(
+                            "CASE WHEN {sum} = '!' THEN NULL ELSE CAST({sum} AS DECIMAL({},{})) END AS {}",
+                            ty.precision(),
+                            ty.scale(),
+                            quote(id)
+                        ));
+                        columns.push(format!("COALESCE({sum} = '!', false) AS {flag}"));
+                        self.range_checks.push(format!(
+                            "SELECT EXISTS(SELECT 1 FROM {} WHERE {flag})",
+                            self.current_name
+                        ));
+                    }
+                    aggregated = format!(
+                        "SELECT * EXCLUDE ({}), {} FROM ({aggregated})",
+                        excluded.join(", "),
+                        columns.join(", ")
+                    );
+                }
                 let metrics = serves
                     .iter()
                     .map(|reference| {

@@ -336,6 +336,119 @@ impl VArrowScalar for Combine {
     }
 }
 
+/// The base of the three parts a wide SUM input is split into (#261).
+const PART: i64 = 1_000_000_000_000_000_000;
+
+/// Part `index` (0, 1, 2: units of 10^36, 10^18, 1) of the coefficient of
+/// `text` at `scale` digits, truncated toward zero so that every part has
+/// the value's sign. Each part stays below 10^18 in magnitude, so DuckDB
+/// sums them in 128 bits for any feasible number of rows.
+pub(super) fn part(text: &str, scale: u8, index: u8) -> Result<i64, ExecutionError> {
+    let value = coefficient(text, scale)?;
+    let base = BigInt::from(PART);
+    let high = &value / (&base * &base);
+    let rest = &value % (&base * &base);
+    let part = match index {
+        0 => high,
+        1 => &rest / &base,
+        2 => &rest % &base,
+        _ => return Err(ExecutionError::Engine),
+    };
+    // A DECIMAL of at most 38 digits keeps every part within i64.
+    i64::try_from(part).map_err(|_| ExecutionError::SourceContract)
+}
+
+/// The exact sum of three part sums, as a carrier of `scale` digits, or
+/// `None` when it exceeds `precision` digits: the certified range of SUM
+/// decided exactly, never by the engine's accumulator (#261).
+pub(super) fn sum_parts(
+    high: &str,
+    middle: &str,
+    low: &str,
+    precision: u8,
+    scale: u8,
+) -> Result<Option<String>, ExecutionError> {
+    let integer = |t: &str| coefficient(t, 0);
+    let base = BigInt::from(PART);
+    let total = integer(high)? * &base * &base + integer(middle)? * &base + integer(low)?;
+    Ok(within(&total, precision).then(|| carrier(&total, scale)))
+}
+
+/// `sef_exact_part(text, 'scale:index')`: one part of a wide SUM input.
+pub(super) struct Part;
+
+impl VArrowScalar for Part {
+    type State = ();
+    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+        let (text, options) = (strings(&input, 0)?, strings(&input, 1)?);
+        let values = (0..input.num_rows())
+            .map(|i| {
+                if text.is_null(i) || options.is_null(i) {
+                    return Ok(None);
+                }
+                let (scale, index) = options
+                    .value(i)
+                    .split_once(':')
+                    .ok_or(ExecutionError::Engine)?;
+                let number = |s: &str| s.parse::<u8>().map_err(|_| ExecutionError::Engine);
+                part(text.value(i), number(scale)?, number(index)?).map(Some)
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        Ok(Arc::new(Int64Array::from(values)))
+    }
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(
+            vec![DataType::Utf8; 2],
+            DataType::Int64,
+        )]
+    }
+}
+
+/// `sef_exact_sum_parts(high, middle, low, 'precision:scale')`: the exact
+/// SUM as a carrier, `'!'` when it is out of its certified range, NULL when
+/// there was nothing to sum.
+pub(super) struct SumParts;
+
+impl VArrowScalar for SumParts {
+    type State = ();
+    fn invoke((): &(), input: RecordBatch) -> Result<ArrayRef, Box<dyn std::error::Error>> {
+        let parts = (
+            strings(&input, 0)?,
+            strings(&input, 1)?,
+            strings(&input, 2)?,
+            strings(&input, 3)?,
+        );
+        let values = (0..input.num_rows())
+            .map(|i| {
+                let (high, middle, low, options) = parts;
+                if high.is_null(i) || middle.is_null(i) || low.is_null(i) || options.is_null(i) {
+                    return Ok(None);
+                }
+                let (precision, scale) = options
+                    .value(i)
+                    .split_once(':')
+                    .ok_or(ExecutionError::Engine)?;
+                let number = |s: &str| s.parse::<u8>().map_err(|_| ExecutionError::Engine);
+                let sum = sum_parts(
+                    high.value(i),
+                    middle.value(i),
+                    low.value(i),
+                    number(precision)?,
+                    number(scale)?,
+                )?;
+                Ok(Some(sum.unwrap_or_else(|| "!".to_owned())))
+            })
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+        Ok(Arc::new(StringArray::from(values)))
+    }
+    fn signatures() -> Vec<ArrowFunctionSignature> {
+        vec![ArrowFunctionSignature::exact(
+            vec![DataType::Utf8; 4],
+            DataType::Utf8,
+        )]
+    }
+}
+
 /// `sef_exact_cmp(a, b)`: -1, 0 or 1 by the exact order of two decimal
 /// carriers; NULL when either is NULL, as SQL comparisons are.
 pub(super) struct Compare;
@@ -429,6 +542,23 @@ mod tests {
             prop_assert_eq!(
                 combine(&carrier(&a, sa), &carrier(&b, sb), op, (sa, sb, scale)),
                 Ok(carrier(&expected, scale))
+            );
+        }
+
+        /// Splitting into parts and summing them is exact integer addition,
+        /// with the certified range decided on the exact total (#261).
+        #[test]
+        fn summing_parts_is_exact_addition(values in prop::collection::vec(up_to(38), 1..6), scale in 0_u8..4) {
+            let texts: Vec<String> = values.iter().map(|v| carrier(v, scale)).collect();
+            let sum_of = |index| -> BigInt {
+                texts.iter().map(|t| BigInt::from(part(t, scale, index).expect("a carrier"))).sum()
+            };
+            let (high, middle, low) = (sum_of(0), sum_of(1), sum_of(2));
+            let total: BigInt = values.iter().sum();
+            let expected = within(&total, 38).then(|| carrier(&total, scale));
+            prop_assert_eq!(
+                sum_parts(&high.to_string(), &middle.to_string(), &low.to_string(), 38, scale),
+                Ok(expected)
             );
         }
 

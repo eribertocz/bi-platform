@@ -257,7 +257,8 @@ async fn compiles_each_file_with_exact_metadata_and_reloads_without_stale_values
     let valid = &first["models"][2];
     assert_eq!(valid["status"], "valid", "{first:#}");
     assert_eq!(valid["metrics"][0]["name"], "importe_total");
-    assert_eq!(valid["metrics"][0]["data_type"], "DECIMAL(18,2)");
+    // SUM of DECIMAL(18,2) is certified DECIMAL(38,2) (#261).
+    assert_eq!(valid["metrics"][0]["data_type"], "DECIMAL(38,2)");
     let region = valid["dimensions"]
         .as_array()
         .unwrap()
@@ -469,6 +470,6 @@ async fn compiles_the_synthetic_fixture_on_real_ducklake() {
     assert_eq!(body["models"][0]["status"], "valid", "{body}");
     assert_eq!(
         body["models"][0]["metrics"][0]["data_type"],
-        "DECIMAL(18,2)"
+        "DECIMAL(38,2)"
     );
 }

@@ -43,7 +43,10 @@ fn rows() -> String {
             (1, 'max', {M}), (2, 'max_mas', {M}), (3, 'max_mas', 0.01),
             (4, 'menos', -{M}), (5, 'menos', -0.01),
             (6, 'cancela', {M}), (7, 'cancela', -{M}), (8, 'cancela', 0.01),
-            (9, 'motor', {M}), (10, 'motor', {M});
+            (9, 'motor', {M}), (10, 'motor', {M}),
+            (11, 'motor_menos', -{M}), (12, 'motor_menos', -{M}),
+            (13, 'vuelve', {M}), (14, 'vuelve', {M}), (15, 'vuelve', -{M}),
+            (16, 'vuelve', -{M}), (17, 'vuelve', 0.01);
         INSERT INTO lake.main.ni VALUES
             (1, 'max_mas', 9223372036854775807), (2, 'max_mas', 1),
             (3, 'min_menos', -9223372036854775808), (4, 'min_menos', -1),
@@ -379,11 +382,27 @@ async fn a_sum_past_38_digits_is_a_typed_422_and_the_next_query_recovers(pool: s
         assert_eq!(events[0].0, "failure", "{caso}");
         assert!(events[0].1.is_some(), "{caso}: the decision taken names it");
     }
-    // Twice the largest overflows DuckDB's own 128-bit accumulator: an
-    // engine failure, never inferred to be a result out of range.
-    let (status, body) = h.sum(&ana, "n38", &["suma"], "motor").await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body:#}");
-    assert_eq!(body["code"], "analytics_failed");
+    // Twice the largest, either sign, is out of range, decided exactly:
+    // DuckDB's 128-bit accumulator never decides it. Passing through that
+    // magnitude and coming back gives the exact, representable 0.01.
+    for caso in ["motor", "motor_menos"] {
+        let (status, body) = h.sum(&ana, "n38", &["suma"], caso).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{caso}: {body:#}");
+        assert_eq!(body["code"], "result_out_of_range", "{caso}");
+    }
+    let (status, body) = h.sum(&ana, "n38", &["suma", "doble"], "vuelve").await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(answered(&body).1, vec![json!("0.01"), json!("0.02")]);
+    // A derived metric alone never escapes the range of its operand: the
+    // sum it reads is checked even when it is not selected.
+    for caso in ["max_mas", "motor"] {
+        let since = h.head().await;
+        let (status, body) = h.sum(&ana, "n38", &["doble"], caso).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{caso}: {body:#}");
+        assert_eq!(body["code"], "result_out_of_range", "{caso}");
+        assert!(body.get("result").is_none() && body.get("receipt").is_none());
+        assert_eq!(h.events_since(since).await.len(), 1, "{caso}: one event");
+    }
     // The next valid query is answered.
     let (status, _) = h.sum(&ana, "n38", &["suma"], "max").await;
     assert_eq!(status, StatusCode::OK);
@@ -419,5 +438,107 @@ async fn an_emulated_sum_past_76_digits_is_the_same_typed_422(pool: sqlx::PgPool
     assert_eq!(body["code"], "result_out_of_range");
     let (status, _) = h.sum(&ana, "nw", &["producto"], "uno").await;
     assert_eq!(status, StatusCode::OK, "recovers");
+    h.db.close().await;
+}
+
+impl Harness {
+    async fn query(&self, cookie: &str, body: &Value) -> (StatusCode, Value) {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/semantic/query")
+                    .header("content-type", "application/json")
+                    .header("origin", ORIGIN)
+                    .header("cookie", cookie)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+}
+
+/// Rows of the answer's first block.
+fn table(body: &Value) -> Vec<Value> {
+    body["result"]["blocks"][0]["rows"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+#[sqlx::test(migrations = false)]
+async fn having_on_a_widened_derived_metric_compares_exactly(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let ana = h.login().await;
+    let request = |having: Value| {
+        json!({
+            "model": "metrics/n18.yaml",
+            "query": {
+                "selections": [
+                    {"id": "suma", "kind": "metric", "name": "suma"},
+                    {"id": "doble", "kind": "metric", "name": "doble"},
+                    {"id": "caso", "kind": "dimension", "name": "n18.caso"}
+                ],
+                "order_by": [{"selection": "doble", "descending": true}],
+                "limit": 1,
+                "having": having
+            }
+        })
+    };
+    let number = |v: &str| json!({ "type": "number", "value": v });
+    let target = json!({ "kind": "metric", "selection": "doble" });
+    let owner = vec![json!([
+        "10000000048735710.80",
+        "20000000097471421.60",
+        "propietario"
+    ])];
+    for having in [
+        json!({ "op": "compare", "target": target, "comparison": ">", "value": number("0.00") }),
+        json!({
+            "op": "between", "target": target,
+            "low": number("20000000097471421.60"), "high": number("99999999999999999999.99")
+        }),
+        json!({ "op": "in", "target": target, "values": [number("1.00"), number("20000000097471421.60")] }),
+        json!({ "op": "is_not_null", "target": target }),
+    ] {
+        let (status, body) = h.query(&ana, &request(having.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{having}: {body:#}");
+        let types: Vec<&str> = body["result"]["blocks"][0]["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            ["DECIMAL(38,2)", "DECIMAL(39,2)", "VARCHAR"],
+            "{having}"
+        );
+        assert_eq!(table(&body), owner, "{having}");
+    }
+    // An exact edge excludes by one cent, never by text order.
+    let (status, body) = h
+        .query(
+            &ana,
+            &request(json!({
+                "op": "compare", "target": target, "comparison": ">",
+                "value": number("20000000097471421.60")
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert!(
+        table(&body)
+            .iter()
+            .all(|row| row[2] != json!("propietario")),
+        "{body:#}"
+    );
     h.db.close().await;
 }
