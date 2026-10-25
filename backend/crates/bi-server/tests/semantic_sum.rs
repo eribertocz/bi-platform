@@ -136,7 +136,7 @@ fn project() -> tempfile::TempDir {
 struct Harness {
     app: Router,
     pool: sqlx::PgPool,
-    _project: tempfile::TempDir,
+    project: tempfile::TempDir,
     db: Database,
 }
 
@@ -176,7 +176,7 @@ async fn harness(pool: sqlx::PgPool) -> Harness {
     Harness {
         app,
         pool,
-        _project: project,
+        project,
         db,
     }
 }
@@ -471,6 +471,100 @@ fn table(body: &Value) -> Vec<Value> {
         .as_array()
         .unwrap()
         .clone()
+}
+
+// Codex's acceptance probes for #262, kept as regressions.
+#[sqlx::test(migrations = false)]
+async fn invalid_operands_cannot_cancel_or_hide_in_a_chain(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    std::fs::write(
+        h.project.path().join("metrics/n38.yaml"),
+        model(
+            "n38",
+            &["v"],
+            &[
+                ("suma", "SUM(n38.v)"),
+                ("doble", "suma + suma"),
+                ("cadena", "doble - suma"),
+                ("cancelada", "suma - suma"),
+            ],
+        ),
+    )
+    .unwrap();
+    let ana = h.login().await;
+    for selected in [vec!["suma", "doble"], vec!["cadena"], vec!["cancelada"]] {
+        for caso in ["max_mas", "menos", "motor", "motor_menos"] {
+            let since = h.head().await;
+            let (status, body) = h.sum(&ana, "n38", &selected, caso).await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{selected:?}/{caso}: {body:#}"
+            );
+            assert_eq!(body["code"], "result_out_of_range");
+            assert!(body.get("result").is_none() && body.get("receipt").is_none());
+            let events = h.events_since(since).await;
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, "failure");
+        }
+    }
+    let (status, body) = h.sum(&ana, "n38", &["cadena", "cancelada"], "vuelve").await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(answered(&body).1, vec![json!("0.01"), json!("0.00")]);
+    h.db.close().await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn having_uses_all_39_digits_and_preserves_null(pool: sqlx::PgPool) {
+    let h = harness(pool).await;
+    let ana = h.login().await;
+    let target = json!({"kind":"metric", "selection":"doble"});
+    let number = |v: &str| json!({"type":"number", "value":v});
+    let exact = "1999999999999999999999999999999999999.98";
+    let request = |having: Value| {
+        json!({
+            "model":"metrics/n38.yaml",
+            "query":{
+                "selections":[
+                    {"id":"doble","kind":"metric","name":"doble"},
+                    {"id":"caso","kind":"dimension","name":"n38.caso"}
+                ],
+                "filter":{"op":"compare", "target":{"kind":"dimension","name":"n38.caso"},
+                    "comparison":"=", "value":{"type":"text","value":"max"}},
+                "order_by":[{"selection":"doble","descending":true}], "limit":1,
+                "having":having
+            }
+        })
+    };
+    for having in [
+        json!({"op":"compare","target":target,"comparison":"=","value":number(exact)}),
+        json!({"op":"between","target":target,"low":number(exact),"high":number(exact)}),
+        json!({"op":"in","target":target,"values":[number("0.00"), number(exact)]}),
+    ] {
+        let (status, body) = h.query(&ana, &request(having)).await;
+        assert_eq!(status, StatusCode::OK, "{body:#}");
+        assert_eq!(table(&body), vec![json!([exact, "max"])]);
+    }
+    let (status, body) = h
+        .query(
+            &ana,
+            &request(json!({
+                "op":"compare","target":target,"comparison":">",
+                "value":number(exact)
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(table(&body), Vec::<Value>::new(), "{body:#}");
+    let mut null_request = request(json!({"op":"is_null","target":target}));
+    null_request["model"] = json!("metrics/n18.yaml");
+    null_request["query"]["selections"][1]["name"] = json!("n18.caso");
+    null_request["query"]["filter"]["target"]["name"] = json!("n18.caso");
+    null_request["query"]["filter"]["value"]["value"] = json!("nulos");
+    let (status, body) = h.query(&ana, &null_request).await;
+    assert_eq!(status, StatusCode::OK, "{body:#}");
+    assert_eq!(table(&body), vec![json!([null, "nulos"])]);
+    h.db.close().await;
 }
 
 #[sqlx::test(migrations = false)]
