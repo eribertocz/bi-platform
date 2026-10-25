@@ -43,7 +43,7 @@
       : undefined,
   );
   // The question as data: a change of selection or model is a new question.
-  const question = $derived(askable(choice) ? JSON.stringify(choice) : null);
+  const question = $derived(askable(choice, model) ? JSON.stringify(choice) : null);
 
   // The catalog first, and again only on an explicit refresh: while it
   // loads, no question runs and the previous answer is withdrawn.
@@ -221,7 +221,9 @@
 
   <div aria-busy={view.kind === 'loading'} aria-live="polite">
     {#if view.kind === 'idle'}
-      {#if !askable(choice)}<p role="status">Elige al menos una métrica.</p>{/if}
+      {#if !choice || choice.metrics.length === 0}<p role="status">
+          Elige al menos una métrica.
+        </p>{/if}
     {:else if view.kind === 'loading'}<p role="status">Consultando…</p>
     {:else if view.kind === 'error'}
       {@render problem(view.failure, 'No se pudo responder la consulta')}

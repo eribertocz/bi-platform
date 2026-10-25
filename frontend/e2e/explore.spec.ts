@@ -2,6 +2,12 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page, type Request, type Response } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import {
+  filterProblems,
+  filterQuery,
+  metricId,
+  type UserFilters,
+} from '../src/lib/features/semantic/filters';
 
 // The semantic Explorar (#147) against a real production server: corporate
 // login with the real provider, PostgreSQL with the restricted runtime
@@ -749,4 +755,108 @@ test('membership revoked with the page open: neutral 404, nothing kept, refresh,
   onlySemantic(network.sent);
   expect(network.concurrent()).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test('filters as the page would send them: the server answers what the client accepts, refuses what it refuses', async ({
+  page,
+}) => {
+  // #142: the client's check against the real server, row policy on.
+  await signIn(page, NORTE.user, NORTE.name);
+  const origin = new URL(page.url()).origin;
+  const catalog = await (await page.request.get('/api/v1/semantic/catalog')).json();
+  const model = catalog.models.find((m: { model: string }) => m.model === 'metrics/ventas.yaml');
+  const metrics = ['importe_total', 'filas'];
+  const region = { kind: 'dimension' as const, name: 'ventas.region' };
+  const total = { kind: 'metric' as const, selection: metricId('importe_total') };
+  const norte = {
+    op: 'compare' as const,
+    target: region,
+    comparison: '=' as const,
+    value: { type: 'text' as const, value: 'Norte' },
+  };
+  const many = (n: number) => Array.from({ length: n }, () => norte);
+  const cases: [string, UserFilters, unknown][] = [
+    ['own region', { where: norte, having: null }, [[NORTE.amount, '2']]],
+    // Another region's filter never passes the row policy: nothing of Sur.
+    [
+      'other region',
+      { where: { ...norte, value: { type: 'text', value: 'Sur' } }, having: null },
+      [[null, '0']],
+    ],
+    [
+      'after aggregating',
+      {
+        where: null,
+        having: {
+          op: 'compare',
+          target: total,
+          comparison: '>',
+          value: { type: 'number', value: '100.00' },
+        },
+      },
+      [[NORTE.amount, '2']],
+    ],
+    [
+      'not and in',
+      {
+        where: {
+          op: 'not',
+          filter: { op: 'in', target: region, values: [{ type: 'text', value: 'Sur' }] },
+        },
+        having: null,
+      },
+      [[NORTE.amount, '2']],
+    ],
+    [
+      'a digit lost',
+      {
+        where: null,
+        having: {
+          op: 'compare',
+          target: total,
+          comparison: '=',
+          value: { type: 'number', value: '1.234' },
+        },
+      },
+      null,
+    ],
+    ['NULL compared', { where: { ...norte, value: { type: 'null' } }, having: null }, null],
+    [
+      'a metric before aggregating',
+      { where: { ...norte, target: total, value: { type: 'number', value: '1' } }, having: null },
+      null,
+    ],
+    ['an empty group', { where: { op: 'or', filters: [] }, having: null }, null],
+    [
+      'a field never announced',
+      {
+        where: { ...norte, target: { kind: 'dimension', name: 'ventas.secreto_centinela' } },
+        having: null,
+      },
+      null,
+    ],
+    ['257 conditions', { where: { op: 'and', filters: many(256) }, having: null }, null],
+  ];
+  for (const [name, filters, rows] of cases) {
+    const accepted = filterProblems(filters, model, metrics).length === 0;
+    expect(accepted, name).toBe(rows !== null);
+    const response = await page.request.post('/api/v1/semantic/query', {
+      headers: { Origin: origin, Accept: 'application/json' },
+      data: {
+        model: 'metrics/ventas.yaml',
+        query: {
+          selections: metrics.map((m) => ({ id: metricId(m), kind: 'metric', name: m })),
+          ...filterQuery(filters),
+        },
+      },
+    });
+    const body = await response.json();
+    if (accepted) {
+      expect(response.status(), name).toBe(200);
+      expect(body.result.blocks[0].rows, name).toEqual(rows);
+    } else {
+      expect([400, 403, 404, 422], name).toContain(response.status());
+      expect(JSON.stringify(body), name).not.toMatch(SENTINELS);
+    }
+  }
 });
