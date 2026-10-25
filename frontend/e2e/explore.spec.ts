@@ -860,3 +860,151 @@ test('filters as the page would send them: the server answers what the client ac
     }
   }
 });
+
+/** The id of the element that holds the focus. */
+const focusedId = (page: Page) => page.evaluate(() => document.activeElement?.id ?? '');
+
+/** Writes `field operator value` into the condition whose field select is `index`. */
+async function writeCondition(page: Page, index: number, field: string, value?: string) {
+  await page.getByLabel('Campo').nth(index).selectOption(field);
+  if (value !== undefined) await page.getByLabel('Valor').nth(index).fill(value);
+}
+
+async function applyFilters(page: Page) {
+  await page.getByRole('button', { name: 'Aplicar filtros' }).click();
+  await expect.poll(() => focusedId(page)).toBe('filters-applied');
+  await expect(page.locator('[aria-live="polite"]').first()).toHaveAttribute('aria-busy', 'false');
+}
+
+test('row filters: applied explicitly, exact under the row policy, cleared, by keyboard and axe', async ({
+  page,
+}) => {
+  // #265 on the real server: drafts ask nothing, «Aplicar» asks the total and
+  // the breakdown with the filter, and no filter frees a row of another region.
+  test.setTimeout(150_000);
+  const network = watch(page);
+  const queries = () => network.sent.filter((s) => s === 'POST /api/v1/semantic/query').length;
+  await signIn(page, NORTE.user, NORTE.name);
+  await openExplore(page);
+  await chooseVentas(page);
+  await askByRegion(page, NORTE);
+
+  // A draft asks nothing.
+  const before = queries();
+  await page.getByRole('button', { name: 'Añadir condición' }).click();
+  await writeCondition(page, 0, 'ventas.region', 'Sur');
+  expect(queries()).toBe(before);
+  await expect(page.getByText('Hay cambios sin aplicar.')).toBeVisible();
+
+  // Sur under Norte's policy: an empty breakdown, a NULL sum and a zero count.
+  await applyFilters(page);
+  await expect(kpi(page, 'filas')).toHaveText('0');
+  await expect(kpi(page, 'importe_total')).toHaveText('Sin dato');
+  await expect.poll(() => bodyRows(page)).toEqual([]);
+  expect(queries()).toBe(before + 2);
+
+  // El Alto alone: its exact amount.
+  await writeCondition(page, 0, 'ventas.ciudad', 'El Alto');
+  await applyFilters(page);
+  await expect(kpi(page, 'importe_total')).toHaveText('0,20');
+  await expect.poll(() => bodyRows(page)).toEqual([['Norte', '1', '0,20']]);
+
+  // OR with Sur, then NOT: still only Norte's rows. The second condition by keyboard.
+  await page.getByRole('button', { name: 'Añadir otra condición' }).click();
+  await expect.poll(() => focusedId(page)).toMatch(/^filters-n\d+-field$/);
+  await page.keyboard.press('Tab');
+  await expect.poll(() => focusedId(page)).toMatch(/^filters-n\d+-operator$/);
+  await writeCondition(page, 1, 'ventas.region', 'Sur');
+  await page.getByLabel('Tipo de grupo').selectOption('or');
+  await applyFilters(page);
+  await expect.poll(() => bodyRows(page)).toEqual([['Norte', '1', '0,20']]);
+  await page.getByRole('button', { name: 'Negar esta condición' }).first().click();
+  await applyFilters(page);
+  await expect(page.locator('#filters-applied')).toHaveText(
+    'Filtros aplicados: (no ventas.ciudad es igual a «El Alto» o ventas.region es igual a «Sur»).',
+  );
+  await expect(kpi(page, 'importe_total')).toHaveText('100,10');
+  await expect.poll(() => bodyRows(page)).toEqual([['Norte', '1', '100,10']]);
+  await noLeaks(page, SUR);
+  // Nested groups, with the keyboard: add a group inside and reach it by Enter.
+  await page.getByRole('button', { name: 'Añadir grupo dentro' }).focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => focusedId(page)).toMatch(/^filters-n\d+-field$/);
+  await axe(page);
+
+  // An empty group is an error: said, focused, never asked.
+  const asked = queries();
+  await page.getByRole('button', { name: 'Quitar condición' }).last().click();
+  await page.getByRole('button', { name: 'Aplicar filtros' }).click();
+  await expect.poll(() => focusedId(page)).toBe('filters-notice');
+  await expect(page.locator('#filters-notice')).toHaveText(/Corrige los errores/);
+  expect(queries()).toBe(asked);
+
+  // «Limpiar»: the person's filters only; Norte's own totals again.
+  await page.getByRole('button', { name: 'Limpiar filtros' }).click();
+  await expect.poll(() => focusedId(page)).toBe('filters-add');
+  await expect(kpi(page, 'importe_total')).toHaveText(NORTE.shown);
+  await expect.poll(() => bodyRows(page)).toEqual([[NORTE.region, '2', NORTE.shown]]);
+  await expect(page.getByText('Sin filtros aplicados.')).toBeVisible();
+
+  // Sur filtering Norte sees nothing of Norte.
+  await signOut(page);
+  await signIn(page, SUR.user, SUR.name);
+  await openExplore(page);
+  await chooseVentas(page);
+  await page.getByRole('button', { name: 'Añadir condición' }).click();
+  await writeCondition(page, 0, 'ventas.region', 'Norte');
+  await applyFilters(page);
+  await expect(kpi(page, 'filas')).toHaveText('0');
+  await noLeaks(page, NORTE);
+});
+
+test('a NULL row filter on a declared test field: Norte 100,10 and Sur -0,20', async ({ page }) => {
+  // `observacion` reads the nullable column the restricted `nota` reads (#265).
+  test.setTimeout(120_000);
+  for (const [who, amount] of [
+    [NORTE, '100,10'],
+    [SUR, '-0,20'],
+  ] as const) {
+    await signIn(page, who.user, who.name);
+    await openExplore(page);
+    await page.getByLabel('Modelo').selectOption('metrics/ventas_notas.yaml');
+    await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
+    await settled(page, 2);
+    await page.getByRole('button', { name: 'Añadir condición' }).click();
+    await page.getByLabel('Campo').selectOption('ventas.observacion');
+    await page.getByLabel('Operador').selectOption('is_null');
+    await applyFilters(page);
+    await expect(kpi(page, 'importe_total')).toHaveText(amount);
+    await expect(kpi(page, 'filas')).toHaveText('1');
+    await signOut(page);
+  }
+});
+
+test('membership revoked before «Aplicar»: the neutral refusal, no figure kept', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const members = fileURLToPath(
+    new URL('./semantic/project/policies/members.yaml', import.meta.url),
+  );
+  const original = readFileSync(members);
+  const revoked = original
+    .toString('utf8')
+    .replace(/^ {2}analysts: \[viewer\]$/m, '  catalog_authors: [viewer]');
+  try {
+    await signIn(page, NORTE.user, NORTE.name);
+    await openExplore(page);
+    await chooseVentas(page);
+    await page.getByRole('button', { name: 'Añadir condición' }).click();
+    await writeCondition(page, 0, 'ventas.ciudad', 'El Alto');
+    writeFileSync(members, revoked);
+    await page.getByRole('button', { name: 'Aplicar filtros' }).click();
+    await expect(page.getByRole('alert')).toContainText('HTTP 404 · Código: model_not_found');
+    await expect(page.locator('dl.kpis')).toHaveCount(0);
+    expect(await page.content()).not.toContain('0,20');
+    await noLeaks(page, SUR);
+  } finally {
+    writeFileSync(members, original);
+  }
+});

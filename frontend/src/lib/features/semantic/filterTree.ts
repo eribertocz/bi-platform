@@ -1,6 +1,12 @@
 import type { CatalogModel } from '#lib/api/semantic.ts';
-import { condition, draftOf, type Draft } from './condition';
-import { filterProblems, type FilterProblem, type SemanticFilter } from './filters';
+import { condition, draftOf, OPERATOR_LABELS, type Draft } from './condition';
+import {
+  filterProblems,
+  type FilterProblem,
+  type SemanticFilter,
+  type SemanticTarget,
+  type SemanticValue,
+} from './filters';
 
 /**
  * A `where` being edited, as a tree: conditions written by drafts (#148),
@@ -125,4 +131,36 @@ export function edit(
     return child ? { ...root, child } : null;
   }
   return root;
+}
+
+/** A filter as a sentence, to say what is applied: never evaluated. */
+export function summarize(filter: SemanticFilter): string {
+  const name = (target: SemanticTarget) =>
+    target.kind === 'dimension' ? target.name : target.selection.replace(/^m:/, '');
+  const value = (v: SemanticValue) =>
+    v.type === 'null'
+      ? 'NULL'
+      : v.type === 'boolean'
+        ? v.value
+          ? 'verdadero'
+          : 'falso'
+        : v.type === 'text'
+          ? `«${v.value}»`
+          : v.value;
+  switch (filter.op) {
+    case 'and':
+    case 'or':
+      return `(${filter.filters.map(summarize).join(filter.op === 'and' ? ' y ' : ' o ')})`;
+    case 'not':
+      return `no ${summarize(filter.filter)}`;
+    case 'is_null':
+    case 'is_not_null':
+      return `${name(filter.target)} ${OPERATOR_LABELS[filter.op]}`;
+    case 'between':
+      return `${name(filter.target)} está entre ${value(filter.low)} y ${value(filter.high)}`;
+    case 'in':
+      return `${name(filter.target)} es uno de ${filter.values.map(value).join(', ')}`;
+    case 'compare':
+      return `${name(filter.target)} ${OPERATOR_LABELS[filter.comparison]} ${value(filter.value)}`;
+  }
 }

@@ -401,3 +401,87 @@ describe('an incompatible answer withdraws the whole attempt (Codex review of #2
     expect(api.calls.some((c) => c.body !== null && grouped(c))).toBe(false);
   });
 });
+
+describe('row filters: drafted, applied explicitly, cleared (#265)', () => {
+  const typed = (fields: string[]) => ({
+    ...ventas,
+    fields: fields.map((name) => ({ ...member(name, 'values', true), type: 'VARCHAR' })),
+  });
+  const answering = (fields: () => string[]) => (call: Call) =>
+    call.url.endsWith('/catalog')
+      ? catalog([typed(fields())])
+      : Response.json(grouped(call) ? region : total);
+  const sur = {
+    op: 'compare',
+    target: { kind: 'dimension', name: 'ventas.region' },
+    comparison: '=',
+    value: { type: 'text', value: 'Sur' },
+  };
+  const filtersSent = (calls: Call[]) =>
+    calls.map((c) => (c.body?.query as { filter?: unknown } | undefined)?.filter ?? null);
+
+  it('editing asks nothing; applying sends it in both reads; clearing asks again without it', async () => {
+    const api = server(answering(() => ['ventas.region', 'ventas.ciudad']));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    const before = api.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.input(screen.getByLabelText('Valor'), { target: { value: 'Sur' } });
+    expect(api.calls.length).toBe(before);
+    expect(screen.getByText('Hay cambios sin aplicar.')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    // The total and the breakdown, each with the filter, in sequence.
+    expect(filtersSent(api.calls.slice(before))).toEqual([sur, sur]);
+    expect(document.activeElement?.id).toBe('filters-applied');
+    expect(screen.getByText('Filtros aplicados: ventas.region es igual a «Sur».')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Limpiar filtros' }));
+    await waitFor(() => expect(api.calls.length).toBe(before + 4));
+    expect(filtersSent(api.calls.slice(before + 2))).toEqual([null, null]);
+    expect(document.activeElement?.id).toBe('filters-add');
+    expect(screen.getByText('Sin filtros aplicados.')).toBeTruthy();
+    expect(api.overlapped()).toBe(false);
+  });
+
+  it('a draft that cannot be sent is never sent: the error is said and focused', async () => {
+    const api = server(answering(() => ['ventas.region']));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    const before = api.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir condición' }));
+    const value = screen.getByLabelText('Valor');
+    await fireEvent.input(value, { target: { value: 'x'.repeat(257) } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    expect(screen.getByRole('alert').textContent).toMatch(/Corrige los errores/);
+    expect(document.activeElement).toBe(value);
+    // An empty group is an error too, not «no filter».
+    await fireEvent.click(screen.getByRole('button', { name: 'Quitar condición' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir grupo' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Quitar condición' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    expect(document.activeElement?.id).toBe('filters-notice');
+    expect(api.calls.length).toBe(before);
+  });
+
+  it('applied filters the refreshed catalog no longer allows are shown, never sent', async () => {
+    let fields = ['ventas.region', 'ventas.ciudad'];
+    const api = server(answering(() => fields));
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.input(screen.getByLabelText('Valor'), { target: { value: 'Sur' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await waitFor(() => expect(filtersSent(api.calls).at(-1)).toEqual(sur));
+    fields = ['ventas.ciudad'];
+    const before = api.calls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Actualizar catálogo' }));
+    expect((await screen.findAllByRole('alert')).map((a) => a.textContent).join(' ')).toMatch(
+      /ya no se pueden consultar/,
+    );
+    // Only the catalog was asked: no query with the clause removed.
+    expect(api.calls.slice(before).map((c) => c.url)).toEqual(['/api/v1/semantic/catalog']);
+  });
+});

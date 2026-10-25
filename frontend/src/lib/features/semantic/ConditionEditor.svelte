@@ -5,10 +5,10 @@
     condition,
     conditionProblems,
     filterable,
+    OPERATOR_LABELS,
     operators,
     type ConditionChange,
     type Draft,
-    type Operator,
   } from './condition';
 
   let {
@@ -38,18 +38,7 @@
   const problems = $derived(conditionProblems(written, model));
   const count = $derived(arity(draft.operator, draft.values));
 
-  const LABELS: Record<Operator, string> = {
-    '=': 'es igual a',
-    '<>': 'es distinto de',
-    '<': 'es menor que',
-    '<=': 'es menor o igual que',
-    '>': 'es mayor que',
-    '>=': 'es mayor o igual que',
-    between: 'está entre',
-    in: 'es uno de',
-    is_null: 'no tiene valor (nulo)',
-    is_not_null: 'tiene valor (no nulo)',
-  };
+  const LABELS = OPERATOR_LABELS;
 
   /** The problems shown beside one control, by their path in the condition. */
   function at(...paths: string[]) {
