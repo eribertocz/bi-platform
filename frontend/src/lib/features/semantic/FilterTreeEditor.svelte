@@ -1,7 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import type { CatalogModel } from '#lib/api/semantic.ts';
-  import { filterable, type Draft } from './condition';
+  import type { Domain, Draft } from './condition';
   import type { SemanticFilter } from './filters';
   import {
     edit,
@@ -17,12 +16,13 @@
   import FilterNode from './FilterNode.svelte';
 
   let {
-    model,
+    domain,
     initial,
     id,
     onchange,
   }: {
-    model: CatalogModel;
+    /** What its conditions may name: the rows' fields or the question's metrics. */
+    domain: Domain;
     initial: SemanticFilter | null;
     /** Unique prefix of this editor's element ids. */
     id: string;
@@ -31,16 +31,16 @@
 
   const key = keys();
   // svelte-ignore state_referenced_locally
-  let root = $state<TreeNode | null>(initial ? fromFilter(initial, model, key) : null);
+  let root = $state<TreeNode | null>(initial ? fromFilter(initial, domain, key) : null);
   let announcement = $state('');
 
-  const nodePaths = $derived(paths(root));
-  const problems = $derived(treeProblems(root, model));
+  const nodePaths = $derived(paths(root, domain.at));
+  const problems = $derived(treeProblems(root, domain));
 
   const fresh = (): TreeNode => ({
     key: key(),
     kind: 'condition',
-    draft: { field: filterable(model)[0]?.name ?? '', operator: '=', values: [''] },
+    draft: { field: domain.members[0]?.name ?? '', operator: '=', values: [''] },
   });
 
   /** Applies one edit, reports it, says what changed and moves the focus. */
@@ -48,8 +48,8 @@
     root = next;
     const snapshot = $state.snapshot(root) as TreeNode | null;
     onchange({
-      filter: snapshot ? toFilter(snapshot, model) : null,
-      problems: treeProblems(snapshot, model),
+      filter: snapshot ? toFilter(snapshot, domain) : null,
+      problems: treeProblems(snapshot, domain),
     });
     announcement = said;
     await tick();
@@ -125,8 +125,8 @@
       root = edit(root, target, (n) => (n.kind === 'condition' ? { ...n, draft } : n));
       const snapshot = $state.snapshot(root) as TreeNode | null;
       onchange({
-        filter: snapshot ? toFilter(snapshot, model) : null,
-        problems: treeProblems(snapshot, model),
+        filter: snapshot ? toFilter(snapshot, domain) : null,
+        problems: treeProblems(snapshot, domain),
       });
     },
   };
@@ -156,19 +156,19 @@
 
 <div class="grid gap-3">
   {#if root}
-    <FilterNode node={root} {model} {id} paths={nodePaths} {problems} {actions} />
+    <FilterNode node={root} {domain} {id} paths={nodePaths} {problems} {actions} />
     {#if root.kind !== 'group'}
       <button type="button" id="{id}-add" class="justify-self-start" onclick={group}>
-        Añadir otra condición
+        {domain.words.another}
       </button>
     {/if}
   {:else}
-    <p>Sin filtros: se consultan todos los datos que puedes ver.</p>
+    <p>{domain.words.none}</p>
     <div class="flex flex-wrap gap-2">
       <button type="button" id="{id}-add" onclick={() => start('condition')}
-        >Añadir condición</button
+        >{domain.words.add}</button
       >
-      <button type="button" onclick={() => start('group')}>Añadir grupo</button>
+      <button type="button" onclick={() => start('group')}>{domain.words.group}</button>
     </div>
   {/if}
   <!-- `status` is a polite live region; the page keeps `aria-live` for its own answer. -->

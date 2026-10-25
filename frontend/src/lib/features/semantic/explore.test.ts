@@ -11,9 +11,12 @@ import {
   initialChoice,
   MAX_DIMENSIONS,
   MAX_METRICS,
+  questionProblems,
   reconcile,
   requests,
+  withFilters,
 } from './explore';
+import { metricId, NO_FILTERS, type SemanticFilter, type SemanticTarget } from './filters';
 import region from './fixtures/region.json';
 import total from './fixtures/total.json';
 
@@ -290,5 +293,41 @@ describe('a total excluded after aggregating, then the breakdown (#266)', () => 
       IncompatibleResult,
     );
     expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('filters before and after aggregating, applied as one (#149)', () => {
+  const ventas = model('ventas.yaml', ['filas'], ['ventas.region']);
+  const choice = { model: ventas.model, metrics: ['filas'], dimensions: ['ventas.region'] };
+  const one = (target: SemanticTarget): SemanticFilter => ({
+    op: 'compare',
+    target,
+    comparison: '=',
+    value: { type: 'number', value: '1' },
+  });
+  const rows = one({ kind: 'dimension', name: 'ventas.region' });
+  const counted = one({ kind: 'metric', selection: metricId('filas') });
+  const group = (n: number, filter: SemanticFilter): SemanticFilter => ({
+    op: 'and',
+    filters: Array.from({ length: n }, () => filter),
+  });
+
+  it('carries both, or none, never an empty filters object', () => {
+    expect(withFilters(choice, { where: null, having: counted })).toEqual({
+      ...choice,
+      filters: { where: null, having: counted },
+    });
+    expect(withFilters({ ...choice, filters: { where: rows, having: null } }, NO_FILTERS)).toEqual(
+      choice,
+    );
+  });
+
+  it('is checked on one budget for both, as the server counts them', () => {
+    // A group of n children is n + 1 nodes: 128 + 128 = 256 fits, 257 does not.
+    const fits = withFilters(choice, { where: group(127, rows), having: group(127, counted) });
+    expect(questionProblems(fits, ventas)).toEqual([]);
+    const over = withFilters(choice, { where: group(127, rows), having: group(128, counted) });
+    expect(questionProblems(over, ventas).length).toBeGreaterThan(0);
+    expect(askable(over, ventas)).toBe(false);
   });
 });

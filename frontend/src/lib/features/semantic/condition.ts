@@ -1,8 +1,10 @@
 import type { CatalogMember, CatalogModel } from '#lib/api/semantic.ts';
 import {
   filterProblems,
+  metricId,
   type FilterProblem,
   type SemanticFilter,
+  type SemanticTarget,
   type SemanticValue,
 } from './filters';
 
@@ -45,6 +47,86 @@ export const OPERATOR_LABELS: Record<Operator, string> = {
 export const filterable = (model: CatalogModel) =>
   model.fields.filter((f) => f.capabilities.filter);
 
+/**
+ * What a condition may name, and how: the fields of the rows before
+ * aggregating (`where`), or the question's own metrics after (`having`).
+ * The editor is one; only its domain changes (#149).
+ */
+export type Domain = {
+  /** The filter's place in the query, where the core reports its problems. */
+  at: '/filter' | '/having';
+  /** The members a condition may name, by the name its draft writes. */
+  members: CatalogMember[];
+  /** The type of the member a draft names, offered or not; `''` if unknown. */
+  type: (name: string) => string;
+  /** The target a draft's name writes. */
+  target: (name: string) => SemanticTarget;
+  /** The name a draft writes for `target`; `null` when none writes it as it is. */
+  name: (target: SemanticTarget) => string | null;
+  /** Why `filter`, in its place, cannot be sent, as the core of #142 decides it. */
+  problems: (filter: SemanticFilter) => FilterProblem[];
+  /** How the editor names a member, an empty filter and its first actions. */
+  words: {
+    member: string;
+    pick: string;
+    none: string;
+    add: string;
+    group: string;
+    another: string;
+  };
+};
+
+/** Conditions on the rows, before aggregating: the fields the session may filter. */
+export function rowsDomain(model: CatalogModel): Domain {
+  return {
+    at: '/filter',
+    members: filterable(model),
+    type: (name) => model.fields.find((f) => f.name === name)?.type ?? '',
+    target: (name) => ({ kind: 'dimension', name }),
+    name: (target) =>
+      target.kind === 'dimension' && (target.roles ?? []).length === 0 ? target.name : null,
+    problems: (filter) => filterProblems({ where: filter, having: null }, model, []),
+    words: {
+      member: 'Campo',
+      pick: 'Elige un campo',
+      none: 'Sin filtros: se consultan todos los datos que puedes ver.',
+      add: 'Añadir condición',
+      group: 'Añadir grupo',
+      another: 'Añadir otra condición',
+    },
+  };
+}
+
+/**
+ * Conditions on the question's metrics, after aggregating: those it selects
+ * that the session may filter. A metric seen only withheld is never
+ * selected, so never offered. A target names its selection by id, stable by
+ * name: a metric removed leaves its condition naming it, never another.
+ */
+export function metricsDomain(model: CatalogModel, metrics: readonly string[]): Domain {
+  return {
+    at: '/having',
+    members: metrics.flatMap((name) =>
+      model.metrics.filter((m) => m.name === name && m.capabilities.filter),
+    ),
+    type: (name) => model.metrics.find((m) => m.name === name)?.type ?? '',
+    target: (name) => ({ kind: 'metric', selection: metricId(name) }),
+    name: (target) =>
+      target.kind === 'metric'
+        ? (metrics.find((m) => metricId(m) === target.selection) ?? null)
+        : null,
+    problems: (filter) => filterProblems({ where: null, having: filter }, model, metrics),
+    words: {
+      member: 'Métrica',
+      pick: 'Elige una métrica',
+      none: 'Sin filtros de métricas: se muestran todos los totales y grupos calculados.',
+      add: 'Añadir condición de métrica',
+      group: 'Añadir grupo de métricas',
+      another: 'Añadir otra condición de métrica',
+    },
+  };
+}
+
 /** How many values `operator` uses; `in` uses every one written. */
 export function arity(operator: Operator, values: readonly string[]): number {
   if (operator === 'is_null' || operator === 'is_not_null') return 0;
@@ -71,12 +153,12 @@ function written(value: SemanticValue): string | null {
 }
 
 /**
- * The condition `draft` writes on `model`: exactly its field, operator and
- * values. An unknown field is kept by name, never replaced by another.
+ * The condition `draft` writes in `domain`: exactly its member, operator and
+ * values. An unknown member is kept by name, never replaced by another.
  */
-export function condition(draft: Draft, model: CatalogModel): SemanticFilter {
-  const type = model.fields.find((f) => f.name === draft.field)?.type ?? '';
-  const target = { kind: 'dimension' as const, name: draft.field };
+export function condition(draft: Draft, domain: Domain): SemanticFilter {
+  const type = domain.type(draft.field);
+  const target = domain.target(draft.field);
   const value = (i: number) => literal(draft.values[i] ?? '', type);
   switch (draft.operator) {
     case 'is_null':
@@ -97,12 +179,13 @@ export function condition(draft: Draft, model: CatalogModel): SemanticFilter {
 
 /**
  * A condition back as the draft that writes it, for editing; `null` when a
- * draft cannot write it as it is (a group, a metric, a NULL compared), so
- * it is never edited into a different condition.
+ * draft of `domain` cannot write it as it is (a group, a target of another
+ * domain, a NULL compared), so it is never edited into a different one.
  */
-export function draftOf(filter: SemanticFilter): Draft | null {
-  if (!('target' in filter) || filter.target.kind !== 'dimension') return null;
-  const field = filter.target.name;
+export function draftOf(filter: SemanticFilter, domain: Domain): Draft | null {
+  if (!('target' in filter)) return null;
+  const field = domain.name(filter.target);
+  if (field === null) return null;
   const texts = (values: SemanticValue[]) => {
     const all = values.map(written);
     return all.every((v): v is string => v !== null) ? all : null;
@@ -122,7 +205,7 @@ export function draftOf(filter: SemanticFilter): Draft | null {
     default:
       [operator, values] = [filter.op, []];
   }
-  return values && (filter.target.roles ?? []).length === 0 ? { field, operator, values } : null;
+  return values ? { field, operator, values } : null;
 }
 
 /** What the editor reports on every change: the draft as written, the
@@ -132,7 +215,3 @@ export type ConditionChange = {
   condition: SemanticFilter;
   problems: FilterProblem[];
 };
-
-/** Why the condition cannot be sent, as the core of #142 decides it. */
-export const conditionProblems = (filter: SemanticFilter, model: CatalogModel): FilterProblem[] =>
-  filterProblems({ where: filter, having: null }, model, []);

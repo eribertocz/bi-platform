@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/sve
 import fc from 'fast-check';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CatalogModel } from '#lib/api/semantic.ts';
-import type { SemanticFilter, SemanticTarget, SemanticValue } from './filters';
+import { metricsDomain, rowsDomain } from './condition';
+import { metricId, type SemanticFilter, type SemanticTarget, type SemanticValue } from './filters';
 import { fromFilter, keys, toFilter, type TreeChange } from './filterTree';
 import FilterTreeEditor from './FilterTreeEditor.svelte';
 
@@ -33,6 +34,8 @@ const MODEL: CatalogModel = {
   metrics: [member('importe_total', 'DECIMAL(38,2)')],
 };
 
+const ROWS = rowsDomain(MODEL);
+
 const region = { kind: 'dimension' as const, name: 'ventas.region' };
 const ciudad = { kind: 'dimension' as const, name: 'ventas.ciudad' };
 const is = (target: SemanticTarget, value: string): SemanticFilter => ({
@@ -52,7 +55,7 @@ afterEach(cleanup);
 function tree(initial: SemanticFilter | null) {
   const changes: TreeChange[] = [];
   render(FilterTreeEditor, {
-    model: MODEL,
+    domain: ROWS,
     initial,
     id: 'f',
     onchange: (change: TreeChange) => changes.push(change),
@@ -282,7 +285,79 @@ describe('properties', () => {
   it('the tree of any filter writes it back exactly', () => {
     fc.assert(
       fc.property(filters, (filter) => {
-        expect(toFilter(fromFilter(filter, MODEL, keys()), MODEL)).toEqual(filter);
+        expect(toFilter(fromFilter(filter, ROWS, keys()), ROWS)).toEqual(filter);
+      }),
+    );
+  });
+});
+
+describe('the same tree after aggregating (#149)', () => {
+  const METRICS = metricsDomain(
+    { ...MODEL, metrics: [member('importe_total', 'DECIMAL(38,2)'), member('filas', 'INT64')] },
+    ['importe_total', 'filas'],
+  );
+  const total = { kind: 'metric' as const, selection: metricId('importe_total') };
+  const filas = { kind: 'metric' as const, selection: metricId('filas') };
+  const over = (target: SemanticTarget, value: string): SemanticFilter => ({
+    op: 'compare',
+    target,
+    comparison: '>',
+    value: { type: 'number', value },
+  });
+
+  function metricTree(initial: SemanticFilter | null) {
+    const changes: TreeChange[] = [];
+    render(FilterTreeEditor, {
+      domain: METRICS,
+      initial,
+      id: 'h',
+      onchange: (change: TreeChange) => changes.push(change),
+    });
+    return { last: () => changes.at(-1)! };
+  }
+
+  it('edits a having tree with the same groups, its targets the selected metrics', async () => {
+    const { last } = metricTree({
+      op: 'or',
+      filters: [over(total, '100.00'), { op: 'not', filter: { op: 'is_null', target: filas } }],
+    });
+    // Both conditions are editable: drafts write them back as they are.
+    expect(screen.getAllByLabelText('Métrica').map((s) => (s as HTMLSelectElement).value)).toEqual([
+      'importe_total',
+      'filas',
+    ]);
+    expect(screen.queryByRole('group', { name: 'Condición guardada' })).toBeNull();
+    const or = group(/Grupo O/)[0]!;
+    await fireEvent.click(within(or).getByRole('button', { name: 'Añadir condición al grupo' }));
+    expect(last().filter).toEqual({
+      op: 'or',
+      filters: [
+        over(total, '100.00'),
+        { op: 'not', filter: { op: 'is_null', target: filas } },
+        { op: 'compare', target: total, comparison: '=', value: { type: 'number', value: '' } },
+      ],
+    });
+    // Problems are reported where `having` is, at the new node.
+    expect(last().problems.map((p) => p.path)).toEqual(['/having/filters/2/value']);
+  });
+
+  it('starts with its own words, and an empty group is said at its place', async () => {
+    const { last } = metricTree(null);
+    expect(screen.getByText(/^Sin filtros de métricas/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Añadir condición' })).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Añadir grupo de métricas' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Quitar condición' }));
+    expect(last()).toEqual({
+      filter: { op: 'and', filters: [] },
+      problems: [{ path: '/having', message: 'AND y OR necesitan al menos una condición.' }],
+    });
+    expect(screen.getByText('AND y OR necesitan al menos una condición.')).toBeTruthy();
+  });
+
+  it('the tree of any filter writes it back exactly, after aggregating too', () => {
+    fc.assert(
+      fc.property(filters, (filter) => {
+        expect(toFilter(fromFilter(filter, METRICS, keys()), METRICS)).toEqual(filter);
       }),
     );
   });

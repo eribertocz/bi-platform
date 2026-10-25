@@ -15,10 +15,13 @@
     questionProblems,
     reconcile,
     requests,
+    withFilters,
     type Answer,
     type Choice,
     type Failure,
   } from '#lib/features/semantic/explore.ts';
+  import { metricsDomain, rowsDomain } from '#lib/features/semantic/condition.ts';
+  import { NO_FILTERS, type UserFilters } from '#lib/features/semantic/filters.ts';
   import FilterTreeEditor from '#lib/features/semantic/FilterTreeEditor.svelte';
   import { summarize, type TreeChange } from '#lib/features/semantic/filterTree.ts';
   import KpiStrip from '#lib/features/semantic/KpiStrip.svelte';
@@ -33,9 +36,13 @@
   >({ kind: 'loading' });
   let catalogRevision = $state(0);
   let choice = $state<Choice | null>(null);
-  // The person's row filters being edited, apart from the applied ones: no
-  // edit asks anything; only «Aplicar filtros» changes the question (#265).
-  let draft = $state<TreeChange | null>(null);
+  // The person's filters being edited, before and after aggregating, apart
+  // from the applied ones: no edit asks anything; only «Aplicar filtros»
+  // changes the question (#265, #149). `null`: that editor is untouched.
+  let drafts = $state<{ where: TreeChange | null; having: TreeChange | null }>({
+    where: null,
+    having: null,
+  });
   let editorRevision = $state(0);
   let filterNotice = $state<string | null>(null);
   let attempt = $state(0);
@@ -53,33 +60,42 @@
   );
   // The question as data: a change of selection or model is a new question.
   const question = $derived(askable(choice, model) ? JSON.stringify(choice) : null);
-  const applied = $derived(choice?.filters?.where ?? null);
+  const applied = $derived<UserFilters>(choice?.filters ?? NO_FILTERS);
   const appliedProblems = $derived(choice && model ? questionProblems(choice, model) : []);
-  const pending = $derived(
-    draft !== null && JSON.stringify(draft.filter) !== JSON.stringify(applied),
-  );
-
-  /** The same question without the person's filters. */
-  const unfiltered = (c: Choice): Choice => ({
-    model: c.model,
-    metrics: c.metrics,
-    dimensions: c.dimensions,
+  // Conditions on the rows' fields, and on the metrics this question selects.
+  const rows = $derived(model ? rowsDomain(model) : null);
+  const aggregates = $derived(model && choice ? metricsDomain(model, choice.metrics) : null);
+  /** The filters `drafts` would apply: an untouched editor keeps what is applied. */
+  const drafted = $derived<UserFilters>({
+    where: drafts.where ? drafts.where.filter : applied.where,
+    having: drafts.having ? drafts.having.filter : applied.having,
+  });
+  const pending = $derived(JSON.stringify(drafted) !== JSON.stringify(applied));
+  const appliedSummary = $derived.by(() => {
+    const parts = [
+      applied.where && `antes de agregar, ${summarize(applied.where, rows ?? undefined)}`,
+      applied.having && `después de agregar, ${summarize(applied.having, aggregates ?? undefined)}`,
+    ].filter(Boolean);
+    return parts.length > 0 ? `Filtros aplicados: ${parts.join('; ')}.` : 'Sin filtros aplicados.';
   });
 
-  /** Applies the draft when it can be sent; otherwise says why, where. */
+  /**
+   * Applies both drafts as one question when it can be sent, checked whole
+   * against the metrics it selects now; otherwise says why, where.
+   */
   async function applyFilters() {
-    if (!choice || !draft) return;
-    if (draft.problems.length > 0) {
+    if (!choice || !model) return;
+    const next = withFilters(choice, $state.snapshot(drafted) as UserFilters);
+    if (questionProblems(next, model).length > 0) {
       filterNotice = 'Corrige los errores marcados en los filtros antes de aplicarlos.';
       await tick();
       const invalid = document.querySelector<HTMLElement>('#filter-section [aria-invalid="true"]');
       (invalid ?? document.getElementById('filters-notice'))?.focus();
       return;
     }
-    const rest = unfiltered(choice);
     filterNotice = null;
-    pick(draft.filter ? { ...rest, filters: { where: draft.filter, having: null } } : rest);
-    draft = null;
+    pick(next);
+    drafts = { where: null, having: null };
     await tick();
     document.getElementById('filters-applied')?.focus();
   }
@@ -87,11 +103,10 @@
   /** Withdraws the person's filters only: the model's and the policies stay. */
   async function clearFilters() {
     if (!choice) return;
-    const rest = unfiltered(choice);
     filterNotice = null;
-    draft = null;
+    drafts = { where: null, having: null };
     editorRevision++;
-    pick(rest);
+    pick(withFilters(choice, NO_FILTERS));
     await tick();
     document.getElementById('filters-add')?.focus();
   }
@@ -105,7 +120,7 @@
     const controller = new AbortController();
     catalog = { kind: 'loading' };
     view = { kind: 'idle' };
-    draft = null;
+    drafts = { where: null, having: null };
     filterNotice = null;
     void listCatalog(controller.signal)
       .then((value) => {
@@ -208,7 +223,7 @@
           const next = catalog.value.models.find((m) => m.model === event.currentTarget.value);
           if (next) {
             // Another model is another question: its filters start empty.
-            draft = null;
+            drafts = { where: null, having: null };
             filterNotice = null;
             pick(initialChoice({ status: 'ready', models: [next] })!);
           }
@@ -288,25 +303,50 @@
         {/each}
       </fieldset>
       <section id="filter-section" class="grid gap-3" aria-labelledby="filters-title">
-        <h2 id="filters-title" class="font-semibold">Filtros de filas</h2>
+        <h2 id="filters-title" class="font-semibold">Filtros</h2>
         <p class="text-sm text-slate-700">
-          Se aplican antes de agregar, además de tus permisos y de los filtros del modelo, que no se
-          cambian aquí.
+          Se suman a tus permisos y a los filtros del modelo, que no se cambian aquí.
         </p>
         {#key `${choice.model}:${editorRevision}`}
-          <FilterTreeEditor
-            {model}
-            initial={applied}
-            id="filters"
-            onchange={(change) => {
-              draft = change;
-              filterNotice = null;
-            }}
-          />
+          <section class="grid gap-3" aria-labelledby="filters-rows-title">
+            <h3 id="filters-rows-title" class="font-semibold">Filtros de filas</h3>
+            <p class="text-sm text-slate-700">
+              Se aplican antes de agregar: deciden qué filas entran en cada cálculo.
+            </p>
+            <FilterTreeEditor
+              domain={rows!}
+              initial={applied.where}
+              id="filters"
+              onchange={(change) => {
+                drafts.where = change;
+                filterNotice = null;
+              }}
+            />
+          </section>
+          <section class="grid gap-3" aria-labelledby="filters-metrics-title">
+            <h3 id="filters-metrics-title" class="font-semibold">Filtros de métricas</h3>
+            <p class="text-sm text-slate-700">
+              Se aplican después de agregar, sobre las métricas seleccionadas, al total y a cada
+              fila del desglose por separado: el total puede quedar excluido aunque haya filas.
+            </p>
+            <FilterTreeEditor
+              domain={aggregates!}
+              initial={applied.having}
+              id="having"
+              onchange={(change) => {
+                drafts.having = change;
+                filterNotice = null;
+              }}
+            />
+          </section>
         {/key}
         <div class="flex flex-wrap gap-2">
           <button type="button" onclick={applyFilters} disabled={!pending}>Aplicar filtros</button>
-          <button type="button" onclick={clearFilters} disabled={!applied && draft === null}>
+          <button
+            type="button"
+            onclick={clearFilters}
+            disabled={!applied.where && !applied.having && !drafts.where && !drafts.having}
+          >
             Limpiar filtros
           </button>
         </div>
@@ -317,7 +357,7 @@
         {/if}
         {#if pending}<p class="text-sm text-slate-700">Hay cambios sin aplicar.</p>{/if}
         <p id="filters-applied" class="text-sm" tabindex="-1">
-          {applied ? `Filtros aplicados: ${summarize(applied)}.` : 'Sin filtros aplicados.'}
+          {appliedSummary}
         </p>
         {#if appliedProblems.length > 0}
           <p class="text-sm text-red-800" role="alert">

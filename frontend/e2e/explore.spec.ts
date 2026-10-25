@@ -902,7 +902,7 @@ test('row filters: applied explicitly, exact under the row policy, cleared, by k
 
   // A draft asks nothing.
   const before = queries();
-  await page.getByRole('button', { name: 'Añadir condición' }).click();
+  await page.getByRole('button', { name: 'Añadir condición', exact: true }).click();
   await writeCondition(page, 0, 'ventas.region', 'Sur');
   expect(queries()).toBe(before);
   await expect(page.getByText('Hay cambios sin aplicar.')).toBeVisible();
@@ -932,7 +932,7 @@ test('row filters: applied explicitly, exact under the row policy, cleared, by k
   await page.getByRole('button', { name: 'Negar esta condición' }).first().click();
   await applyFilters(page);
   await expect(page.locator('#filters-applied')).toHaveText(
-    'Filtros aplicados: (no ventas.ciudad es igual a «El Alto» o ventas.region es igual a «Sur»).',
+    'Filtros aplicados: antes de agregar, (no ventas.ciudad es igual a «El Alto» o ventas.region es igual a «Sur»).',
   );
   await expect(kpi(page, 'importe_total')).toHaveText('100,10');
   await expect.poll(() => bodyRows(page)).toEqual([['Norte', '1', '100,10']]);
@@ -963,7 +963,7 @@ test('row filters: applied explicitly, exact under the row policy, cleared, by k
   await signIn(page, SUR.user, SUR.name);
   await openExplore(page);
   await chooseVentas(page);
-  await page.getByRole('button', { name: 'Añadir condición' }).click();
+  await page.getByRole('button', { name: 'Añadir condición', exact: true }).click();
   await writeCondition(page, 0, 'ventas.region', 'Norte');
   await applyFilters(page);
   await expect(kpi(page, 'filas')).toHaveText('0');
@@ -982,7 +982,7 @@ test('a NULL row filter on a declared test field: Norte 100,10 and Sur -0,20', a
     await page.getByLabel('Modelo').selectOption('metrics/ventas_notas.yaml');
     await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
     await settled(page, 2);
-    await page.getByRole('button', { name: 'Añadir condición' }).click();
+    await page.getByRole('button', { name: 'Añadir condición', exact: true }).click();
     await page.getByLabel('Campo', { exact: true }).selectOption('ventas.observacion');
     await page.getByLabel('Operador', { exact: true }).selectOption('is_null');
     await applyFilters(page);
@@ -1007,13 +1007,272 @@ test('membership revoked before «Aplicar»: the neutral refusal, no figure kept
     await signIn(page, NORTE.user, NORTE.name);
     await openExplore(page);
     await chooseVentas(page);
-    await page.getByRole('button', { name: 'Añadir condición' }).click();
+    await page.getByRole('button', { name: 'Añadir condición', exact: true }).click();
     await writeCondition(page, 0, 'ventas.ciudad', 'El Alto');
     writeFileSync(members, revoked);
     await page.getByRole('button', { name: 'Aplicar filtros' }).click();
     await expect(page.getByRole('alert')).toContainText('HTTP 404 · Código: model_not_found');
     await expect(page.locator('dl.kpis')).toHaveCount(0);
     expect(await page.content()).not.toContain('0,20');
+    await noLeaks(page, SUR);
+  } finally {
+    writeFileSync(members, original);
+  }
+});
+
+/** Rows sorted by their first cell: the server does not promise an order. */
+const sorted = (rows: string[][]) => [...rows].sort((a, b) => a[0]!.localeCompare(b[0]!));
+const metricFilters = (page: Page) => page.getByRole('region', { name: 'Filtros de métricas' });
+const rowFilters = (page: Page) => page.getByRole('region', { name: 'Filtros de filas' });
+
+/** Writes the only condition after aggregating: metric, comparison and value. */
+async function writeMetric(page: Page, metric: string, comparison: string, value: string) {
+  const editor = metricFilters(page);
+  await editor.getByLabel('Métrica', { exact: true }).selectOption(metric);
+  await editor.getByLabel('Operador', { exact: true }).selectOption(comparison);
+  await editor.getByLabel('Valor', { exact: true }).fill(value);
+}
+
+test('metric filters after aggregating: each grain on its own, an empty total, by keyboard and axe', async ({
+  page,
+}) => {
+  // #149 on the real server: `having` on a selected metric, alone and with a
+  // row filter; the total and the breakdown, each filtered at its own grain.
+  test.setTimeout(180_000);
+  const network = watch(page);
+  const queries = () => network.sent.filter((s) => s === 'POST /api/v1/semantic/query').length;
+  await signIn(page, NORTE.user, NORTE.name);
+  await openExplore(page);
+  await chooseVentas(page);
+  await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
+  await settled(page, 2);
+  await page.getByRole('checkbox', { name: 'ventas.ciudad', exact: true }).check();
+  await expect
+    .poll(async () => sorted(await bodyRows(page)))
+    .toEqual([
+      ['El Alto', '1', '0,20'],
+      ['La Paz', '1', '100,10'],
+    ]);
+
+  // By keyboard: the metric editor starts on its own button, the focus on its control.
+  await metricFilters(page).getByRole('button', { name: 'Añadir condición de métrica' }).focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => focusedId(page)).toMatch(/^having-n\d+-field$/);
+  const offered = await metricFilters(page)
+    .getByLabel('Métrica', { exact: true })
+    .locator('option:not([disabled])')
+    .allTextContents();
+  // The question's metrics, never `margen` (withheld) nor an unselected one.
+  expect(offered.map((o) => o.trim())).toEqual(['filas', 'importe_total']);
+  const before = queries();
+  await writeMetric(page, 'importe_total', '>', '100.00');
+  expect(queries()).toBe(before);
+
+  // importe > 100.00: the total 100,30, and La Paz alone by city.
+  await applyFilters(page);
+  await expect(page.locator('#filters-applied')).toHaveText(
+    'Filtros aplicados: después de agregar, importe_total es mayor que 100.00.',
+  );
+  await expect(kpi(page, 'importe_total')).toHaveText(NORTE.shown);
+  await expect(kpi(page, 'filas')).toHaveText('2');
+  await expect.poll(() => bodyRows(page)).toEqual([['La Paz', '1', '100,10']]);
+  expect(queries()).toBe(before + 2);
+
+  // And WHERE ciudad = El Alto: no total and no city pass, said and not failed.
+  await rowFilters(page).getByRole('button', { name: 'Añadir condición', exact: true }).click();
+  await writeCondition(page, 0, 'ventas.ciudad', 'El Alto');
+  await applyFilters(page);
+  await expect(page.locator('#filters-applied')).toHaveText(
+    'Filtros aplicados: antes de agregar, ventas.ciudad es igual a «El Alto»; después de agregar, importe_total es mayor que 100.00.',
+  );
+  await expect(page.getByTestId('kpi-empty')).toHaveText('No hay un total que cumpla este filtro.');
+  await expect.poll(() => bodyRows(page)).toEqual([]);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+
+  // importe < 100.20 alone: the total is excluded, both cities are not; no sum makes a total.
+  await rowFilters(page).getByRole('button', { name: 'Quitar condición', exact: true }).click();
+  await writeMetric(page, 'importe_total', '<', '100.20');
+  await applyFilters(page);
+  await expect(page.getByTestId('kpi-empty')).toBeVisible();
+  await expect(page.locator('dl.kpis')).toHaveCount(0);
+  await expect
+    .poll(async () => sorted(await bodyRows(page)))
+    .toEqual([
+      ['El Alto', '1', '0,20'],
+      ['La Paz', '1', '100,10'],
+    ]);
+  expect(await page.content()).not.toContain('100,30');
+  await noFiguresOf(page, SUR);
+  await axe(page);
+
+  // Removing the metric invalidates its clause, visibly: nothing is asked.
+  const asked = queries();
+  await page.getByRole('checkbox', { name: 'importe_total', exact: true }).uncheck();
+  await expect(page.getByRole('alert')).toContainText(
+    'La métrica no está seleccionada en esta consulta.',
+  );
+  await expect(metricFilters(page).getByLabel('Métrica', { exact: true })).toHaveAttribute(
+    'aria-invalid',
+    'true',
+  );
+  await page.getByRole('button', { name: 'Aplicar filtros' }).click();
+  await expect.poll(() => focusedId(page)).toMatch(/^having-n\d+-field$/);
+  await page.waitForTimeout(500);
+  expect(queries()).toBe(asked);
+  // Back: the same clause, on the same metric, asked again.
+  await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
+  await expect.poll(() => bodyRows(page).then(sorted)).toHaveLength(2);
+  await expect(page.getByTestId('kpi-empty')).toBeVisible();
+  expect(queries()).toBe(asked + 2);
+  expect(network.concurrent()).toEqual([]);
+
+  // Sur, the same filter: only its own rows pass.
+  await signOut(page);
+  await signIn(page, SUR.user, SUR.name);
+  await openExplore(page);
+  await chooseVentas(page);
+  await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
+  await settled(page, 2);
+  await page.getByRole('checkbox', { name: 'ventas.ciudad', exact: true }).check();
+  await metricFilters(page).getByRole('button', { name: 'Añadir condición de métrica' }).click();
+  await writeMetric(page, 'importe_total', '>', '100.00');
+  await applyFilters(page);
+  await expect(kpi(page, 'importe_total')).toHaveText(SUR.shown);
+  await expect.poll(() => bodyRows(page)).toEqual([['Tarija', '1', '200,20']]);
+  await noFiguresOf(page, NORTE);
+});
+
+test('metric filters the page never sends: the server refuses them and shows nothing', async ({
+  page,
+}) => {
+  // #149: forged requests on the real server, each outside the contract or
+  // the session's rights. None returns a figure or a restricted name.
+  await signIn(page, NORTE.user, NORTE.name);
+  const origin = new URL(page.url()).origin;
+  const selections = (names: string[]) =>
+    names.map((name) => ({ id: metricId(name), kind: 'metric', name }));
+  const over = (selection: string, value: object = { type: 'number', value: '100.00' }) => ({
+    op: 'compare',
+    target: { kind: 'metric', selection },
+    comparison: '>',
+    value,
+  });
+  const cases: [string, object][] = [
+    [
+      'a metric not selected',
+      { selections: selections(['filas']), having: over(metricId('importe_total')) },
+    ],
+    [
+      'a metric withheld',
+      { selections: selections(['filas', 'margen']), having: over(metricId('margen')) },
+    ],
+    [
+      'a dimension after aggregating',
+      {
+        selections: selections(['filas']),
+        having: {
+          op: 'compare',
+          target: { kind: 'dimension', name: 'ventas.region' },
+          comparison: '=',
+          value: { type: 'text', value: 'Sur' },
+        },
+      },
+    ],
+    [
+      'a number as text',
+      {
+        selections: selections(['importe_total']),
+        having: over(metricId('importe_total'), { type: 'text', value: '100' }),
+      },
+    ],
+    [
+      'an exponent',
+      {
+        selections: selections(['importe_total']),
+        having: over(metricId('importe_total'), { type: 'number', value: '1e2' }),
+      },
+    ],
+    [
+      'an unknown operator',
+      {
+        selections: selections(['importe_total']),
+        having: { ...over(metricId('importe_total')), op: 'like' },
+      },
+    ],
+    [
+      '257 nodes over both',
+      {
+        selections: selections(['importe_total']),
+        filter: {
+          op: 'and',
+          filters: Array.from({ length: 127 }, () => ({
+            op: 'is_not_null',
+            target: { kind: 'dimension', name: 'ventas.region' },
+          })),
+        },
+        having: {
+          op: 'and',
+          filters: Array.from({ length: 128 }, () => over(metricId('importe_total'))),
+        },
+      },
+    ],
+    [
+      'a forged role on its target',
+      {
+        selections: selections(['importe_total']),
+        having: {
+          ...over(metricId('importe_total')),
+          target: { kind: 'metric', selection: metricId('importe_total'), roles: ['admin'] },
+        },
+      },
+    ],
+    [
+      'a forged policy attribute',
+      {
+        selections: selections(['importe_total']),
+        having: over(metricId('importe_total')),
+        context: { department: 'Sur' },
+      },
+    ],
+  ];
+  for (const [name, query] of cases) {
+    const response = await page.request.post('/api/v1/semantic/query', {
+      headers: { Origin: origin, Accept: 'application/json' },
+      data: { model: 'metrics/ventas.yaml', query },
+    });
+    expect([400, 403, 404, 422], name).toContain(response.status());
+    const body = await response.text();
+    expect(body, name).not.toMatch(SENTINELS);
+    for (const figure of [NORTE.amount, SUR.amount, '100.10', '200.20']) {
+      expect(body, name).not.toContain(figure);
+    }
+  }
+});
+
+test('membership revoked before applying a metric filter: the neutral refusal, no figure kept', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const members = fileURLToPath(
+    new URL('./semantic/project/policies/members.yaml', import.meta.url),
+  );
+  const original = readFileSync(members);
+  const revoked = original
+    .toString('utf8')
+    .replace(/^ {2}analysts: \[viewer\]$/m, '  catalog_authors: [viewer]');
+  try {
+    await signIn(page, NORTE.user, NORTE.name);
+    await openExplore(page);
+    await chooseVentas(page);
+    await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
+    await settled(page, 2);
+    await metricFilters(page).getByRole('button', { name: 'Añadir condición de métrica' }).click();
+    await writeMetric(page, 'importe_total', '>', '100.00');
+    writeFileSync(members, revoked);
+    await page.getByRole('button', { name: 'Aplicar filtros' }).click();
+    await expect(page.getByRole('alert')).toContainText('HTTP 404 · Código: model_not_found');
+    await expect(page.locator('dl.kpis')).toHaveCount(0);
+    expect(await page.content()).not.toContain(NORTE.shown);
     await noLeaks(page, SUR);
   } finally {
     writeFileSync(members, original);

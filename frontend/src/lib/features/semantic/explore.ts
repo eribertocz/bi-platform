@@ -95,6 +95,16 @@ export function reconcile(choice: Choice | null, catalog: SemanticCatalog): Choi
 const hasFilters = (choice: Choice) => Boolean(choice.filters?.where || choice.filters?.having);
 
 /**
+ * The same question with the person's `filters`, before and after
+ * aggregating, as one: checked together, on one budget (`questionProblems`).
+ * Without any, the question carries none.
+ */
+export function withFilters(choice: Choice, filters: UserFilters): Choice {
+  const rest = { model: choice.model, metrics: choice.metrics, dimensions: choice.dimensions };
+  return filters.where || filters.having ? { ...rest, filters } : rest;
+}
+
+/**
  * Why `choice` cannot be sent on `model`: selections that would share an id,
  * or the person's filters, checked only against the question's own model.
  */

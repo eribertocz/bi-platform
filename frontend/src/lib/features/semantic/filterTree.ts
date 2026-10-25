@@ -1,7 +1,5 @@
-import type { CatalogModel } from '#lib/api/semantic.ts';
-import { condition, draftOf, OPERATOR_LABELS, type Draft } from './condition';
+import { condition, draftOf, OPERATOR_LABELS, type Domain, type Draft } from './condition';
 import {
-  filterProblems,
   type FilterProblem,
   type SemanticFilter,
   type SemanticTarget,
@@ -9,7 +7,7 @@ import {
 } from './filters';
 
 /**
- * A `where` being edited, as a tree: conditions written by drafts (#148),
+ * A `where` or a `having` being edited, as a tree: conditions written by drafts (#148),
  * AND/OR groups and NOT. A condition no draft writes as it is stays a
  * `fixed` node, kept and shown as it is, never dropped nor rewritten (#264).
  * Keys identify nodes across edits; they are not part of the filter.
@@ -31,7 +29,7 @@ export type TreeActions = {
   setDraft: (key: number, draft: Draft) => void;
 };
 
-/** What the tree editor reports on every change: the `where` it writes, or
+/** What the tree editor reports on every change: the filter it writes, or
  *  none, and why it cannot be sent, if so. Never results nor credentials. */
 export type TreeChange = { filter: SemanticFilter | null; problems: FilterProblem[] };
 
@@ -42,25 +40,21 @@ export function keys(start = 0) {
 }
 
 /** The filter the tree writes, exactly: order, grouping and every node. */
-export function toFilter(node: TreeNode, model: CatalogModel): SemanticFilter {
+export function toFilter(node: TreeNode, domain: Domain): SemanticFilter {
   switch (node.kind) {
     case 'condition':
-      return condition(node.draft, model);
+      return condition(node.draft, domain);
     case 'fixed':
       return node.filter;
     case 'group':
-      return { op: node.op, filters: node.children.map((child) => toFilter(child, model)) };
+      return { op: node.op, filters: node.children.map((child) => toFilter(child, domain)) };
     case 'not':
-      return { op: 'not', filter: toFilter(node.child, model) };
+      return { op: 'not', filter: toFilter(node.child, domain) };
   }
 }
 
 /** The tree of `filter`, which writes it back exactly (`toFilter`). */
-export function fromFilter(
-  filter: SemanticFilter,
-  model: CatalogModel,
-  key: () => number,
-): TreeNode {
+export function fromFilter(filter: SemanticFilter, domain: Domain, key: () => number): TreeNode {
   switch (filter.op) {
     case 'and':
     case 'or':
@@ -68,14 +62,14 @@ export function fromFilter(
         key: key(),
         kind: 'group',
         op: filter.op,
-        children: filter.filters.map((child) => fromFilter(child, model, key)),
+        children: filter.filters.map((child) => fromFilter(child, domain, key)),
       };
     case 'not':
-      return { key: key(), kind: 'not', child: fromFilter(filter.filter, model, key) };
+      return { key: key(), kind: 'not', child: fromFilter(filter.filter, domain, key) };
     default: {
       // Editable only when its draft writes it back unchanged.
-      const draft = draftOf(filter);
-      return draft && same(condition(draft, model), filter)
+      const draft = draftOf(filter, domain);
+      return draft && same(condition(draft, domain), filter)
         ? { key: key(), kind: 'condition', draft }
         : { key: key(), kind: 'fixed', filter };
     }
@@ -107,8 +101,8 @@ export function paths(root: TreeNode | null, at = '/filter'): Map<number, string
 }
 
 /** Why the whole tree cannot be sent: one count for the whole, as the server's. */
-export const treeProblems = (root: TreeNode | null, model: CatalogModel): FilterProblem[] =>
-  root ? filterProblems({ where: toFilter(root, model), having: null }, model, []) : [];
+export const treeProblems = (root: TreeNode | null, domain: Domain): FilterProblem[] =>
+  root ? domain.problems(toFilter(root, domain)) : [];
 
 /** `root` with the node `key` replaced by what `change` returns; `null` removes it. */
 export function edit(
@@ -133,10 +127,14 @@ export function edit(
   return root;
 }
 
-/** A filter as a sentence, to say what is applied: never evaluated. */
-export function summarize(filter: SemanticFilter): string {
+/**
+ * A filter as a sentence, to say what is applied: never evaluated. A target
+ * is named as `domain` names it, else by what it carries.
+ */
+export function summarize(filter: SemanticFilter, domain?: Domain): string {
   const name = (target: SemanticTarget) =>
-    target.kind === 'dimension' ? target.name : target.selection.replace(/^m:/, '');
+    domain?.name(target) ??
+    (target.kind === 'dimension' ? target.name : target.selection.replace(/^m:/, ''));
   const value = (v: SemanticValue) =>
     v.type === 'null'
       ? 'NULL'
@@ -150,9 +148,9 @@ export function summarize(filter: SemanticFilter): string {
   switch (filter.op) {
     case 'and':
     case 'or':
-      return `(${filter.filters.map(summarize).join(filter.op === 'and' ? ' y ' : ' o ')})`;
+      return `(${filter.filters.map((f) => summarize(f, domain)).join(filter.op === 'and' ? ' y ' : ' o ')})`;
     case 'not':
-      return `no ${summarize(filter.filter)}`;
+      return `no ${summarize(filter.filter, domain)}`;
     case 'is_null':
     case 'is_not_null':
       return `${name(filter.target)} ${OPERATOR_LABELS[filter.op]}`;

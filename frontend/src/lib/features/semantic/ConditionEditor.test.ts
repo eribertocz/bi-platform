@@ -5,12 +5,15 @@ import type { CatalogModel } from '#lib/api/semantic.ts';
 import {
   condition,
   draftOf,
+  metricsDomain,
   operators,
+  rowsDomain,
   type ConditionChange,
   type Draft,
   type Operator,
 } from './condition';
 import ConditionEditor from './ConditionEditor.svelte';
+import { metricId } from './filters';
 
 const member = (
   name: string,
@@ -40,6 +43,8 @@ const MODEL: CatalogModel = {
   metrics: [member('importe_total', 'DECIMAL(38,2)')],
 };
 
+const ROWS = rowsDomain(MODEL);
+
 afterEach(cleanup);
 
 /** The editor, and every change it reported. */
@@ -47,7 +52,7 @@ function editor(initial: Draft) {
   const changes: ConditionChange[] = [];
   const onremove = vi.fn();
   render(ConditionEditor, {
-    model: MODEL,
+    domain: ROWS,
     initial,
     id: 'c0',
     onchange: (change: ConditionChange) => changes.push(change),
@@ -249,7 +254,7 @@ describe('drafts and conditions', () => {
             operator: op,
             values: op === 'between' ? [...used, ''].slice(0, 2) : used,
           };
-          const back = draftOf(condition(draft, MODEL));
+          const back = draftOf(condition(draft, ROWS), ROWS);
           // A boolean written otherwise reads back as written, still text.
           expect(back).toEqual(draft);
         },
@@ -260,12 +265,115 @@ describe('drafts and conditions', () => {
   it('never drafts what a draft cannot write as it is', () => {
     const region = { kind: 'dimension' as const, name: 'ventas.region' };
     expect(
-      draftOf({ op: 'compare', target: region, comparison: '=', value: { type: 'null' } }),
+      draftOf({ op: 'compare', target: region, comparison: '=', value: { type: 'null' } }, ROWS),
     ).toBeNull();
-    expect(draftOf({ op: 'is_null', target: { ...region, roles: ['facturacion'] } })).toBeNull();
-    expect(draftOf({ op: 'and', filters: [] })).toBeNull();
     expect(
-      draftOf({ op: 'is_null', target: { kind: 'metric', selection: 'm:importe_total' } }),
+      draftOf({ op: 'is_null', target: { ...region, roles: ['facturacion'] } }, ROWS),
     ).toBeNull();
+    expect(draftOf({ op: 'and', filters: [] }, ROWS)).toBeNull();
+    expect(
+      draftOf({ op: 'is_null', target: { kind: 'metric', selection: 'm:importe_total' } }, ROWS),
+    ).toBeNull();
+  });
+});
+
+describe('the same editor after aggregating (#149)', () => {
+  // The question's metrics: one of each kind the domain must tell apart.
+  const AFTER: CatalogModel = {
+    ...MODEL,
+    metrics: [
+      member('importe_total', 'DECIMAL(38,2)'),
+      member('filas', 'INT64'),
+      member('margen', 'DECIMAL(38,2)', true, 'masked'),
+      member('sin_filtro', 'INT64', false),
+      member('otra', 'INT64'),
+    ],
+  };
+  const SELECTED = ['importe_total', 'filas', 'sin_filtro'];
+  const total = { kind: 'metric' as const, selection: metricId('importe_total') };
+
+  function metricEditor(initial: Draft, metrics = SELECTED) {
+    const changes: ConditionChange[] = [];
+    const view = render(ConditionEditor, {
+      domain: metricsDomain(AFTER, metrics),
+      initial,
+      id: 'h0',
+      onchange: (change: ConditionChange) => changes.push(change),
+      onremove: vi.fn(),
+    });
+    return { view, last: () => changes.at(-1)! };
+  }
+  const metric = () => screen.getByLabelText('Métrica') as HTMLSelectElement;
+
+  it('names only the selected metrics the session may filter, by their selection id', async () => {
+    const { last } = metricEditor({ field: 'importe_total', operator: '>', values: ['100.00'] });
+    // Not `sin_filtro` (no filter), not `otra` (not selected), not `margen` (withheld).
+    expect([...metric().options].map((o) => o.value)).toEqual(['importe_total', 'filas']);
+    expect(screen.queryByLabelText('Campo')).toBeNull();
+    await type('Valor', '100.10');
+    expect(last().condition).toEqual({
+      op: 'compare',
+      target: total,
+      comparison: '>',
+      value: { type: 'number', value: '100.10' },
+    });
+    expect(last().problems).toEqual([]);
+  });
+
+  it('checks literals at the metric type, reported after aggregating beside their control', async () => {
+    const { last } = metricEditor({ field: 'filas', operator: '=', values: ['1.5'] });
+    expect(describedError(screen.getByLabelText('Valor'))).toBe(
+      'El valor no es un entero de 64 bits.',
+    );
+    await type('Valor', '9223372036854775808');
+    expect(last().problems).toEqual([
+      { path: '/having/value', message: 'El valor no es un entero de 64 bits.' },
+    ]);
+    // Past 2^53, exact: text, never a Number.
+    await type('Valor', '9223372036854775807');
+    expect(last().problems).toEqual([]);
+    expect(last().condition).toMatchObject({
+      value: { type: 'number', value: '9223372036854775807' },
+    });
+  });
+
+  it('a metric removed from the question keeps its condition, marked, never another', async () => {
+    const { view } = metricEditor({ field: 'filas', operator: '>', values: ['1'] });
+    await view.rerender({ domain: metricsDomain(AFTER, ['importe_total']) });
+    expect(describedError(metric())).toBe('La métrica no está seleccionada en esta consulta.');
+    expect(metric().selectedOptions[0]!.textContent!.trim()).toBe('filas (no disponible)');
+    // Back in the question: the same condition, valid again.
+    await view.rerender({ domain: metricsDomain(AFTER, ['importe_total', 'filas']) });
+    expect(metric().getAttribute('aria-invalid')).toBeNull();
+    expect(metric().value).toBe('filas');
+  });
+
+  it('drafts back exactly what it writes, and nothing of another domain', () => {
+    const domain = metricsDomain(AFTER, SELECTED);
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...SELECTED),
+        fc.constantFrom(...operators(member('n', 'INT64'))),
+        fc.array(fc.string(), { minLength: 1, maxLength: 4 }),
+        (name, op, values) => {
+          const used =
+            op === 'in'
+              ? values
+              : values.slice(0, op === 'between' ? 2 : op.startsWith('is_') ? 0 : 1);
+          const draft: Draft = {
+            field: name,
+            operator: op,
+            values: op === 'between' ? [...used, ''].slice(0, 2) : used,
+          };
+          expect(draftOf(condition(draft, domain), domain)).toEqual(draft);
+        },
+      ),
+    );
+    const dimension = { kind: 'dimension' as const, name: 'ventas.region' };
+    expect(draftOf({ op: 'is_null', target: dimension }, domain)).toBeNull();
+    expect(
+      draftOf({ op: 'is_null', target: { kind: 'metric', selection: metricId('otra') } }, domain),
+    ).toBeNull();
+    expect(draftOf({ op: 'is_null', target: total }, ROWS)).toBeNull();
   });
 });
