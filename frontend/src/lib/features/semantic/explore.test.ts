@@ -265,6 +265,24 @@ describe('a total excluded after aggregating, then the breakdown (#266)', () => 
     expect(answered.table?.result.blocks[0]!.rows.length).toBeGreaterThan(0);
   });
 
+  it('refuses a total without columns even with HAVING, before the breakdown is asked', async () => {
+    const run = vi.fn(async () => {
+      const hollow = emptyTotal();
+      hollow.result.blocks[0]!.columns = [];
+      return hollow;
+    });
+    const choice = {
+      model: 'm',
+      metrics: ['importe'],
+      dimensions: ['region'],
+      filters: { where: null, having },
+    };
+    await expect(answer(choice, new AbortController().signal, run)).rejects.toThrow(
+      IncompatibleResult,
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses it without HAVING, before the breakdown is asked', async () => {
     const run = vi.fn(async () => emptyTotal());
     const choice = { model: 'm', metrics: ['importe'], dimensions: ['region'] };

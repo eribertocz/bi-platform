@@ -403,4 +403,10 @@ describe('a total excluded after aggregating (#266)', () => {
     const hollow = { ...block([metric, count], []), row_count: 1 };
     expect(() => totals(run(hollow), true)).toThrow(IncompatibleResult);
   });
+
+  it('Codex #278: a total without any metric column is incompatible even with HAVING', () => {
+    expect(() => totals(run(block([], [])), true)).toThrow(IncompatibleResult);
+    expect(() => totals(run(block([], [[]])), true)).toThrow(IncompatibleResult);
+    expect(() => totals(run(block([], [])))).toThrow(IncompatibleResult);
+  });
 });

@@ -205,7 +205,15 @@ export type Totals =
 export function totals(run: SemanticRun, emptyAllowed = false): Totals {
   const [block, ...rest] = run.result.blocks;
   const rows = emptyAllowed ? [0, 1] : [1];
-  if (!block || rest.length > 0 || block.columns.some(isGrain) || !rows.includes(block.row_count)) {
+  // A total keeps its metric columns even with no row: without any, the
+  // answer is incomplete, never a total the filter excluded.
+  if (
+    !block ||
+    rest.length > 0 ||
+    block.columns.length === 0 ||
+    block.columns.some(isGrain) ||
+    !rows.includes(block.row_count)
+  ) {
     throw new IncompatibleResult('Este resultado no es un total sin desglose.');
   }
   checkBlock(block);
