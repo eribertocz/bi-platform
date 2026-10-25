@@ -8,7 +8,7 @@
             "selection_id": "t",
             "kind": "metric",
             "id": "project-file-76656e7461732e79616d6c/metric/importe_total",
-            "type": "DECIMAL(18,2)",
+            "type": "DECIMAL(38,2)",
             "nullable": true,
             "unit": null,
             "timezone": null,
@@ -34,7 +34,7 @@
     ]
   },
   "receipt": {
-    "id": "run:0da876c200814542c5513e87bf5c357521ca5325e504c95962dfaf94fd641230",
+    "id": "run:33fb33c5c7276180687f358303d3d3b47c0b152af850daf9f69fb89ef31b0f2a",
     "version": "bi-run-receipt/1",
     "query": {
       "encoding": "sef-canonical-cbor-v1",
@@ -42,11 +42,11 @@
     },
     "fingerprints": {
       "query": "sef-sha256-v1:2acd50c8f17f25ea57e325e3f57a1f0edceca8d11ef5bb8a013622ca53f4e150",
-      "model": "model-hmac-sha256-v1:020299103f756cea7f1af74d02acd8a883b7ef6c66586cd2f9b47f2e61dec0a4",
-      "plan": "plan-hmac-sha256-v1:c20cca8b7636d3a16e78a07e195a13bfa40d172cc51357da13e4f2ce392612ca",
-      "decision": "decision-hmac-sha256-v1:3d41554c1c98aa51e8e5aa04c53055e04e958b25d7af08149047a68bb044e137",
-      "policies": "policies-hmac-sha256-v1:cf48f50014b933c1a35494f11ff9df4634a7d6a461298a261593e348cbc774be",
-      "context": "ctx-hmac-sha256-v1:9840bf3db7bf8805619b4f4d7bdda9c2d7f1b01bbf2a24bff423c96948bd4847"
+      "model": "model-hmac-sha256-v1:e95cf0d7769cc109899414eaf21dca276aa317775c3f6d604152a2fea6aa09b7",
+      "plan": "plan-hmac-sha256-v1:cab314de159e5ec3a50b3136fbb9e124ab551e73389cdf8cd0716c7105a6e02b",
+      "decision": "decision-hmac-sha256-v1:caaa89cf146ca9be09b64c052e3870fcce183369a38756565a0eb4fd6ceaa1e2",
+      "policies": "policies-hmac-sha256-v1:de77318b3ea18b0efc6514d50d621afa446aab4b00cafbe138e3626f2c506368",
+      "context": "ctx-hmac-sha256-v1:e4d1c2f41f43885a8aebba154d8221b258ff26639c941a093ab7a5b6ea536452"
     },
     "definitions": [
       {
@@ -55,7 +55,7 @@
       },
       {
         "id": "project-file-76656e7461732e79616d6c/metric/importe_total",
-        "content": "sef-sha256-v1:54c6d22866cddf2793910584d2c5dcdf939b04a06fa2933968ff6de060977954"
+        "content": "sef-sha256-v1:7a03f59733b2f430cb62a9ab0e04b37e3764742de63fc613af6f56f3d8d066ba"
       }
     ],
     "versions": {
@@ -71,9 +71,9 @@
         "source_refreshed_at": null
       }
     ],
-    "evidence": "ev-hmac-sha256-v1:05dc14f18bd4196a2ab1dfa533103854580df57845c551b69a538527dcc4fd39",
-    "read_started_at": "2026-10-24T14:30:31.739472900Z",
-    "read_finished_at": "2026-10-24T14:30:31.745965300Z"
+    "evidence": "ev-hmac-sha256-v1:47bb92300786c3a5d777743a2a74df5a7468417c01f6c4ae6bd364dd0d4947b5",
+    "read_started_at": "2026-10-24T22:31:49.013013400Z",
+    "read_finished_at": "2026-10-24T22:31:49.020409900Z"
   },
   "notices": []
 }

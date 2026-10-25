@@ -37,7 +37,7 @@
         },
         {
           "name": "importe_total",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -51,7 +51,7 @@
         },
         {
           "name": "margen",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -195,7 +195,7 @@
         },
         {
           "name": "importe_total",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -209,7 +209,7 @@
         },
         {
           "name": "margen",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -335,7 +335,7 @@
         },
         {
           "name": "importe_total",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -349,7 +349,7 @@
         },
         {
           "name": "margen",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -363,7 +363,7 @@
         },
         {
           "name": "vieja",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "deprecated",
@@ -445,7 +445,7 @@
         },
         {
           "name": "importe_total",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"
@@ -459,7 +459,7 @@
         },
         {
           "name": "margen",
-          "type": "DECIMAL(18,2)",
+          "type": "DECIMAL(38,2)",
           "unit": null,
           "lifecycle": {
             "state": "active"

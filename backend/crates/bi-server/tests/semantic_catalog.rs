@@ -436,7 +436,8 @@ fn member(name: &str, value_type: &str, select: &str, field: bool, unit: &Value)
 /// is restricted (`nota`, `secreto_centinela`, `reserva_centinela`) and
 /// what is not a dimension (`id`, `importe`) is absent.
 fn viewer_catalog() -> Value {
-    let decimal = "DECIMAL(18,2)";
+    // Its metrics sum `importe`: DECIMAL(38,2) (#261).
+    let decimal = "DECIMAL(38,2)";
     json!({
         "status": "ready",
         "models": [{

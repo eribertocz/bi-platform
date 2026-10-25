@@ -40,7 +40,7 @@ fn dimension_selection(name: &str) -> UnboundSelection {
     }
 }
 
-/// CASE-001: `revenue` (DECIMAL(18,2)) by `region` (VARCHAR).
+/// CASE-001: `revenue` (DECIMAL(38,2), its certified SUM) by `region` (VARCHAR).
 fn revenue_by_region() -> UnboundBlock {
     UnboundBlock {
         block_id: "result".to_owned(),
@@ -288,14 +288,15 @@ fn literals_must_fit_their_target_without_loss() {
     let path = "/blocks/0/post_aggregate_filter/value";
     rejects(&having("1.234"), &model, Code::InvalidLiteral, path);
     rejects(&having("1e3"), &model, Code::InvalidLiteral, path);
+    // One integer digit past DECIMAL(38,2).
     rejects(
-        &having("10000000000000000000"),
+        &having(&format!("1{}", "0".repeat(36))),
         &model,
         Code::InvalidLiteral,
         path,
     );
 
-    // 5 is stated exactly at the metric's type: DECIMAL(18,2) 5.00.
+    // 5 is stated exactly at the metric's type: DECIMAL(38,2) 5.00.
     let bound = bound(&having("5"), &model);
     let Some(FilterExpr::Compare { value, .. }) = &bound.blocks[0].post_aggregate_filter else {
         panic!("compare");

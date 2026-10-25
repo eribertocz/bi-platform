@@ -155,6 +155,7 @@ describe('failures', () => {
     [429, 'semantic_busy', { gone: false, retry: true }],
     [403, 'semantic_access_denied', { gone: false, retry: false }],
     [422, 'masked_unsupported', { gone: false, retry: false }],
+    [422, 'result_out_of_range', { gone: false, retry: false }],
     [503, 'analytics_failed', { gone: false, retry: true }],
     [504, 'semantic_timeout', { gone: false, retry: true }],
   ])('%i %s', (status, code, expected) => {
@@ -222,4 +223,10 @@ describe('found by the adversarial review before delivery', () => {
     );
     expect(failure(new ApiError(429, 'r', 'semantic_busy')).message).not.toContain('tuya');
   });
+});
+
+it('explains a total out of range as such, not as an impossible selection', () => {
+  const message = failure(new ApiError(422, 'r', 'result_out_of_range')).message;
+  expect(message).toContain('demasiado grande');
+  expect(message).not.toContain('no se puede consultar en el modelo');
 });

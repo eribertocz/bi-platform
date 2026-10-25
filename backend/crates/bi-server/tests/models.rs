@@ -434,10 +434,14 @@ async fn catalog_author_inspects_the_whole_project(pool: PgPool) {
                 )
             })
             .collect();
-        // Deterministic order; exact types of the DuckLake fixture.
+        // Deterministic order; exact types of the DuckLake fixture: SUM of
+        // INT64 is DECIMAL(38,0) and of DECIMAL(18,2) DECIMAL(38,2) (#261).
         assert_eq!(
             metrics,
-            vec![("coste", "INT64"), ("importe_total", "DECIMAL(18,2)")]
+            vec![
+                ("coste", "DECIMAL(38,0)"),
+                ("importe_total", "DECIMAL(38,2)")
+            ]
         );
         let dimension = |name: &str| {
             valid["dimensions"]

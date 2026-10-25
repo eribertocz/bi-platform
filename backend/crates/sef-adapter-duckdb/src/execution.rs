@@ -50,6 +50,9 @@ pub enum ExecutionError {
     SourceContract,
     ContractViolation,
     NumericOverflow,
+    /// A result outside the exact range certified for it (#261): a sum
+    /// past its declared precision, never another failure of the engine.
+    ResultOutOfRange,
     Budget,
     Cancelled,
     Deadline,
@@ -180,6 +183,11 @@ pub struct DuckDbPlan {
     certificate: Certificate,
     checks: Vec<String>,
     wide: Option<wide::Aggregation>,
+    /// Exact range checks of every wide-input SUM, with the CTEs they read.
+    range_checks: Vec<String>,
+    /// Per block, the certified (precision, scale) of each decimal output
+    /// column, parsed once at lowering (#261).
+    decimals: BTreeMap<String, Vec<Option<(u8, u8)>>>,
     definitions: Vec<sef_exec_ir::ObjectRef>,
     output_grains: BTreeMap<String, Vec<RequestedAtom>>,
     metadata: BTreeMap<String, Vec<std::collections::HashMap<String, String>>>,
@@ -308,28 +316,47 @@ impl DuckDbPlan {
         let suffix = hex(&function_nonce);
         let ratio = format!("sef_exact_ratio_{suffix}");
         let local_date = format!("sef_local_date_{suffix}");
-        if self
-            .sql
-            .iter()
-            .any(|(_, sql)| sql.contains("sef_exact_ratio("))
-            || self
-                .checks
-                .iter()
-                .any(|sql| sql.contains("sef_exact_ratio("))
-        {
+        let combine = format!("sef_exact_combine_{suffix}");
+        let sort_key = format!("sef_exact_sort_key_{suffix}");
+        let cmp = format!("sef_exact_cmp_{suffix}");
+        let sum_parts = format!("sef_exact_sum_parts_{suffix}");
+        let sum_split = format!("sef_exact_sum_split_{suffix}");
+        let uses = |name: &str| {
+            self.sql.iter().any(|(_, sql)| sql.contains(name))
+                || self.checks.iter().any(|sql| sql.contains(name))
+                || self.range_checks.iter().any(|sql| sql.contains(name))
+        };
+        if uses("sef_exact_combine(") {
+            connection
+                .register_scalar_function::<exact::Combine>(&combine)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_sum_split(") {
+            connection
+                .register_scalar_function::<exact::SumSplit>(&sum_split)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_sum_parts(") {
+            connection
+                .register_scalar_function::<exact::SumParts>(&sum_parts)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_cmp(") {
+            connection
+                .register_scalar_function::<exact::Compare>(&cmp)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_sort_key(") {
+            connection
+                .register_scalar_function::<exact::SortKey>(&sort_key)
+                .map_err(|_| ExecutionError::Engine)?;
+        }
+        if uses("sef_exact_ratio(") {
             connection
                 .register_scalar_function::<exact::Ratio>(&ratio)
                 .map_err(|_| ExecutionError::Engine)?;
         }
-        if self
-            .sql
-            .iter()
-            .any(|(_, sql)| sql.contains("sef_local_date("))
-            || self
-                .checks
-                .iter()
-                .any(|sql| sql.contains("sef_local_date("))
-        {
+        if uses("sef_local_date(") {
             connection
                 .register_scalar_function::<exact::LocalDate>(&local_date)
                 .map_err(|_| ExecutionError::Engine)?;
@@ -337,6 +364,11 @@ impl DuckDbPlan {
         let physical_sql = |sql: &str| {
             sql.replace("sef_exact_ratio(", &format!("{ratio}("))
                 .replace("sef_local_date(", &format!("{local_date}("))
+                .replace("sef_exact_combine(", &format!("{combine}("))
+                .replace("sef_exact_sort_key(", &format!("{sort_key}("))
+                .replace("sef_exact_cmp(", &format!("{cmp}("))
+                .replace("sef_exact_sum_parts(", &format!("{sum_parts}("))
+                .replace("sef_exact_sum_split(", &format!("{sum_split}("))
         };
         let engine_version = connection
             .query_row("SELECT version()", [], |row| row.get(0))
@@ -367,6 +399,21 @@ impl DuckDbPlan {
                 .map_err(|_| ExecutionError::Engine)?;
             if violated {
                 return Err(ExecutionError::ContractViolation);
+            }
+        }
+        // A SUM past its certified range in any group fails the whole
+        // execution before any data leaves, selected or not (#261).
+        for check in &self.range_checks {
+            limits.checkpoint()?;
+            let mut statement = transaction
+                .prepare(&physical_sql(check))
+                .map_err(|_| ExecutionError::Engine)?;
+            let bound = statement_values(&statement, &values)?;
+            let overflowed: bool = statement
+                .query_row(duckdb::params_from_iter(bound), |row| row.get(0))
+                .map_err(|_| ExecutionError::Engine)?;
+            if overflowed {
+                return Err(ExecutionError::ResultOutOfRange);
             }
         }
         let mut rows = 0_usize;
@@ -401,6 +448,7 @@ impl DuckDbPlan {
                     }
                     intermediate.push(batch);
                 } else {
+                    let batch = self.conform(block_id, &batch)?;
                     charge(&batch, &mut rows, &mut bytes, limits)?;
                     let batch = self.annotate(block_id, &batch)?;
                     emit(BlockResult {
@@ -412,6 +460,7 @@ impl DuckDbPlan {
             }
             if let Some(wide) = &self.wide {
                 for batch in wide.execute(&intermediate, limits)? {
+                    let batch = self.conform(block_id, &batch)?;
                     charge(&batch, &mut rows, &mut bytes, limits)?;
                     let batch = self.annotate(block_id, &batch)?;
                     emit(BlockResult {
@@ -471,6 +520,104 @@ impl DuckDbPlan {
             "sef-context-hmac-sha256-v1:{}",
             hex(&mac.finalize().into_bytes())
         ))
+    }
+
+    /// Every decimal output within its certified type, exactly (#261): a
+    /// carrier past 38 digits becomes Decimal256, and a value past its
+    /// certified precision is a result out of range. This exact check on
+    /// what the plan returned is the only source of that verdict: an
+    /// engine failure is never inferred to be one.
+    fn conform(&self, block: &str, batch: &RecordBatch) -> Result<RecordBatch, ExecutionError> {
+        use duckdb::arrow::array::{Array, Decimal128Array, Decimal256Array, StringArray};
+        use duckdb::arrow::datatypes::{DataType, i256};
+        let types = self
+            .decimals
+            .get(block)
+            .ok_or(ExecutionError::InvalidCertificate)?;
+        if types.len() != batch.num_columns() {
+            return Err(ExecutionError::SourceContract);
+        }
+        let mut columns = batch.columns().to_vec();
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (i, ty) in types.iter().enumerate() {
+            let Some((precision, scale)) = *ty else {
+                continue;
+            };
+            match columns[i].data_type() {
+                DataType::Utf8 if precision > 38 => {
+                    let bound = exact::bound(precision);
+                    let text = columns[i]
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or(ExecutionError::SourceContract)?;
+                    let values = (0..text.len())
+                        .map(|row| {
+                            if text.is_null(row) {
+                                return Ok(None);
+                            }
+                            let value = exact::coefficient(text.value(row), scale)?;
+                            if !exact::within_bound(&value, &bound) {
+                                return Err(ExecutionError::ResultOutOfRange);
+                            }
+                            value
+                                .to_string()
+                                .parse::<i256>()
+                                .map(Some)
+                                .map_err(|_| ExecutionError::ResultOutOfRange)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let array = Decimal256Array::from(values)
+                        .with_precision_and_scale(
+                            precision,
+                            i8::try_from(scale).map_err(|_| ExecutionError::SourceContract)?,
+                        )
+                        .map_err(|_| ExecutionError::SourceContract)?;
+                    fields[i] = fields[i].clone().with_data_type(array.data_type().clone());
+                    columns[i] = std::sync::Arc::new(array);
+                    changed = true;
+                }
+                DataType::Decimal256(p, s) if precision > 38 => {
+                    // Emulated sums already check their precision; the
+                    // shape must still be exactly the certified one.
+                    if (*p, *s)
+                        != (
+                            precision,
+                            i8::try_from(scale).map_err(|_| ExecutionError::SourceContract)?,
+                        )
+                    {
+                        return Err(ExecutionError::SourceContract);
+                    }
+                }
+                DataType::Decimal128(_, s)
+                    if precision <= 38 && i8::try_from(scale).is_ok_and(|scale| scale == *s) =>
+                {
+                    let limit = 10_u128.pow(u32::from(precision));
+                    let array = columns[i]
+                        .as_any()
+                        .downcast_ref::<Decimal128Array>()
+                        .ok_or(ExecutionError::SourceContract)?;
+                    if array.iter().flatten().any(|v| v.unsigned_abs() >= limit) {
+                        return Err(ExecutionError::ResultOutOfRange);
+                    }
+                }
+                // Any other shape is not the certified decimal contract.
+                _ => return Err(ExecutionError::SourceContract),
+            }
+        }
+        if !changed {
+            return Ok(batch.clone());
+        }
+        RecordBatch::try_new(
+            std::sync::Arc::new(duckdb::arrow::datatypes::Schema::new(fields)),
+            columns,
+        )
+        .map_err(|_| ExecutionError::SourceContract)
     }
 
     fn annotate(&self, block: &str, batch: &RecordBatch) -> Result<RecordBatch, ExecutionError> {
@@ -584,6 +731,10 @@ pub fn lower(
         allocations: std::collections::BTreeSet::new(),
         filter_targets: BTreeMap::new(),
         wide: None,
+        carriers: BTreeMap::new(),
+        current: None,
+        current_name: String::new(),
+        range_checks: Vec::new(),
     };
     let mut ctes = Vec::new();
     for node in plan.graph.topological(&roots) {
@@ -612,7 +763,15 @@ pub fn lower(
             }
         }
         let name = format!("n{}", ctes.len());
+        lowering.current = Some(node.id);
+        lowering.current_name.clone_from(&name);
         let body = lowering.operator(&node.operator)?;
+        if !lowering.carriers.contains_key(&node.id)
+            && let [input] = node.operator.inputs().as_slice()
+            && let Some(carried) = lowering.carriers.get(input).cloned()
+        {
+            lowering.carriers.insert(node.id, carried);
+        }
         let columns = lowering.output_columns(&node.operator)?;
         let dataset = match &node.operator {
             Operator::ReadSemanticDataset { dataset, .. } => Some(dataset.id.clone()),
@@ -674,6 +833,12 @@ pub fn lower(
             .map(|check| format!("WITH {} {check}", ctes.join(",\n")))
             .collect(),
         wide: lowering.wide,
+        decimals: decimal_outputs(&metadata),
+        range_checks: lowering
+            .range_checks
+            .iter()
+            .map(|check| format!("WITH {} {check}", ctes.join(",\n")))
+            .collect(),
         definitions,
         output_grains: validated
             .query
@@ -684,6 +849,27 @@ pub fn lower(
         metadata,
         binding_key,
     })
+}
+
+/// The certified decimal type of every output column, from its metadata.
+fn decimal_outputs(metadata: &OutputMetadata) -> BTreeMap<String, Vec<Option<(u8, u8)>>> {
+    metadata
+        .iter()
+        .map(|(block, fields)| {
+            let types = fields
+                .iter()
+                .map(|field| {
+                    let (p, s) = field
+                        .get("sef.value_type")?
+                        .strip_prefix("DECIMAL(")?
+                        .strip_suffix(')')?
+                        .split_once(',')?;
+                    Some((p.parse().ok()?, s.parse().ok()?))
+                })
+                .collect();
+            (block.clone(), types)
+        })
+        .collect()
 }
 
 fn quote(name: &str) -> String {
@@ -875,6 +1061,25 @@ struct Lowering<'a> {
     allocations: std::collections::BTreeSet<StableId>,
     filter_targets: BTreeMap<String, StableId>,
     wide: Option<wide::Aggregation>,
+    /// Per node, the output selections carried as exact decimal text
+    /// because their type exceeds DuckDB's 38 digits (#261), with their
+    /// scale. Selection ids are unique only within a block, so carriers
+    /// follow the node that projected them, never another block.
+    carriers: BTreeMap<NodeId, BTreeMap<String, u8>>,
+    /// The node being lowered, and the name of its CTE.
+    current: Option<NodeId>,
+    current_name: String,
+    /// Checks that a SUM stayed within its certified range in every group
+    /// of the node computing it, evaluated before any data leaves (#261).
+    range_checks: Vec<String>,
+}
+
+/// The decimal type of `ty` when DuckDB cannot represent it natively.
+fn wide_decimal(ty: &ValueType) -> Option<sef_model_ir::types::DecimalType> {
+    match ty {
+        ValueType::Decimal(d) if d.precision() > 38 => Some(*d),
+        _ => None,
+    }
 }
 
 impl Lowering<'_> {
@@ -1024,8 +1229,41 @@ impl Lowering<'_> {
         Ok(format!("CAST(${} AS {ty})", self.parameters.len()))
     }
 
+    /// A literal bound as its exact decimal text, never through a native
+    /// decimal type: it may need more than 38 digits (#261).
+    fn carrier_literal(&mut self, value: &Literal) -> Result<String, ExecutionError> {
+        if matches!(value, Literal::Null(_)) {
+            return Ok("NULL".into());
+        }
+        bind_literal(value)?;
+        self.parameters.push(Parameter::Literal(value.clone()));
+        Ok(format!("CAST(${} AS VARCHAR)", self.parameters.len()))
+    }
+
+    /// `column op value` for a metric carried as exact decimal text (#261).
+    fn exact_compare(
+        &mut self,
+        column: &str,
+        op: &str,
+        value: &Literal,
+    ) -> Result<String, ExecutionError> {
+        let value = self.carrier_literal(value)?;
+        Ok(format!("(sef_exact_cmp({column}, {value}) {op} 0)"))
+    }
+
     fn filter(&mut self, predicate: &FilterExpr) -> Result<String, ExecutionError> {
         let filter_targets = self.filter_targets.clone();
+        // A metric past 38 digits is a text carrier: compared exactly by
+        // `sef_exact_cmp`, never as text nor through a narrowing cast.
+        let wide = |t: &FilterTarget| match t {
+            FilterTarget::Metric(id) => filter_targets.get(id).is_some_and(|metric| {
+                self.model
+                    .metrics
+                    .iter()
+                    .any(|m| m.metadata.id() == metric && wide_decimal(&m.value_type).is_some())
+            }),
+            FilterTarget::Dimension(_) => false,
+        };
         let target = |t: &FilterTarget| match t {
             FilterTarget::Dimension(d) if d.roles.is_empty() => Ok(quote(d.dimension.as_str())),
             FilterTarget::Metric(id) => filter_targets
@@ -1048,7 +1286,23 @@ impl Lowering<'_> {
                     ComparisonOp::Greater => ">",
                     ComparisonOp::GreaterOrEqual => ">=",
                 };
-                format!("({} {op} {})", target(t)?, self.literal(value)?)
+                if wide(t) {
+                    self.exact_compare(&target(t)?, op, value)?
+                } else {
+                    format!("({} {op} {})", target(t)?, self.literal(value)?)
+                }
+            }
+            FilterExpr::Between {
+                target: t,
+                low,
+                high,
+            } if wide(t) => {
+                let column = target(t)?;
+                format!(
+                    "({} AND {})",
+                    self.exact_compare(&column, ">=", low)?,
+                    self.exact_compare(&column, "<=", high)?
+                )
             }
             FilterExpr::Between {
                 target: t,
@@ -1060,6 +1314,14 @@ impl Lowering<'_> {
                 self.literal(low)?,
                 self.literal(high)?
             ),
+            FilterExpr::In { target: t, values } if wide(t) => {
+                let column = target(t)?;
+                let terms = values
+                    .iter()
+                    .map(|v| self.exact_compare(&column, "=", v))
+                    .collect::<Result<Vec<_>, _>>()?;
+                format!("({})", terms.join(" OR "))
+            }
             FilterExpr::In { target: t, values } => {
                 let values = values
                     .iter()
@@ -1087,7 +1349,62 @@ impl Lowering<'_> {
         })
     }
 
+    /// A metric past 38 digits as an exact decimal carrier (#261): a sum or
+    /// difference evaluated by `sef_exact_combine` over its operands'
+    /// carriers, never narrowed to a native type.
+    fn wide_metric(
+        expr: &MetricExpr,
+        ty: sef_model_ir::types::DecimalType,
+    ) -> Result<String, ExecutionError> {
+        match &expr.kind {
+            MetricExprKind::MeasureRef(id) | MetricExprKind::MetricRef(id) => {
+                Ok(quote(id.as_str()))
+            }
+            MetricExprKind::Arithmetic {
+                op,
+                left,
+                right,
+                contract,
+            } if contract.rounding.is_none() && !contract.explicit_narrowing => {
+                let scale_of = |side: &MetricExpr| match side.value_type {
+                    ValueType::Decimal(d) => Ok(d.scale()),
+                    ValueType::Integer { .. } => Ok(0),
+                    _ => Err(ExecutionError::Unsupported("wide metric operand")),
+                };
+                let carrier = |side: &MetricExpr| -> Result<String, ExecutionError> {
+                    let sql = Self::metric(side)?;
+                    Ok(if wide_decimal(&side.value_type).is_some() {
+                        sql
+                    } else {
+                        format!("CAST({sql} AS VARCHAR)")
+                    })
+                };
+                let op = match op {
+                    ArithmeticOp::Add => "+",
+                    ArithmeticOp::Subtract => "-",
+                    ArithmeticOp::Multiply => "*",
+                    ArithmeticOp::Divide => {
+                        return Err(ExecutionError::Unsupported("wide metric division"));
+                    }
+                };
+                Ok(format!(
+                    "sef_exact_combine({}, {}, '{}:{}:{op}:{}:{}')",
+                    carrier(left)?,
+                    carrier(right)?,
+                    ty.precision(),
+                    ty.scale(),
+                    scale_of(left)?,
+                    scale_of(right)?
+                ))
+            }
+            _ => Err(ExecutionError::Unsupported("wide metric expression")),
+        }
+    }
+
     fn metric(expr: &MetricExpr) -> Result<String, ExecutionError> {
+        if let Some(ty) = wide_decimal(&expr.value_type) {
+            return Self::wide_metric(expr, ty);
+        }
         sql_type(&expr.value_type)?;
         match &expr.kind {
             MetricExprKind::MeasureRef(id) | MetricExprKind::MetricRef(id) => {
@@ -1132,8 +1449,13 @@ impl Lowering<'_> {
                         "error('SEF zero denominator')"
                     }
                 };
+                let is_zero = if wide_decimal(&denominator.value_type).is_some() {
+                    format!("sef_exact_cmp({b}, '0') = 0")
+                } else {
+                    format!("{b} = 0")
+                };
                 Ok(format!(
-                    "CAST(CASE WHEN {b} = 0 THEN {zero} ELSE sef_exact_ratio(CAST({a} AS VARCHAR), CAST({b} AS VARCHAR), '{}:{mode}') END AS {})",
+                    "CAST(CASE WHEN {is_zero} THEN {zero} ELSE sef_exact_ratio(CAST({a} AS VARCHAR), CAST({b} AS VARCHAR), '{}:{mode}') END AS {})",
                     ty.scale(),
                     sql_type(&expr.value_type)?
                 ))
@@ -1487,9 +1809,21 @@ impl Lowering<'_> {
                 let order = order
                     .iter()
                     .map(|o| {
+                        let key = self
+                            .carriers
+                            .get(input)
+                            .and_then(|carried| carried.get(&o.selection_id))
+                            .map_or_else(
+                                || quote(&o.selection_id),
+                                |scale| {
+                                    format!(
+                                        "sef_exact_sort_key({}, '{scale}')",
+                                        quote(&o.selection_id)
+                                    )
+                                },
+                            );
                         format!(
-                            "{} {} NULLS {}",
-                            quote(&o.selection_id),
+                            "{key} {} NULLS {}",
                             if o.direction == SortDirection::Ascending {
                                 "ASC"
                             } else {
@@ -1783,6 +2117,7 @@ impl Lowering<'_> {
                 }
                 let keys = Self::grain(grain)?;
                 let mut projections = keys.clone();
+                let mut exact_sums = Vec::new();
                 for reference in measures {
                     let measure = self
                         .model
@@ -1841,6 +2176,50 @@ impl Lowering<'_> {
                         AggregateFunction::Min => "MIN",
                         AggregateFunction::Max => "MAX",
                     };
+                    let wide_input = match measure.scalar_expression.as_ref().map(|e| &e.value_type)
+                    {
+                        Some(ValueType::Decimal(d))
+                            if measure.aggregation == AggregateFunction::Sum
+                                && d.precision() > 18 =>
+                        {
+                            Some(*d)
+                        }
+                        _ => None,
+                    };
+                    if let (Some(input), ValueType::Decimal(ty)) = (wide_input, &measure.value_type)
+                    {
+                        // Summed in exact parts (#261): DuckDB's 128-bit
+                        // accumulator never overflows, and the range of the
+                        // sum is decided exactly on its total.
+                        let sum = |part: &String| format!("CAST(SUM({part}) AS VARCHAR)");
+                        let total = if let Some(([high, low], k)) =
+                            exact::split_sql(&expr, input.precision(), input.scale())
+                        {
+                            format!(
+                                "sef_exact_sum_split({}, {}, '{}:{}:{k}')",
+                                sum(&high),
+                                sum(&low),
+                                ty.precision(),
+                                ty.scale()
+                            )
+                        } else {
+                            let [high, middle, low] = exact::part_sql(&expr);
+                            format!(
+                                "sef_exact_sum_parts({}, {}, {}, '{}:{}')",
+                                sum(&high),
+                                sum(&middle),
+                                sum(&low),
+                                ty.precision(),
+                                ty.scale()
+                            )
+                        };
+                        projections.push(format!(
+                            "{total} AS {}",
+                            quote(&format!("{}__sum", reference.id))
+                        ));
+                        exact_sums.push((reference.id.to_string(), *ty));
+                        continue;
+                    }
                     projections.push(format!(
                         "CAST({function}({}{expr}) AS {}) AS {}",
                         if measure.aggregation == AggregateFunction::CountDistinct {
@@ -1857,11 +2236,38 @@ impl Lowering<'_> {
                 } else {
                     format!(" GROUP BY {}", keys.join(", "))
                 };
-                let aggregated = format!(
+                let mut aggregated = format!(
                     "SELECT {} FROM {}{grouped}",
                     projections.join(", "),
                     self.node(input)?
                 );
+                if !exact_sums.is_empty() {
+                    // Each exact sum becomes its native value within range,
+                    // and an overflow flag the plan checks in every group.
+                    let mut excluded = Vec::new();
+                    let mut columns = Vec::new();
+                    for (id, ty) in &exact_sums {
+                        let sum = quote(&format!("{id}__sum"));
+                        let flag = quote(&format!("{id}__overflow"));
+                        excluded.push(sum.clone());
+                        columns.push(format!(
+                            "CASE WHEN {sum} = '!' THEN NULL ELSE CAST({sum} AS DECIMAL({},{})) END AS {}",
+                            ty.precision(),
+                            ty.scale(),
+                            quote(id)
+                        ));
+                        columns.push(format!("COALESCE({sum} = '!', false) AS {flag}"));
+                        self.range_checks.push(format!(
+                            "SELECT EXISTS(SELECT 1 FROM {} WHERE {flag})",
+                            self.current_name
+                        ));
+                    }
+                    aggregated = format!(
+                        "SELECT * EXCLUDE ({}), {} FROM ({aggregated})",
+                        excluded.join(", "),
+                        columns.join(", ")
+                    );
+                }
                 let metrics = serves
                     .iter()
                     .map(|reference| {
@@ -1871,6 +2277,13 @@ impl Lowering<'_> {
                             .iter()
                             .find(|m| m.metadata.id() == &reference.id)
                             .ok_or(ExecutionError::UnknownBinding)?;
+                        if wide_decimal(&metric.value_type).is_some() {
+                            return Ok(format!(
+                                "{} AS {}",
+                                Self::metric(&metric.expression)?,
+                                quote(reference.id.as_str())
+                            ));
+                        }
                         Ok(format!(
                             "CAST({} AS {}) AS {}",
                             Self::metric(&metric.expression)?,
@@ -1891,6 +2304,14 @@ impl Lowering<'_> {
                     .iter()
                     .find(|m| m.metadata.id() == &metric.id)
                     .ok_or(ExecutionError::UnknownBinding)?;
+                if wide_decimal(&definition.value_type).is_some() {
+                    return Ok(format!(
+                        "SELECT *, {} AS {} FROM {}",
+                        Self::metric(&definition.expression)?,
+                        quote(metric.id.as_str()),
+                        self.node(input)?
+                    ));
+                }
                 Ok(format!(
                     "SELECT *, CAST({} AS {}) AS {} FROM {}",
                     Self::metric(&definition.expression)?,
@@ -1944,6 +2365,23 @@ impl Lowering<'_> {
                 if let Some(wide) = &mut self.wide {
                     wide.project(selections)?;
                     return Ok(format!("SELECT * FROM {}", self.node(input)?));
+                }
+                for selection in selections {
+                    if let SelectionItem::Metric(id) = &selection.item {
+                        let definition = self
+                            .model
+                            .metrics
+                            .iter()
+                            .find(|m| m.metadata.id() == id)
+                            .ok_or(ExecutionError::UnknownBinding)?;
+                        if let Some(ty) = wide_decimal(&definition.value_type) {
+                            let node = self.current.ok_or(ExecutionError::UnknownNode)?;
+                            self.carriers
+                                .entry(node)
+                                .or_default()
+                                .insert(selection.selection_id.clone(), ty.scale());
+                        }
+                    }
                 }
                 let projections = selections
                     .iter()

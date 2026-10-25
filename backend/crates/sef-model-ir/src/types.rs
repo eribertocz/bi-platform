@@ -186,6 +186,31 @@ impl ValueType {
             Self::Integer { .. } | Self::Decimal(_) | Self::Float { .. }
         )
     }
+
+    /// The exact result type of `SUM` over values of this type (#261): a
+    /// decimal widens to at least 38 digits keeping its scale, a signed
+    /// 64-bit integer sums into `DECIMAL(38,0)`, and every other numeric type
+    /// keeps its current contract. `None` for a type `SUM` does not accept.
+    /// It depends on the type alone, never on the rows summed.
+    #[must_use]
+    pub fn sum_result(&self) -> Option<Self> {
+        const NATIVE: u8 = 38;
+        match self {
+            Self::Decimal(decimal) => Some(Self::Decimal(DecimalType {
+                precision: decimal.precision.max(NATIVE),
+                scale: decimal.scale,
+            })),
+            Self::Integer {
+                signed: true,
+                bits: Some(64),
+            } => Some(Self::Decimal(DecimalType {
+                precision: NATIVE,
+                scale: 0,
+            })),
+            Self::Integer { .. } | Self::Float { .. } => Some(self.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

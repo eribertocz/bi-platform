@@ -296,7 +296,15 @@ impl Fixture {
             (integer(), Some(Unit::Count))
         } else {
             let expression = expression.as_ref().expect("sum fixture has expression");
-            (expression.value_type.clone(), expression.unit.clone())
+            let value_type = if aggregation == AggregateFunction::Sum {
+                expression
+                    .value_type
+                    .sum_result()
+                    .expect("sum fixture is numeric")
+            } else {
+                expression.value_type.clone()
+            };
+            (value_type, expression.unit.clone())
         };
         let null_semantics = match aggregation {
             AggregateFunction::CountRows => AggregateNullSemantics::CountRows,
@@ -783,7 +791,7 @@ fn case_009() -> ModelDefinition {
             right: Box::new(f.metric_ref("refunds")),
             contract: NumericContract::default(),
         },
-        value_type: decimal(19, 2),
+        value_type: decimal(39, 2),
         unit: None,
     };
     f.metric(
@@ -1185,7 +1193,8 @@ fn case_019() -> ModelDefinition {
         TimeGrain::Day,
     );
     f.sum("revenue", "events", "amount");
-    assert_eq!(f.0.metrics[0].value_type, decimal(18, 4));
+    // SUM keeps the scale and widens to 38 digits (#261).
+    assert_eq!(f.0.metrics[0].value_type, decimal(38, 4));
     f.0
 }
 
@@ -1245,7 +1254,7 @@ fn case_021() -> ModelDefinition {
         kind: MetricExprKind::Window {
             base_metric: id("metric", "daily_revenue"),
         },
-        value_type: amount(),
+        value_type: amount().sum_result().expect("amount is numeric"),
         unit: None,
     };
     f.metric(

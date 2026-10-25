@@ -207,17 +207,22 @@ impl Aggregation {
                         "sef.value_type".into(),
                         format!("DECIMAL({},{})", ty.precision(), ty.scale()),
                     );
+                    let bound = super::exact::bound(ty.precision());
                     let values = groups
                         .values()
                         .map(|sums| {
                             sums[index]
                                 .as_ref()
                                 .map(|value| {
-                                    check_decimal(value, ty.precision())?;
+                                    // A sum past its certified precision is
+                                    // a result out of range (#261).
+                                    if !super::exact::within_bound(value, &bound) {
+                                        return Err(ExecutionError::ResultOutOfRange);
+                                    }
                                     value
                                         .to_string()
                                         .parse::<i256>()
-                                        .map_err(|_| ExecutionError::NumericOverflow)
+                                        .map_err(|_| ExecutionError::ResultOutOfRange)
                                 })
                                 .transpose()
                         })
@@ -297,10 +302,10 @@ fn rescale(value: BigInt, from: u8, to: u8) -> Result<BigInt, ExecutionError> {
 }
 
 fn check_decimal(value: &BigInt, precision: u8) -> Result<(), ExecutionError> {
-    if value.to_string().trim_start_matches('-').len() > usize::from(precision) {
-        Err(ExecutionError::NumericOverflow)
-    } else {
+    if super::exact::within(value, precision) {
         Ok(())
+    } else {
+        Err(ExecutionError::NumericOverflow)
     }
 }
 

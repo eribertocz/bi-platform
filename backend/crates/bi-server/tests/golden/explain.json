@@ -12,14 +12,14 @@
         ]
       },
       "plan": {
-        "explanation": "dc57e0dc8266 ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.region]\n9818aac89b52 AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- dc57e0dc8266\ne044b832f6b6 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/importe] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/importe] <- 9818aac89b52\n7239548829f2 ProjectSemanticOutput [r, m] <- e044b832f6b6\nblock query = 7239548829f2\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/importe DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/importe DECIMAL(18,2) sin unidad\n",
+        "explanation": "dc57e0dc8266 ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.region]\n9818aac89b52 AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- dc57e0dc8266\n766326121687 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/importe] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/importe] <- 9818aac89b52\n6fb14d1ff508 ProjectSemanticOutput [r, m] <- 766326121687\nblock query = 6fb14d1ff508\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/importe DECIMAL(38,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/importe DECIMAL(38,2) sin unidad\n",
         "obligations": 2
       },
       "receipt": {
         "id": "receipt:<per instance>",
         "query": "sef-sha256-v1:2f851a6e1cc4c2211c16110eb7cf4325fc1e7fde2fb5e8b8bfe709604cfacca2",
-        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
-        "plan": "sef-sha256-v1:59dd6d91df24d59f9bc07c9a57b2667e9f2b7a52387b5729b3f8b3e0aa2ef406",
+        "model": "sef-sha256-v1:90262a73cadffc9e3f74b0a6caba9e76692227e7bc0a124057e544f116241828",
+        "plan": "sef-sha256-v1:73ba60a5db15b6222a74b7ef5e938f187263278f7da36f6cb97e74a363a6f5b5",
         "decision": "sef-authz-sha256:828f82fcd5d5c708c30eccde956ec8555d7a62dd23ccad71620eb3e3120b74ce",
         "policies": "sef-authz-sha256:9711d6771ca61fa0b913ad02c25da5d5dfd987541e2297a1674dada9e6e4031f",
         "context": "ctx-hmac-sha256-v1:<per instance>"
@@ -41,14 +41,14 @@
         ]
       },
       "plan": {
-        "explanation": "dc57e0dc8266 ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.region]\n9818aac89b52 AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- dc57e0dc8266\n29f2cd153fe0 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/margen] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/margen] <- 9818aac89b52\ne6686fdb1370 ProjectSemanticOutput [r, c] <- 29f2cd153fe0\nblock query = e6686fdb1370\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/margen DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/margen DECIMAL(18,2) sin unidad\n",
+        "explanation": "dc57e0dc8266 ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.region]\n9818aac89b52 AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- dc57e0dc8266\n555a11b50391 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/margen] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/margen] <- 9818aac89b52\nb378ae51eb2a ProjectSemanticOutput [r, c] <- 555a11b50391\nblock query = b378ae51eb2a\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/margen DECIMAL(38,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/margen DECIMAL(38,2) sin unidad\n",
         "obligations": 2
       },
       "receipt": {
         "id": "receipt:<per instance>",
         "query": "sef-sha256-v1:1bdc38d5f31b4fe53181ae5ea2f14a5bf2ef190e73c27b39eb50811eada1daf2",
-        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
-        "plan": "sef-sha256-v1:965420316fe47437b60f6a980f24be89ce38559d959ad8954845c2f18f841521",
+        "model": "sef-sha256-v1:90262a73cadffc9e3f74b0a6caba9e76692227e7bc0a124057e544f116241828",
+        "plan": "sef-sha256-v1:03146f5fd253466c027a90576ce861b99aac64ce4fd9335b6dd0f08197861285",
         "decision": "sef-authz-sha256:072330827914e5fe4db2021dde2c507f975099633077f80742e78d5d250fe7a8",
         "policies": "sef-authz-sha256:9711d6771ca61fa0b913ad02c25da5d5dfd987541e2297a1674dada9e6e4031f",
         "context": "ctx-hmac-sha256-v1:<per instance>"
@@ -106,7 +106,7 @@
       "receipt": {
         "id": "receipt:<per instance>",
         "query": "sef-sha256-v1:87e4bc3fa9ba0d2c900d1df57240e125a90dc77781d5a68e0a61000afcf1d73d",
-        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
+        "model": "sef-sha256-v1:90262a73cadffc9e3f74b0a6caba9e76692227e7bc0a124057e544f116241828",
         "plan": "sef-sha256-v1:550f44ca3d01b2bf564bb977a3e97b3ada5067e6bf58148906c1fc9640425216",
         "decision": "sef-authz-sha256:d02aa99b2195647ad3cc6ff5513b9459355263f96136be399511f690af032b4a",
         "policies": "sef-authz-sha256:9711d6771ca61fa0b913ad02c25da5d5dfd987541e2297a1674dada9e6e4031f",
@@ -191,14 +191,14 @@
         ]
       },
       "plan": {
-        "explanation": "93bc9d32cd4b ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.quantity, project-file-76656e7461732e79616d6c/field/sales.region]\nf810fbeb041a AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- 93bc9d32cd4b\n72f41104573a AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/coste, project-file-76656e7461732e79616d6c/measure/importe, project-file-76656e7461732e79616d6c/measure/margen] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/coste, project-file-76656e7461732e79616d6c/metric/importe, project-file-76656e7461732e79616d6c/metric/margen] <- f810fbeb041a\ne316db8b4d0c ProjectSemanticOutput [r, a, b, c] <- 72f41104573a\nblock query = e316db8b4d0c\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/importe DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/margen DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/importe DECIMAL(18,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/margen DECIMAL(18,2) sin unidad\n",
+        "explanation": "93bc9d32cd4b ReadSemanticDataset project-file-76656e7461732e79616d6c/dataset/sales [project-file-76656e7461732e79616d6c/field/sales.amount, project-file-76656e7461732e79616d6c/field/sales.quantity, project-file-76656e7461732e79616d6c/field/sales.region]\nf810fbeb041a AttachDimension project-file-76656e7461732e79616d6c/dimension/sales.region through [] <- 93bc9d32cd4b\nd15fc5ef9955 AggregateAtGrain [project-file-76656e7461732e79616d6c/measure/coste, project-file-76656e7461732e79616d6c/measure/importe, project-file-76656e7461732e79616d6c/measure/margen] at [project-file-76656e7461732e79616d6c/dimension/sales.region] for [project-file-76656e7461732e79616d6c/metric/coste, project-file-76656e7461732e79616d6c/metric/importe, project-file-76656e7461732e79616d6c/metric/margen] <- f810fbeb041a\nfe91b038d4dd ProjectSemanticOutput [r, a, b, c] <- d15fc5ef9955\nblock query = fe91b038d4dd\ncontract project-file-76656e7461732e79616d6c/dimension/sales.region VARCHAR sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/importe DECIMAL(38,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/measure/margen DECIMAL(38,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/coste INT32 sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/importe DECIMAL(38,2) sin unidad\ncontract project-file-76656e7461732e79616d6c/metric/margen DECIMAL(38,2) sin unidad\n",
         "obligations": 5
       },
       "receipt": {
         "id": "receipt:<per instance>",
         "query": "sef-sha256-v1:142373c995845de029e09c5b41a2ce10a129ae8854859d8990e3b0fc384a0f37",
-        "model": "sef-sha256-v1:2cf980718c738248d60f38f3cd536842184620fa267bc8b9cdb0aff27df4db2a",
-        "plan": "sef-sha256-v1:acbe1326d15341e9fbdc59d3bb5882646cadf2d602f97c1c172eeadfebf2562e",
+        "model": "sef-sha256-v1:90262a73cadffc9e3f74b0a6caba9e76692227e7bc0a124057e544f116241828",
+        "plan": "sef-sha256-v1:c668f7693e2b8afc1b016dfd3d9fb7d4f03272a3679f9b69c2c3d6dae7e5ac2f",
         "decision": "sef-authz-sha256:e2e36fb7d0b9fa6d18b9391cef5470397f889049c6e7e1216a2202888e118969",
         "policies": "sef-authz-sha256:9711d6771ca61fa0b913ad02c25da5d5dfd987541e2297a1674dada9e6e4031f",
         "context": "ctx-hmac-sha256-v1:<per instance>"

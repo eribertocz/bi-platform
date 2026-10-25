@@ -35,7 +35,8 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   await page.keyboard.press('Enter');
   const detail = page.getByRole('region', { name: 'Ventas', exact: true });
   await expect(detail).toContainText('importe_total');
-  await expect(detail).toContainText('DECIMAL(18,2)');
+  // SUM of DECIMAL(18,2) is certified DECIMAL(38,2) (#261).
+  await expect(detail).toContainText('DECIMAL(38,2)');
   await expect(detail).toContainText('sales.region');
   await expect(detail).toContainText('Admite valores sin dato (NULL)');
   await expect(detail).toContainText('Suma exacta del importe de las ventas.');
@@ -67,7 +68,7 @@ test('real project: login, valid metadata, Spanish file error and accessible rel
   await fingerprint.focus();
   await page.keyboard.press('Enter');
   expect(await detail.ariaSnapshot()).toContain('heading "Métricas" [level=3]');
-  expect(await detail.ariaSnapshot()).toContain('DECIMAL(18,2)');
+  expect(await detail.ariaSnapshot()).toContain('DECIMAL(38,2)');
   expect(await detail.ariaSnapshot()).toContain('heading "Dimensiones" [level=3]');
   await expect(detail).toHaveAttribute('aria-live', 'polite');
   expect(

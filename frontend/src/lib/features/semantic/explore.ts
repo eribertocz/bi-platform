@@ -198,7 +198,9 @@ export function failure(error: unknown): Failure {
             ? 'La selección incluye valores que solo puedes ver ocultos, y todavía no se pueden consultar.'
             : error.code === 'result_too_large'
               ? 'El resultado supera el tamaño máximo. Usa menos campos para desglosar.'
-              : 'Esta combinación no se puede consultar en el modelo. Cambia la selección.',
+              : error.code === 'result_out_of_range'
+                ? 'Un total es demasiado grande para su tipo numérico. Filtra o desglosa para obtener cifras menores.'
+                : 'Esta combinación no se puede consultar en el modelo. Cambia la selección.',
         retry: false,
         gone: false,
       };
