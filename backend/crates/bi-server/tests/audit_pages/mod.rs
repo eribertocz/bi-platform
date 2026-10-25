@@ -528,14 +528,21 @@ async fn cursors_edited_expired_rebound_or_foreign_are_refused(pool: PgPool) {
         (&other_key, all(3), c1.clone(), PageError::CursorInvalid),
     ];
     warm(&pages).await;
-    idle_again(&reader, 1).await;
+    // A connection goes back to the pool asynchronously, so pages in a row
+    // may have opened one or both of the reader's connections. Both opened,
+    // then both idle: only then is the idle count steady.
+    drop((
+        reader.acquire().await.unwrap(),
+        reader.acquire().await.unwrap(),
+    ));
+    idle_again(&reader, 2).await;
     for (pages, q, cursor, expected) in refused {
         let (logs, outcome) = logged(pages.page_at(&q, Some(&cursor), at(Duration::ZERO))).await;
         assert_eq!(outcome.unwrap_err(), expected, "{cursor}");
         assert!(logs.contains(expected.code()), "{logs}");
         assert!(!logs.contains(&cursor) && !logs.contains(&c1), "{logs}");
-        // Refused before any connection was requested: the idle one stays.
-        assert_eq!(reader.idle(), 1);
+        // Refused before any connection was requested: both idle ones stay.
+        assert_eq!(reader.idle(), 2);
     }
     reader.close().await;
     chain.drop().await;
