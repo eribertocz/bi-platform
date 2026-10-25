@@ -195,6 +195,19 @@ const CUBED: &str = "  - name: cubo
           expression: SUM(ventas.importe * ventas.importe * ventas.importe)
 ";
 
+/// Distinct counts beside the Issue's metrics (#258).
+const DISTINCT: &str = r"  - name: ciudades
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: COUNT(DISTINCT ventas.ciudad)
+  - name: importes_distintos
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: COUNT(DISTINCT ventas.importe)
+";
+
 const MEMBERS: &str = "
 version: 1
 users:
@@ -282,7 +295,7 @@ async fn analytics() -> Analytics {
 struct Harness {
     app: Router,
     db: Database,
-    _project: tempfile::TempDir,
+    project: tempfile::TempDir,
 }
 
 async fn harness(pool: sqlx::PgPool) -> Harness {
@@ -306,11 +319,7 @@ async fn harness(pool: sqlx::PgPool) -> Harness {
         semantic_runs: Runs::new(Profile::new(INITIAL).unwrap()),
         ..AppState::new(db.clone())
     });
-    Harness {
-        app,
-        db,
-        _project: project,
-    }
+    Harness { app, db, project }
 }
 
 impl Harness {
@@ -848,6 +857,96 @@ async fn real_semantic_answers_match_the_frontend_fixtures(pool: sqlx::PgPool) {
             "DECIMAL(56,6)"
         );
     }
+
+    // A distinct count beside other totals, without a grain (#258): one
+    // row, in the order asked, each value as it is alone.
+    // Written only now: the catalog fixture above is the project as it was.
+    let distintos = "metrics/distintos.yaml";
+    std::fs::write(
+        h.project.path().join(distintos),
+        format!("{MODEL}{DISTINCT}"),
+    )
+    .unwrap();
+    let nothing = json!({
+        "op": "compare",
+        "target": { "kind": "dimension", "name": "ventas.region" },
+        "comparison": "=",
+        "value": { "type": "text", "value": "Nada" }
+    });
+    for (selected, filter, expected) in [
+        (
+            vec![("c", "ciudades"), ("f", "filas")],
+            None,
+            json!([["4", "4"]]),
+        ),
+        (
+            vec![("f", "filas"), ("c", "ciudades")],
+            None,
+            json!([["4", "4"]]),
+        ),
+        (
+            vec![("d", "importes_distintos"), ("t", "importe_total")],
+            None,
+            json!([["4", "300.30"]]),
+        ),
+        // Nothing passes: COUNT is 0, SUM is NULL, still one row.
+        (
+            vec![("c", "ciudades"), ("f", "filas")],
+            Some(&nothing),
+            json!([["0", "0"]]),
+        ),
+        (
+            vec![("c", "ciudades"), ("t", "importe_total")],
+            Some(&nothing),
+            json!([["0", null]]),
+        ),
+    ] {
+        let mut query = json!({
+            "selections": selected.iter().map(|(id, name)| metric(id, name)).collect::<Vec<_>>()
+        });
+        if let Some(filter) = filter {
+            query["filter"] = filter.clone();
+        }
+        let (status, answer) = h.answer(&ana, &request(distintos, query)).await;
+        assert_eq!(status, StatusCode::OK, "{selected:?}: {answer:#}");
+        assert_eq!(rows(&answer), &expected, "{selected:?}");
+        let columns: Vec<(&str, &str)> = answer["result"]["blocks"][0]["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["selection_id"].as_str().unwrap(),
+                    c["type"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        let ids: Vec<&str> = selected.iter().map(|(id, _)| *id).collect();
+        assert_eq!(columns.iter().map(|c| c.0).collect::<Vec<_>>(), ids);
+        assert!(
+            columns
+                .iter()
+                .all(|c| c.1 == "INT64" || c.1 == "DECIMAL(38,2)")
+        );
+    }
+    // The grouped control keeps its groups, counts and canonical order.
+    let grouped = h
+        .query(
+            &ana,
+            &request(
+                distintos,
+                json!({ "selections": [
+                    dimension("r", "ventas.region"),
+                    metric("c", "ciudades"),
+                    metric("f", "filas")
+                ] }),
+            ),
+        )
+        .await;
+    assert_eq!(
+        rows(&grouped),
+        &json!([["Norte", "2", "2"], ["Sur", "2", "2"]])
+    );
 
     // A masked column is still refused whole: there is no `masked.json`
     // until the server can answer one.

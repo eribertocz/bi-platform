@@ -592,6 +592,130 @@ async fn the_emulations_intermediates_are_bounded_and_exact() {
     );
 }
 
+/// Distinct counts beside other totals (#258).
+const DISTINCT: &str = r"  - name: ciudades
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: COUNT(DISTINCT ventas.ciudad)
+  - name: importes_distintos
+    expression:
+      dialects:
+        - dialect: OSSIE_SQL_2026
+          expression: COUNT(DISTINCT ventas.importe)
+";
+
+/// A distinct count beside a sum, without a grain, through the single
+/// enforcement point: each principal gets only its own rows' totals, and a
+/// failing budget discards the whole answer, after which the next one
+/// succeeds (#258).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scalar_composition_is_governed_and_atomic() {
+    let p = project(&model(ROW_POLICY, DISTINCT), MEMBERS);
+    let mut state = state(p.path(), analytics().await);
+    let both = || {
+        selections(&json!([
+            metric("c", "ciudades"),
+            metric("t", "importe_total")
+        ]))
+    };
+    let a = || session("a", &[("region", json!("Norte"))]);
+    let b = || session("b", &[("region", json!("Sur"))]);
+    assert_eq!(
+        rows(&run(&state, a(), both()).await.unwrap()),
+        vec![vec![json!("2"), json!("100.30")]]
+    );
+    assert_eq!(
+        rows(&run(&state, b(), both()).await.unwrap()),
+        vec![vec![json!("2"), json!("200.00")]]
+    );
+    budgets(&mut state, |b| b.max_arrow_bytes = 1);
+    assert!(matches!(
+        run(&state, a(), both()).await,
+        Err(RunFailure::Budget)
+    ));
+    budgets(&mut state, |b| *b = INITIAL);
+    assert_eq!(
+        rows(&run(&state, a(), both()).await.unwrap()),
+        vec![vec![json!("2"), json!("100.30")]]
+    );
+}
+
+/// The engine with `ventas` holding exactly `rows` (city, cents): NULL and
+/// repeated cities, or no rows at all.
+async fn analytics_with(rows: &[(Option<u8>, i64)]) -> Analytics {
+    let values = rows
+        .iter()
+        .zip(1..)
+        .map(|((city, cents), id)| {
+            let sign = if *cents < 0 { "-" } else { "" };
+            format!(
+                "({id}, 'Norte', {}, {sign}{}.{:02}, '2026-01-01T00:00:00Z', NULL)",
+                city.map_or_else(|| "NULL".to_owned(), |c| format!("'c{c}'")),
+                cents.abs() / 100,
+                cents.abs() % 100
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut sql = "ATTACH ':memory:' AS lake; CREATE TABLE lake.main.ventas (id BIGINT NOT NULL, \
+        region VARCHAR NOT NULL, ciudad VARCHAR, importe DECIMAL(18,2) NOT NULL, \
+        instante TIMESTAMPTZ NOT NULL, nota VARCHAR);"
+        .to_owned();
+    if !values.is_empty() {
+        sql = format!(
+            "{sql} INSERT INTO lake.main.ventas VALUES {};",
+            values.join(", ")
+        );
+    }
+    let runtime = tokio::task::spawn_blocking(|| {
+        bi_runtime::Bootstrap::open(RuntimeConfig::in_memory(1))
+            .unwrap()
+            .finish()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    runtime
+        .run(move |conn| conn.execute_batch(&sql))
+        .await
+        .unwrap();
+    Analytics::ready(runtime)
+}
+
+#[test]
+fn a_scalar_composition_equals_independent_counts_and_sums() {
+    let engine = tokio::runtime::Runtime::new().unwrap();
+    proptest!(ProptestConfig::with_cases(24), |(
+        rows in prop::collection::vec((prop::option::of(0_u8..4), -100_000_i64..100_000), 0..10)
+    )| {
+        let got = engine.block_on(async {
+            let p = project(&model("", DISTINCT), MEMBERS);
+            let state = state(p.path(), analytics_with(&rows).await);
+            let asked = selections(&json!([
+                metric("c", "ciudades"),
+                metric("f", "filas"),
+                metric("t", "importe_total")
+            ]));
+            delivered(&run(&state, ana(), asked).await.unwrap())
+        });
+        // The oracle: the generated rows counted and summed directly.
+        let cities: std::collections::BTreeSet<u8> = rows.iter().filter_map(|r| r.0).collect();
+        let total: Option<i64> = (!rows.is_empty()).then(|| rows.iter().map(|r| r.1).sum());
+        let sum = total.map(|cents| {
+            let sign = if cents < 0 { "-" } else { "" };
+            json!(format!("{sign}{}.{:02}", cents.abs() / 100, cents.abs() % 100))
+        });
+        prop_assert_eq!(
+            got,
+            vec![vec![
+                json!(cities.len().to_string()),
+                json!(rows.len().to_string()),
+                sum.unwrap_or(Value::Null),
+            ]]
+        );
+    });
+}
+
 /// The emulated cube by region through the single enforcement point: each
 /// principal sees only its own region, exact, and a small window never
 /// bypasses the intermediate budget (#256).
@@ -1178,7 +1302,9 @@ async fn latency() {
     // API's canonical order and limit, which the emulation applies (#256).
     let cubed = project(&model("", CUBED), MEMBERS);
     let wide = state(cubed.path(), analytics().await);
-    let cases: [Case<'_>; 4] = [
+    let counted = project(&model("", DISTINCT), MEMBERS);
+    let distinct = state(counted.path(), analytics().await);
+    let cases: [Case<'_>; 5] = [
         ("by_region_2_rows", &small, by_region),
         ("by_city_10000_rows", &large, || by_city(Some(10_000))),
         ("wide_total", &wide, || {
@@ -1188,6 +1314,13 @@ async fn latency() {
             selections(&json!([
                 dimension("r", "ventas.region"),
                 metric("c", "cubo")
+            ]))
+        }),
+        // A distinct count beside a sum without a grain (#258).
+        ("distinct_and_sum_total", &distinct, || {
+            selections(&json!([
+                metric("c", "ciudades"),
+                metric("t", "importe_total")
             ]))
         }),
     ];
