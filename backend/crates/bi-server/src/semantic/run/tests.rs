@@ -592,6 +592,46 @@ async fn the_emulations_intermediates_are_bounded_and_exact() {
     );
 }
 
+/// The emulated cube by region through the single enforcement point: each
+/// principal sees only its own region, exact, and a small window never
+/// bypasses the intermediate budget (#256).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_emulation_by_region_is_governed_and_bounded() {
+    let p = project(&model(ROW_POLICY, CUBED), MEMBERS);
+    let mut state = state(p.path(), analytics().await);
+    let cube = || {
+        selections(&json!([
+            dimension("r", "ventas.region"),
+            metric("c", "cubo")
+        ]))
+    };
+    let a = run(&state, session("a", &[("region", json!("Norte"))]), cube())
+        .await
+        .unwrap();
+    let b = run(&state, session("b", &[("region", json!("Sur"))]), cube())
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&a),
+        vec![vec![json!("Norte"), json!("1003003.009000")]]
+    );
+    assert_eq!(rows(&b), vec![vec![json!("Sur"), json!("8024024.000000")]]);
+    assert_ne!(
+        a.receipt.fingerprints.context,
+        b.receipt.fingerprints.context
+    );
+    budgets(&mut state, |b| b.max_intermediate_bytes = 1);
+    let small = request(&json!({
+        "selections": [dimension("r", "ventas.region"), metric("c", "cubo")],
+        "order_by": [{ "selection": "r" }],
+        "limit": 1
+    }));
+    assert!(matches!(
+        run(&state, session("a", &[("region", json!("Norte"))]), small).await,
+        Err(RunFailure::Budget)
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn one_deadline_covers_admission_the_queue_and_the_execution() {
     let p = project(&model("", ""), MEMBERS);
@@ -1134,9 +1174,22 @@ async fn latency() {
     let p = project(&model("", ""), MEMBERS);
     let small = state(p.path(), analytics().await);
     let (_q, large) = many_cities().await;
-    let cases: [Case<'_>; 2] = [
+    // The emulation beyond DECIMAL(38): its total, and by region in the
+    // API's canonical order and limit, which the emulation applies (#256).
+    let cubed = project(&model("", CUBED), MEMBERS);
+    let wide = state(cubed.path(), analytics().await);
+    let cases: [Case<'_>; 4] = [
         ("by_region_2_rows", &small, by_region),
         ("by_city_10000_rows", &large, || by_city(Some(10_000))),
+        ("wide_total", &wide, || {
+            selections(&json!([metric("c", "cubo")]))
+        }),
+        ("wide_by_region_ordered", &wide, || {
+            selections(&json!([
+                dimension("r", "ventas.region"),
+                metric("c", "cubo")
+            ]))
+        }),
     ];
     for (name, state, request) in cases {
         let (mut prepared, mut executed) = (Vec::new(), Vec::new());

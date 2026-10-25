@@ -459,7 +459,7 @@ impl DuckDbPlan {
                 }
             }
             if let Some(wide) = &self.wide {
-                for batch in wide.execute(&intermediate, limits)? {
+                for batch in wide.execute(&intermediate, intermediate_bytes, limits)? {
                     let batch = self.conform(block_id, &batch)?;
                     charge(&batch, &mut rows, &mut bytes, limits)?;
                     let batch = self.annotate(block_id, &batch)?;
@@ -1803,8 +1803,10 @@ impl Lowering<'_> {
                 serves: serves.clone(),
             }),
             Operator::OrderSemanticOutput { input, order } => {
-                if self.wide.is_some() {
-                    return Err(ExecutionError::Unsupported("ordering emulated output"));
+                // The emulation orders its own exact groups (#256).
+                if let Some(wide) = &mut self.wide {
+                    wide.order(order)?;
+                    return Ok(format!("SELECT * FROM {}", self.node(input)?));
                 }
                 let order = order
                     .iter()
@@ -1848,8 +1850,9 @@ impl Lowering<'_> {
                 limit,
                 offset,
             } => {
-                if self.wide.is_some() {
-                    return Err(ExecutionError::Unsupported("limiting emulated output"));
+                if let Some(wide) = &mut self.wide {
+                    wide.limit(*limit, *offset)?;
+                    return Ok(format!("SELECT * FROM {}", self.node(input)?));
                 }
                 Ok(format!(
                     "SELECT * FROM {}{}{}",
