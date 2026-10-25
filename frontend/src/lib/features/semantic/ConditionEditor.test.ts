@@ -207,9 +207,12 @@ describe('editing never loses nor replaces intent', () => {
 });
 
 describe('a draft owned elsewhere', () => {
-  it('copies an initial draft that is another component's reactive state', async () => {
+  it("copies an initial draft that is another component's reactive state", async () => {
     // Svelte state is a Proxy: a structured clone refuses it.
-    const initial = new Proxy<Draft>({ field: 'ventas.region', operator: '=', values: ['Norte'] }, {});
+    const initial = new Proxy<Draft>(
+      { field: 'ventas.region', operator: '=', values: ['Norte'] },
+      {},
+    );
     const { last } = editor(initial);
     await type('Valor', 'Sur');
     expect(last().condition).toMatchObject({ value: { type: 'text', value: 'Sur' } });
