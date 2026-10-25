@@ -22,8 +22,8 @@ export type Draft = { field: string; operator: Operator; values: string[] };
 const COMPARISONS = ['=', '<>', '<', '<=', '>', '>='] as const;
 const NULLS = ['is_null', 'is_not_null'] as const;
 
-/** The operators a field of this type admits, as the server binds them. */
-export function operators(member: CatalogMember): Operator[] {
+/** The operators a member of this type admits, as the server binds them. */
+export function operators(member: Pick<CatalogMember, 'type'>): Operator[] {
   if (member.type === 'TIMESTAMPTZ') return [...NULLS];
   if (member.type === 'BOOLEAN') return ['=', '<>', ...NULLS];
   return [...COMPARISONS, 'between', 'in', ...NULLS];

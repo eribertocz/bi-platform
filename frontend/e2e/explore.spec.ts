@@ -1115,14 +1115,13 @@ test('metric filters after aggregating: each grain on its own, an empty total, b
     'aria-invalid',
     'true',
   );
-  await page.getByRole('button', { name: 'Aplicar filtros' }).click();
-  await expect.poll(() => focusedId(page)).toMatch(/^having-n\d+-field$/);
-  await page.waitForTimeout(500);
-  expect(queries()).toBe(asked);
+  // Nothing was edited, so nothing can be applied: only correcting or clearing it.
+  await expect(page.getByRole('button', { name: 'Aplicar filtros' })).toBeDisabled();
   // Back: the same clause, on the same metric, asked again.
   await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
   await expect.poll(() => bodyRows(page).then(sorted)).toHaveLength(2);
   await expect(page.getByTestId('kpi-empty')).toBeVisible();
+  // Only the question asked again: nothing was asked while the clause was invalid.
   expect(queries()).toBe(asked + 2);
   expect(network.concurrent()).toEqual([]);
 
@@ -1157,14 +1156,26 @@ test('metric filters the page never sends: the server refuses them and shows not
     comparison: '>',
     value,
   });
-  const cases: [string, object][] = [
+  const post = (query: object) =>
+    page.request.post('/api/v1/semantic/query', {
+      headers: { Origin: origin, Accept: 'application/json' },
+      data: { model: 'metrics/ventas.yaml', query },
+    });
+  // The control: the very request shape, valid, answers Norte's own total.
+  const valid = await post({
+    selections: selections(['importe_total']),
+    having: over(metricId('importe_total')),
+  });
+  expect(valid.status()).toBe(200);
+  expect((await valid.json()).result.blocks[0].rows).toEqual([[NORTE.amount]]);
+  const neutral = [404, 'model_not_found'] as const;
+  const malformed = [422, 'invalid_request'] as const;
+  const cases: [string, object, readonly [number, string]][] = [
+    // What does not bind for the session is the neutral 404: nothing tells it apart.
     [
       'a metric not selected',
       { selections: selections(['filas']), having: over(metricId('importe_total')) },
-    ],
-    [
-      'a metric withheld',
-      { selections: selections(['filas', 'margen']), having: over(metricId('margen')) },
+      neutral,
     ],
     [
       'a dimension after aggregating',
@@ -1177,6 +1188,7 @@ test('metric filters the page never sends: the server refuses them and shows not
           value: { type: 'text', value: 'Sur' },
         },
       },
+      neutral,
     ],
     [
       'a number as text',
@@ -1184,6 +1196,7 @@ test('metric filters the page never sends: the server refuses them and shows not
         selections: selections(['importe_total']),
         having: over(metricId('importe_total'), { type: 'text', value: '100' }),
       },
+      neutral,
     ],
     [
       'an exponent',
@@ -1191,6 +1204,13 @@ test('metric filters the page never sends: the server refuses them and shows not
         selections: selections(['importe_total']),
         having: over(metricId('importe_total'), { type: 'number', value: '1e2' }),
       },
+      neutral,
+    ],
+    // A withheld metric is refused already as a selection, which `having` requires.
+    [
+      'a metric withheld',
+      { selections: selections(['filas', 'margen']), having: over(metricId('margen')) },
+      [403, 'semantic_access_denied'],
     ],
     [
       'an unknown operator',
@@ -1198,6 +1218,7 @@ test('metric filters the page never sends: the server refuses them and shows not
         selections: selections(['importe_total']),
         having: { ...over(metricId('importe_total')), op: 'like' },
       },
+      malformed,
     ],
     [
       '257 nodes over both',
@@ -1215,7 +1236,9 @@ test('metric filters the page never sends: the server refuses them and shows not
           filters: Array.from({ length: 128 }, () => over(metricId('importe_total'))),
         },
       },
+      malformed,
     ],
+    // No role nor policy attribute travels from a client: the shape refuses them.
     [
       'a forged role on its target',
       {
@@ -1225,6 +1248,7 @@ test('metric filters the page never sends: the server refuses them and shows not
           target: { kind: 'metric', selection: metricId('importe_total'), roles: ['admin'] },
         },
       },
+      malformed,
     ],
     [
       'a forged policy attribute',
@@ -1233,15 +1257,13 @@ test('metric filters the page never sends: the server refuses them and shows not
         having: over(metricId('importe_total')),
         context: { department: 'Sur' },
       },
+      malformed,
     ],
   ];
-  for (const [name, query] of cases) {
-    const response = await page.request.post('/api/v1/semantic/query', {
-      headers: { Origin: origin, Accept: 'application/json' },
-      data: { model: 'metrics/ventas.yaml', query },
-    });
-    expect([400, 403, 404, 422], name).toContain(response.status());
+  for (const [name, query, [status, code]] of cases) {
+    const response = await post(query);
     const body = await response.text();
+    expect([response.status(), JSON.parse(body).code], name).toEqual([status, code]);
     expect(body, name).not.toMatch(SENTINELS);
     for (const figure of [NORTE.amount, SUR.amount, '100.10', '200.20']) {
       expect(body, name).not.toContain(figure);
@@ -1270,7 +1292,16 @@ test('membership revoked before applying a metric filter: the neutral refusal, n
     await writeMetric(page, 'importe_total', '>', '100.00');
     writeFileSync(members, revoked);
     await page.getByRole('button', { name: 'Aplicar filtros' }).click();
-    await expect(page.getByRole('alert')).toContainText('HTTP 404 · Código: model_not_found');
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'HTTP 404 · Código: model_not_found' }),
+    ).toBeVisible();
+    // The selection goes with the refusal; the applied clause stays, said invalid.
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'La métrica no está seleccionada' }),
+    ).toBeVisible();
+    await expect(page.locator('#filters-applied')).toContainText(
+      'importe_total es mayor que 100.00',
+    );
     await expect(page.locator('dl.kpis')).toHaveCount(0);
     expect(await page.content()).not.toContain(NORTE.shown);
     await noLeaks(page, SUR);

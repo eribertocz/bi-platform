@@ -585,7 +585,13 @@ describe('metric filters after aggregating, with the same editor (#149)', () => 
   const sent = (calls: Call[]) => queries(calls).map((q) => [q.filter ?? null, q.having ?? null]);
   const metrics = () => within(screen.getByRole('region', { name: 'Filtros de métricas' }));
   const rows = () => within(screen.getByRole('region', { name: 'Filtros de filas' }));
-  const apply = () => fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+  const applyButton = () =>
+    screen.getByRole<HTMLButtonElement>('button', { name: 'Aplicar filtros' });
+  /** Clicks «Aplicar» as a person can: jsdom would deliver a click to a disabled button. */
+  async function apply() {
+    expect(applyButton().disabled).toBe(false);
+    await fireEvent.click(applyButton());
+  }
   /** Writes one condition after aggregating, starting the tree if it is empty. */
   async function writeMetric(metric: string, operator: string, value: string) {
     const start = metrics().queryByRole('button', { name: 'Añadir condición de métrica' });
@@ -702,9 +708,8 @@ describe('metric filters after aggregating, with the same editor (#149)', () => 
     await new Promise((resolve) => setTimeout(resolve, 20));
     // No clause dropped, none moved to `filas`: nothing is asked.
     expect(api.calls.length).toBe(before);
-    await apply();
-    expect(document.activeElement).toBe(select);
-    expect(api.calls.length).toBe(before);
+    // Nothing was edited, so nothing can be applied: only correcting or clearing it.
+    expect(applyButton().disabled).toBe(true);
     // Back, now second in the order: the clause still names it, never `filas`.
     await check('importe_total');
     await waitFor(() => expect(api.calls.length).toBe(before + 1));
@@ -757,6 +762,36 @@ describe('metric filters after aggregating, with the same editor (#149)', () => 
     await apply();
     await waitFor(() => expect(api.calls.length).toBe(before + 1));
     expect(queries(api.calls).at(-1)!.having).toEqual(over('filas', '>=', '9007199254740993'));
+  });
+
+  it('a neutral 404 retires the selection, never the filters the editors show', async () => {
+    let revoked = false;
+    const api = server((call) =>
+      call.url.endsWith('/catalog')
+        ? catalog([typed()])
+        : revoked
+          ? problem(404, 'model_not_found')
+          : Response.json(grouped(call) ? region : total),
+    );
+    render(Page);
+    await screen.findByTestId('kpi-t');
+    await writeMetric('importe_total', '>', '100.00');
+    await apply();
+    await waitFor(() => expect(queries(api.calls).at(-1)!.having).toBeTruthy());
+    revoked = true;
+    await check('ventas.region');
+    expect((await screen.findAllByRole('alert')).map((a) => a.textContent).join(' ')).toContain(
+      'ya no está disponible',
+    );
+    expect(screen.getByText(/^Filtros aplicados:/).textContent).toContain(
+      'después de agregar, importe_total es mayor que 100.00',
+    );
+    revoked = false;
+    await check('importe_total');
+    await screen.findByTestId('kpi-t');
+    // Asked with the clause on screen, never silently without it.
+    expect(metrics().getByLabelText<HTMLInputElement>('Valor').value).toBe('100.00');
+    expect(queries(api.calls).at(-1)!.having).toEqual(over('importe_total', '>', '100.00'));
   });
 
   it('a late answer of a former filter never shows; a denial or an unconfirmed audit shows no figure', async () => {

@@ -119,6 +119,22 @@ export function questionProblems(choice: Choice, model: CatalogModel): FilterPro
 }
 
 /**
+ * Problems of `choice` that its filters have only together, such as the
+ * budget both share: each editor checks its own alone and cannot mark them.
+ */
+export function jointProblems(choice: Choice, model: CatalogModel): FilterProblem[] {
+  const alone = choice.filters
+    ? [
+        ...filterProblems({ where: choice.filters.where, having: null }, model, choice.metrics),
+        ...filterProblems({ where: null, having: choice.filters.having }, model, choice.metrics),
+      ]
+    : [];
+  const key = (p: FilterProblem) => `${p.path}\n${p.message}`;
+  const marked = new Set(alone.map(key));
+  return questionProblems(choice, model).filter((p) => !marked.has(key(p)));
+}
+
+/**
  * Whether `choice` is a question the page may send: its filters, if any,
  * valid on `model`, which they need to be checked against.
  */

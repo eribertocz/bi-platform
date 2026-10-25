@@ -32,7 +32,9 @@
 
   const fields = $derived(domain.members);
   const member = $derived(fields.find((f) => f.name === draft.field));
-  const allowed = $derived(member ? operators(member) : []);
+  // A member no longer offered keeps its type: its operator is not what is wrong.
+  const type = $derived(member?.type ?? domain.type(draft.field));
+  const allowed = $derived(operators({ type }));
   const written = $derived(condition(draft, domain));
   const problems = $derived(domain.problems(written));
   const count = $derived(arity(draft.operator, draft.values));
@@ -78,9 +80,9 @@
   }
 
   const placeholder = $derived(
-    member?.type === 'DATE'
+    type === 'DATE'
       ? 'AAAA-MM-DD'
-      : member?.type === 'INT64' || member?.type.startsWith('DECIMAL(')
+      : type === 'INT64' || type.startsWith('DECIMAL(')
         ? 'Número exacto, con punto decimal'
         : undefined,
   );
@@ -145,7 +147,7 @@
             : 'Hasta'
           : `Valor${count > 1 ? ` ${i + 1}` : ''}`}
       </label>
-      {#if member?.type === 'BOOLEAN'}
+      {#if type === 'BOOLEAN'}
         <select
           id="{id}-value-{i}"
           class="rounded border border-slate-400 bg-white p-2"

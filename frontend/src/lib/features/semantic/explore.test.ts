@@ -9,6 +9,7 @@ import {
   consistency,
   failure,
   initialChoice,
+  jointProblems,
   MAX_DIMENSIONS,
   MAX_METRICS,
   questionProblems,
@@ -329,5 +330,22 @@ describe('filters before and after aggregating, applied as one (#149)', () => {
     const over = withFilters(choice, { where: group(127, rows), having: group(128, counted) });
     expect(questionProblems(over, ventas).length).toBeGreaterThan(0);
     expect(askable(over, ventas)).toBe(false);
+    // That is the one problem no editor can mark: it is said by the page.
+    expect(jointProblems(fits, ventas)).toEqual([]);
+    expect(jointProblems(over, ventas)).toEqual(questionProblems(over, ventas));
+    expect(jointProblems(over, ventas).map((p) => p.message)).toEqual([
+      'Un filtro tiene como máximo 256 condiciones y 16 niveles de anidamiento.',
+    ]);
+  });
+
+  it('leaves to the editors what each marks alone', () => {
+    const inexact = one({ kind: 'metric', selection: metricId('filas') });
+    const wrong = {
+      ...inexact,
+      value: { type: 'number' as const, value: '1.5' },
+    } as SemanticFilter;
+    const both = withFilters(choice, { where: rows, having: wrong });
+    expect(questionProblems(both, ventas).map((p) => p.path)).toEqual(['/having/value']);
+    expect(jointProblems(both, ventas)).toEqual([]);
   });
 });

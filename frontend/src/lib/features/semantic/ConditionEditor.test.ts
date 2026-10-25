@@ -342,6 +342,12 @@ describe('the same editor after aggregating (#149)', () => {
     await view.rerender({ domain: metricsDomain(AFTER, ['importe_total']) });
     expect(describedError(metric())).toBe('La métrica no está seleccionada en esta consulta.');
     expect(metric().selectedOptions[0]!.textContent!.trim()).toBe('filas (no disponible)');
+    // Its type is still known: the operator is not what is wrong, nor its placeholder lost.
+    expect(operator().selectedOptions[0]!.textContent!.trim()).toBe('es mayor que');
+    expect(operator().getAttribute('aria-invalid')).toBeNull();
+    expect(screen.getByLabelText('Valor').getAttribute('placeholder')).toBe(
+      'Número exacto, con punto decimal',
+    );
     // Back in the question: the same condition, valid again.
     await view.rerender({ domain: metricsDomain(AFTER, ['importe_total', 'filas']) });
     expect(metric().getAttribute('aria-invalid')).toBeNull();

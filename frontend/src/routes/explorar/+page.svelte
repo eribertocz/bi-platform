@@ -9,6 +9,7 @@
     failure,
     groupable,
     initialChoice,
+    jointProblems,
     MANY_METRICS,
     MAX_DIMENSIONS,
     MAX_METRICS,
@@ -87,7 +88,12 @@
     if (!choice || !model) return;
     const next = withFilters(choice, $state.snapshot(drafted) as UserFilters);
     if (questionProblems(next, model).length > 0) {
-      filterNotice = 'Corrige los errores marcados en los filtros antes de aplicarlos.';
+      // What no editor marks, such as the budget both share, is said here.
+      const unmarked = jointProblems(next, model).map((p) => p.message);
+      filterNotice = [
+        'Corrige los errores marcados en los filtros antes de aplicarlos.',
+        ...unmarked,
+      ].join(' ');
       await tick();
       const invalid = document.querySelector<HTMLElement>('#filter-section [aria-invalid="true"]');
       (invalid ?? document.getElementById('filters-notice'))?.focus();
@@ -160,8 +166,13 @@
       .catch((error: unknown) => {
         if (controller.signal.aborted) return;
         const failed = failure(error);
-        // No longer usable: the selection goes with its answer.
-        if (failed.gone) choice = { model: current.model, metrics: [], dimensions: [] };
+        // No longer usable: the selection goes with its answer. The person's
+        // filters stay, as the editors show them: none is dropped (#142).
+        if (failed.gone)
+          choice = withFilters(
+            { ...current, metrics: [], dimensions: [] },
+            current.filters ?? NO_FILTERS,
+          );
         view = { kind: 'error', failure: failed };
       });
     return () => controller.abort();
