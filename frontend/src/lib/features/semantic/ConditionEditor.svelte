@@ -28,7 +28,8 @@
 
   // The editor owns its draft; it never asks the API nor runs a query.
   // svelte-ignore state_referenced_locally
-  let draft = $state<Draft>(structuredClone(initial));
+  // A plain copy: `initial` may be another component's reactive state.
+  let draft = $state<Draft>($state.snapshot(initial) as Draft);
 
   const fields = $derived(filterable(model));
   const member = $derived(fields.find((f) => f.name === draft.field));
