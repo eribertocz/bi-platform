@@ -4,6 +4,7 @@
 //! against the single terminal audit event it must leave, or not leave.
 #![cfg(all(feature = "postgres-tests", feature = "dev-auth"))]
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -16,6 +17,9 @@ use bi_server::metadata::MetadataMode;
 use bi_server::semantic::run::{Budgets, INITIAL, Profile, Runs};
 use bi_server::{AppState, analytics::Analytics, db::Database, models::Models};
 use http_body_util::BodyExt;
+use opentelemetry::metrics::MeterProvider as _;
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+use opentelemetry_sdk::metrics::{InMemoryMetricExporter, SdkMeterProvider};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -185,6 +189,11 @@ async fn harness(pool: sqlx::PgPool) -> Harness {
 
 /// A harness on `analytics` whose execution profile times out at `timeout`.
 async fn harness_with(pool: sqlx::PgPool, analytics: Analytics, timeout: Duration) -> Harness {
+    let runs = Runs::new(Profile::new(Budgets { timeout, ..INITIAL }).unwrap());
+    harness_runs(pool, analytics, runs).await
+}
+
+async fn harness_runs(pool: sqlx::PgPool, analytics: Analytics, runs: Runs) -> Harness {
     let project = project();
     let db = Database::start(&pool.connect_options(), MetadataMode::Development);
     assert!(
@@ -205,7 +214,7 @@ async fn harness_with(pool: sqlx::PgPool, analytics: Analytics, timeout: Duratio
         auth,
         analytics: analytics.clone(),
         models: Models::new(Some(project.path().into())),
-        semantic_runs: Runs::new(Profile::new(Budgets { timeout, ..INITIAL }).unwrap()),
+        semantic_runs: runs,
         ..AppState::new(db.clone())
     });
     Harness {
@@ -842,6 +851,188 @@ async fn a_masked_metric_is_refused_with_a_decided_failure_event_then_queries_re
     let since = h.head().await;
     assert_total(&h.query(&ana, &total()).await);
     assert_decided(&h.only_event_since(since).await, "query", "success");
+    h.db.close().await;
+}
+
+/// `MODEL` with `ciudad` confidential: a viewer may show it masked, and
+/// never group, filter or order by it.
+fn confidential_city() -> String {
+    let model = MODEL.replacen(
+        "      - name: ciudad\n        dimension: {}\n",
+        "      - name: ciudad\n        dimension: {}\n        custom_extensions:\n          - vendor_name: bi-platform\n            data: '{\"version\": 1, \"sensitivity\": \"confidential\"}'\n",
+        1,
+    );
+    assert_ne!(model, MODEL);
+    model
+}
+
+/// Run outcomes by code and run phases by count, as last exported.
+fn run_metrics(
+    provider: &SdkMeterProvider,
+    exporter: &InMemoryMetricExporter,
+) -> (BTreeMap<String, u64>, BTreeMap<String, u64>) {
+    provider.force_flush().unwrap();
+    let exports: Vec<ResourceMetrics> = exporter.get_finished_metrics().unwrap();
+    let (mut codes, mut phases) = (BTreeMap::new(), BTreeMap::new());
+    for metric in exports
+        .last()
+        .into_iter()
+        .flat_map(ResourceMetrics::scope_metrics)
+        .flat_map(opentelemetry_sdk::metrics::data::ScopeMetrics::metrics)
+    {
+        match (metric.name(), metric.data()) {
+            ("bi.semantic.runs", AggregatedMetrics::U64(MetricData::Sum(sum))) => {
+                for point in sum.data_points() {
+                    let label = point.attributes().next().unwrap();
+                    codes.insert(label.value.to_string(), point.value());
+                }
+            }
+            (
+                "bi.semantic.run.phase.duration",
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)),
+            ) => {
+                for point in histogram.data_points() {
+                    let label = point.attributes().next().unwrap();
+                    phases.insert(label.value.to_string(), point.count());
+                }
+            }
+            _ => {}
+        }
+    }
+    (codes, phases)
+}
+
+/// How a use of #150's boundary is refused.
+enum Refusal {
+    Denied(&'static str),
+    Undisclosed,
+    Masked,
+}
+use Refusal::{Denied, Masked, Undisclosed};
+
+/// The boundary of #150: a use refused at any position of the query stops
+/// in the preparation. Beyond its status and its event, the run phases the
+/// server records show `prepare` alone for every refusal; only the granted
+/// control reaches `execute`. The real API matrix is `semantic_conformance`.
+#[sqlx::test(migrations = false)]
+async fn a_use_refused_at_any_position_never_reaches_execution(pool: sqlx::PgPool) {
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter.clone())
+        .build();
+    let runs = Runs::new(Profile::new(INITIAL).unwrap()).with_meter(&provider.meter("test"));
+    let h = harness_runs(pool, analytics(RuntimeConfig::in_memory(2)).await, runs).await;
+    h.write("metrics/ventas.yaml", &confidential_city());
+    let ana = h.login("ana").await;
+    let la_paz = json!({ "op": "compare",
+        "target": { "kind": "dimension", "name": "ventas.ciudad" }, "comparison": "=",
+        "value": { "type": "text", "value": "La Paz" } });
+    let above = |selection: &str| {
+        json!({ "op": "compare", "target": { "kind": "metric", "selection": selection },
+            "comparison": ">", "value": { "type": "number", "value": "1" } })
+    };
+    let alone = json!([metric("t", "importe_total")]);
+    let masked = json!([metric("t", "importe_total"), metric("m", "margen")]);
+    let hidden = json!([
+        metric("t", "importe_total"),
+        metric("r", "reserva_centinela")
+    ]);
+    // (position, query, refusal): `Denied` names the refused use, `Undisclosed`
+    // is the neutral answer to what the viewer may not see, and `Masked` is
+    // what she may only see masked, which execution refuses whole.
+    let cases = [
+        (
+            "select",
+            json!({ "selections": [metric("m", "reserva_centinela")] }),
+            Undisclosed,
+        ),
+        (
+            "select",
+            json!({ "selections": [metric("m", "margen")] }),
+            Masked,
+        ),
+        (
+            "group",
+            json!({ "selections": [dimension("c", "ventas.ciudad"), metric("t", "importe_total")] }),
+            Denied("group"),
+        ),
+        (
+            "where",
+            json!({ "selections": alone, "filter": la_paz }),
+            Denied("filter"),
+        ),
+        (
+            "where",
+            json!({ "selections": alone, "filter": { "op": "is_null",
+            "target": { "kind": "dimension", "name": "ventas.nota" } } }),
+            Undisclosed,
+        ),
+        (
+            "having",
+            json!({ "selections": masked, "having": above("m") }),
+            Denied("filter"),
+        ),
+        (
+            "having",
+            json!({ "selections": hidden, "having": above("r") }),
+            Undisclosed,
+        ),
+        (
+            "order",
+            json!({ "selections": masked, "order_by": [{ "selection": "m" }] }),
+            Denied("order"),
+        ),
+    ];
+    for (position, query, refusal) in &cases {
+        let since = h.head().await;
+        let answer = h.query(&ana, &request(query)).await;
+        let text = answer.body.to_string();
+        for leaked in ["centinela", "300.30", "100.10", "200.20"] {
+            assert!(!text.contains(leaked), "{position}: {leaked} in {text}");
+        }
+        let event = h.only_event_since(since).await;
+        match refusal {
+            Denied(usage) => {
+                assert_problem(&answer, StatusCode::FORBIDDEN, "semantic_access_denied");
+                assert_eq!(answer.body["denied"]["usage"], *usage, "{position}: {text}");
+                assert_decided(&event, "denial", "denied");
+            }
+            Undisclosed => {
+                assert_undisclosed(&answer);
+                assert_decided(&event, "denial", "denied");
+            }
+            Masked => {
+                assert_problem(
+                    &answer,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "masked_unsupported",
+                );
+                assert_decided(&event, "query", "failure");
+            }
+        }
+    }
+    let refused = u64::try_from(cases.len()).unwrap();
+    let (codes, phases) = run_metrics(&provider, &exporter);
+    assert_eq!(phases, BTreeMap::from([("prepare".to_owned(), refused)]));
+    assert_eq!(
+        codes,
+        BTreeMap::from([
+            ("masked_unsupported".to_owned(), 1),
+            ("refused".to_owned(), refused - 1),
+        ])
+    );
+
+    // The control: the instrument does see an execution when one happens.
+    assert_total(&h.query(&ana, &total()).await);
+    let (_, phases) = run_metrics(&provider, &exporter);
+    assert_eq!(
+        phases,
+        BTreeMap::from([
+            ("assemble".to_owned(), 1),
+            ("execute".to_owned(), 1),
+            ("prepare".to_owned(), refused + 1),
+        ])
+    );
     h.db.close().await;
 }
 
