@@ -68,3 +68,10 @@ libc = "0.2"
 
 [lints]
 workspace = true
+
+# Conformance of the production API (#144): it requires a configured server
+# and fails without one, so it runs only by name (`--test
+# semantic_conformance`), the same command locally and in the OIDC job.
+[[test]]
+name = "semantic_conformance"
+test = false
