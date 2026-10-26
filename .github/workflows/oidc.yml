@@ -75,7 +75,8 @@ jobs:
           done
           exit 1
       # #144: the production API against this very server, before Playwright
-      # (both edit the fixture's memberships, never at once).
+      # (both edit the fixture's memberships, never at once). Its own loopback
+      # address: OIDC admission is per client, the browser keeps its budget.
       - name: API conformance with real OIDC identities, A/B oracle and revocation
         working-directory: backend
         env:
@@ -86,6 +87,7 @@ jobs:
           BI_TEST_OIDC_ISSUER: http://127.0.0.1:18071/realms/bi-test
           BI_CONFORMANCE_BASE_URL: http://127.0.0.1:18070
           BI_CONFORMANCE_PROJECT_DIR: ${{ github.workspace }}/frontend/e2e/semantic/project
+          BI_CONFORMANCE_CLIENT_ADDR: 127.0.0.2
         run: cargo test --locked -j 4 -p bi-server --no-default-features --features postgres-tests --test semantic_conformance -- --test-threads=1
       - name: Corporate login, semantic Explorar A/B, logout, keyboard and axe
         run: npm run test:e2e -- e2e/oidc.spec.ts e2e/explore.spec.ts

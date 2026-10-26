@@ -158,6 +158,13 @@ proptest! {
     }
 }
 
+// The real form's login, shared with the conformance target (#144). Declared
+// here, outside `real`: a path inside an inline module resolves through a
+// `tests/real/` directory that does not exist, which only Windows tolerates.
+#[cfg(feature = "postgres-tests")]
+#[path = "../../tests/common/keycloak.rs"]
+mod keycloak;
+
 #[cfg(feature = "postgres-tests")]
 mod real {
     use super::*;
@@ -182,10 +189,7 @@ mod real {
         authorize_as(url, "oidc-user").await
     }
 
-    // The real form's login, shared with the conformance target (#144).
-    #[path = "../../../../tests/common/keycloak.rs"]
-    mod keycloak;
-    use keycloak::authorize_as;
+    use super::keycloak::authorize_as;
 
     async fn tokens(
         config: &OidcConfig,

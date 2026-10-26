@@ -7,6 +7,9 @@
 //! `BI_CONFORMANCE_PROJECT_DIR` (the project that server reads),
 //! `BI_TEST_OIDC_ISSUER` and an administrative `DATABASE_URL` to read the
 //! audit. Every input is required: an absent one fails, it never skips.
+//! Optional `BI_CONFORMANCE_CLIENT_ADDR`: the local address this client
+//! connects from. The server admits OIDC logins per client address, so a
+//! browser suite sharing the server stays a separate client (CI: 127.0.0.2).
 //! Run serially (`--test-threads=1`): revocation edits the project.
 #![cfg(feature = "postgres-tests")]
 
@@ -41,6 +44,14 @@ impl Api {
         let api = Self {
             base: required("BI_CONFORMANCE_BASE_URL"),
             http: Client::builder()
+                .local_address(
+                    std::env::var("BI_CONFORMANCE_CLIENT_ADDR")
+                        .ok()
+                        .map(|addr| {
+                            addr.parse::<std::net::IpAddr>()
+                                .expect("BI_CONFORMANCE_CLIENT_ADDR is an IP address")
+                        }),
+                )
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(30))
                 .build()
