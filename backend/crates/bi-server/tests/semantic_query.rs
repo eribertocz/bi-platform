@@ -1014,7 +1014,13 @@ async fn a_use_refused_at_any_position_never_reaches_execution(pool: sqlx::PgPoo
     let refused = u64::try_from(cases.len()).unwrap();
     let (codes, phases) = run_metrics(&provider, &exporter);
     assert_eq!(phases, BTreeMap::from([("prepare".to_owned(), refused)]));
-    assert_eq!(codes.values().sum::<u64>(), refused, "{codes:?}");
+    assert_eq!(
+        codes,
+        BTreeMap::from([
+            ("masked_unsupported".to_owned(), 1),
+            ("refused".to_owned(), refused - 1),
+        ])
+    );
 
     // The control: the instrument does see an execution when one happens.
     assert_total(&h.query(&ana, &total()).await);
