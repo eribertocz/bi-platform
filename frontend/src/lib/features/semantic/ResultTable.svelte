@@ -4,7 +4,17 @@
     block,
     caption,
     labels = {},
-  }: { block: SemanticBlock; caption: string; labels?: Record<string, string> } = $props();
+    drillable,
+    ondrill,
+  }: {
+    block: SemanticBlock;
+    caption: string;
+    labels?: Record<string, string>;
+    /** Whether the cell at `row` of column `column` may start a drill (#143). */
+    drillable?: (row: number, column: number) => boolean;
+    /** Asked to drill from that cell; `trigger` takes the focus back on cancel. */
+    ondrill?: (row: number, selection: string, trigger: HTMLElement) => void;
+  } = $props();
   // Checked as a whole first: an incompatible block shows no figure at all.
   const checked = $derived.by(() => {
     try {
@@ -56,6 +66,12 @@
                 data-kind={value.kind}
               >
                 {#if value.kind === 'masked'}<span aria-label="Valor oculto">Oculto</span
+                  >{:else if ondrill && drillable?.(r, i)}<button
+                    type="button"
+                    class="underline decoration-dotted"
+                    aria-label={`${shownText(value)} — explorar ${columnLabel(column, labels)} por otro campo`}
+                    onclick={(event) => ondrill(r, column.selection_id, event.currentTarget)}
+                    >{shownText(value)}</button
                   >{:else}{shownText(value)}{/if}
               </td>
             {/each}
