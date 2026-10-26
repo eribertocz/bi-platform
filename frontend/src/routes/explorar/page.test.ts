@@ -1020,6 +1020,59 @@ describe('drill from a cell and back, with the coordinator (#143)', () => {
     expect(rowsRegion.getAllByLabelText('Campo')).toHaveLength(2);
   });
 
+  it('Codex #292: a reverted edit before a step is not pending after it; Aplicar keeps its filter', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    const rowsRegion = () => within(screen.getByRole('region', { name: 'Filtros de filas' }));
+    await fireEvent.click(rowsRegion().getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.click(rowsRegion().getByRole('button', { name: 'Quitar condición' }));
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)?.filter).toEqual(norte);
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    expect(rowsRegion().getByLabelText<HTMLInputElement>('Valor').value).toBe('Norte');
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)?.filter).toEqual(norte);
+    // The next step is not stopped by a draft that is no longer there.
+    const before = api.calls.length;
+    await step('La Paz', 'ventas.nota');
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.nota', 'importe_total'],
+      filter: { op: 'and', filters: [norte, laPaz] },
+    });
+  });
+
+  it('Codex #292: a reverted edit before Atrás is not pending after it; Aplicar asks no filter', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('table', { name: 'Desglose' });
+    const rowsRegion = () => within(screen.getByRole('region', { name: 'Filtros de filas' }));
+    const value = rowsRegion().getByLabelText<HTMLInputElement>('Valor');
+    await fireEvent.input(value, { target: { value: 'Sur' } });
+    expect(screen.getByText('Hay cambios sin aplicar.')).toBeTruthy();
+    await fireEvent.input(value, { target: { value: 'Norte' } });
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    const before = api.calls.length;
+    await fireEvent.click(path().getByRole('button', { name: 'Atrás' }));
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.region', 'importe_total'],
+      filter: null,
+    });
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    expect(rowsRegion().queryByLabelText('Valor')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)?.filter).toBeNull();
+  });
+
   it('a denied step keeps no old detail; Atrás asks again with the current permissions', async () => {
     let denied = false;
     const api = server((call) => {

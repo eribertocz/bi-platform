@@ -312,7 +312,11 @@
     }
     drillNotice = null;
     path = result.path;
-    // The editors start again from the filters the step or return applied.
+    // The editors start again from the filters the step or return applied,
+    // and so do the drafts: nothing was pending, but an untouched-looking
+    // draft equal to the former question would differ from this one.
+    drafts = { where: null, having: null };
+    filterNotice = null;
     editorRevision++;
     pick(result.question);
     drillAnnouncement = said;
