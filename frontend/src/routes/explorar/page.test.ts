@@ -840,3 +840,344 @@ describe('metric filters after aggregating, with the same editor (#149)', () => 
     expect(document.body.textContent).not.toMatch(/300,30|100,30|200,00/);
   });
 });
+
+describe('drill from a cell and back, with the coordinator (#143)', () => {
+  const field = (name: string, type = 'VARCHAR', capabilities = {}) => ({
+    ...member(name, 'values', true),
+    type,
+    capabilities: { ...member(name, 'values', true).capabilities, ...capabilities },
+  });
+  const drillModel = (
+    fields = ['ventas.region', 'ventas.ciudad', 'ventas.nota'].map((n) => field(n)),
+  ) => ({
+    ...ventas,
+    fields,
+  });
+  type Query = {
+    selections: { id: string; kind: string; name: string }[];
+    filter?: unknown;
+    having?: unknown;
+  };
+  // Canned answers by the dimension asked: the double does not evaluate filters.
+  const ROWS: Record<string, (string | null)[][]> = {
+    'ventas.region': [['Norte', '100.30']],
+    'ventas.ciudad': [
+      ['La Paz', '100.10'],
+      ['El Alto', '0.20'],
+    ],
+    'ventas.nota': [[null, '100.10']],
+  };
+  /** A recorded answer whose block carries the very selections of the request. */
+  function run(query: Query, rows?: (string | null)[][]) {
+    const answer = structuredClone(total) as typeof total;
+    const dimension = query.selections.find((s) => s.kind === 'dimension');
+    const body = rows ?? (dimension ? ROWS[dimension.name]! : [['100.30']]);
+    answer.result.blocks[0] = {
+      ...answer.result.blocks[0]!,
+      columns: query.selections.map((s) => ({
+        selection_id: s.id,
+        kind: s.kind,
+        id: `project/${s.kind}/${s.name}`,
+        type:
+          s.kind === 'metric'
+            ? 'DECIMAL(38,2)'
+            : s.name === 'ventas.instante'
+              ? 'TIMESTAMPTZ'
+              : 'VARCHAR',
+        nullable: true,
+        unit: null,
+        timezone: null,
+        masked: false,
+      })),
+      rows: body,
+      row_count: body.length,
+      limit: null,
+    } as (typeof answer.result.blocks)[0];
+    return Response.json(answer);
+  }
+  const query = (call: Call) => call.body!.query as Query;
+  const asking =
+    (models = () => [drillModel()]) =>
+    (call: Call) =>
+      call.url.endsWith('/catalog') ? catalog(models()) : run(query(call));
+  const asked = (calls: Call[]) =>
+    calls
+      .filter((c) => !c.url.endsWith('/catalog'))
+      .map((c) => ({
+        names: query(c).selections.map((s) => s.name),
+        filter: query(c).filter ?? null,
+      }));
+  const norte = {
+    op: 'compare',
+    target: { kind: 'dimension', name: 'ventas.region' },
+    comparison: '=',
+    value: { type: 'text', value: 'Norte' },
+  };
+  const laPaz = {
+    ...norte,
+    target: { kind: 'dimension', name: 'ventas.ciudad' },
+    value: { type: 'text', value: 'La Paz' },
+  };
+  const cellButton = (text: string) =>
+    within(screen.getByRole('table', { name: 'Desglose' })).getByRole('button', {
+      name: new RegExp(`^${text} — explorar`),
+    });
+  const path = () => within(screen.getByRole('navigation', { name: 'Camino de exploración' }));
+  async function byRegion() {
+    await screen.findByTestId('kpi-m:importe_total');
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+  }
+  async function step(value: string, to: string) {
+    await fireEvent.click(cellButton(value));
+    const target = screen.getByLabelText<HTMLSelectElement>('Desglosar por');
+    expect(document.activeElement).toBe(target);
+    await fireEvent.change(target, { target: { value: to } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Explorar' }));
+  }
+
+  it('two steps, Atrás and the first breadcrumb: each asked once, in sequence, exactly', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    const before = api.calls.length;
+    await step('Norte', 'ventas.ciudad');
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    // The total and the breakdown of the step, each with the cell's filter.
+    expect(asked(api.calls.slice(before))).toEqual([
+      { names: ['importe_total'], filter: norte },
+      { names: ['ventas.ciudad', 'importe_total'], filter: norte },
+    ]);
+    expect(api.overlapped()).toBe(false);
+    expect(document.activeElement?.id).toBe('drill-current');
+    expect(path().getByRole('button', { name: 'Inicio: por ventas.region' })).toBeTruthy();
+    expect(screen.getByText('ventas.region = «Norte», por ventas.ciudad')).toBeTruthy();
+    // The editor shows the filter the step applied.
+    expect(
+      screen.getByText(/^Filtros aplicados: antes de agregar, ventas.region es igual a «Norte»/),
+    ).toBeTruthy();
+
+    await screen.findByRole('table', { name: 'Desglose' });
+    await step('La Paz', 'ventas.nota');
+    await waitFor(() => expect(api.calls.length).toBe(before + 4));
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.nota', 'importe_total'],
+      filter: { op: 'and', filters: [norte, laPaz] },
+    });
+    // A NULL cell starts a step too: offered as what it is.
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(cellButton('Sin dato')).toBeTruthy();
+
+    // Atrás: by city with región = Norte, asked again with current permissions.
+    await fireEvent.click(path().getByRole('button', { name: 'Atrás' }));
+    await waitFor(() => expect(api.calls.length).toBe(before + 6));
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.ciudad', 'importe_total'],
+      filter: norte,
+    });
+    expect(screen.getByText('ventas.region = «Norte», por ventas.ciudad')).toBeTruthy();
+    // The first breadcrumb: the original question, the path gone.
+    await fireEvent.click(path().getByRole('button', { name: 'Inicio: por ventas.region' }));
+    await waitFor(() => expect(api.calls.length).toBe(before + 8));
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.region', 'importe_total'],
+      filter: null,
+    });
+    expect(screen.queryByRole('navigation', { name: 'Camino de exploración' })).toBeNull();
+    expect(document.activeElement?.id).toBe('explore-answer');
+    expect(api.overlapped()).toBe(false);
+  });
+
+  it('Cancelar asks nothing and gives the focus back to the cell', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    const before = api.calls.length;
+    const cell = cellButton('Norte');
+    await fireEvent.click(cell);
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
+    expect(document.activeElement).toBe(cell);
+    expect(screen.queryByLabelText('Desglosar por')).toBeNull();
+    expect(api.calls.length).toBe(before);
+  });
+
+  it('unapplied filters stop a step and a return, and stay as drafted', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('table', { name: 'Desglose' });
+    const rowsRegion = within(screen.getByRole('region', { name: 'Filtros de filas' }));
+    await fireEvent.click(rowsRegion.getByRole('button', { name: 'Añadir otra condición' }));
+    const before = api.calls.length;
+    await fireEvent.click(cellButton('La Paz'));
+    expect(document.activeElement?.id).toBe('drill-notice');
+    expect(screen.getByRole('alert').textContent).toMatch(/sin aplicar/);
+    await fireEvent.click(path().getByRole('button', { name: 'Atrás' }));
+    expect(document.activeElement?.id).toBe('drill-notice');
+    expect(api.calls.length).toBe(before);
+    expect(screen.getByText('Hay cambios sin aplicar.')).toBeTruthy();
+    expect(rowsRegion.getAllByLabelText('Campo')).toHaveLength(2);
+  });
+
+  it('Codex #292: a reverted edit before a step is not pending after it; Aplicar keeps its filter', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    const rowsRegion = () => within(screen.getByRole('region', { name: 'Filtros de filas' }));
+    await fireEvent.click(rowsRegion().getByRole('button', { name: 'Añadir condición' }));
+    await fireEvent.click(rowsRegion().getByRole('button', { name: 'Quitar condición' }));
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)?.filter).toEqual(norte);
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    expect(rowsRegion().getByLabelText<HTMLInputElement>('Valor').value).toBe('Norte');
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)?.filter).toEqual(norte);
+    // The next step is not stopped by a draft that is no longer there.
+    const before = api.calls.length;
+    await step('La Paz', 'ventas.nota');
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.nota', 'importe_total'],
+      filter: { op: 'and', filters: [norte, laPaz] },
+    });
+  });
+
+  it('Codex #292: a reverted edit before Atrás is not pending after it; Aplicar asks no filter', async () => {
+    const api = server(asking());
+    render(Page);
+    await byRegion();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('table', { name: 'Desglose' });
+    const rowsRegion = () => within(screen.getByRole('region', { name: 'Filtros de filas' }));
+    const value = rowsRegion().getByLabelText<HTMLInputElement>('Valor');
+    await fireEvent.input(value, { target: { value: 'Sur' } });
+    expect(screen.getByText('Hay cambios sin aplicar.')).toBeTruthy();
+    await fireEvent.input(value, { target: { value: 'Norte' } });
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    const before = api.calls.length;
+    await fireEvent.click(path().getByRole('button', { name: 'Atrás' }));
+    await waitFor(() => expect(api.calls.length).toBe(before + 2));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)).toEqual({
+      names: ['ventas.region', 'importe_total'],
+      filter: null,
+    });
+    expect(screen.queryByText('Hay cambios sin aplicar.')).toBeNull();
+    expect(rowsRegion().queryByLabelText('Valor')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Aplicar filtros' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls).at(-1)?.filter).toBeNull();
+  });
+
+  it('a denied step keeps no old detail; Atrás asks again with the current permissions', async () => {
+    let denied = false;
+    const api = server((call) => {
+      if (call.url.endsWith('/catalog')) return catalog([drillModel()]);
+      return denied ? problem(403, 'semantic_access_denied') : run(query(call));
+    });
+    render(Page);
+    await byRegion();
+    denied = true;
+    await step('Norte', 'ventas.ciudad');
+    expect((await screen.findByRole('alert')).textContent).toContain('HTTP 403');
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByTestId('kpi-m:importe_total')).toBeNull();
+    denied = false;
+    const before = api.calls.length;
+    await fireEvent.click(path().getByRole('button', { name: 'Atrás' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    expect(asked(api.calls.slice(before))).toEqual([
+      { names: ['importe_total'], filter: null },
+      { names: ['ventas.region', 'importe_total'], filter: null },
+    ]);
+  });
+
+  it('a neutral 404 retires the path with the question', async () => {
+    let gone = false;
+    server((call) => {
+      if (call.url.endsWith('/catalog')) return catalog([drillModel()]);
+      return gone ? problem(404, 'model_not_found') : run(query(call));
+    });
+    render(Page);
+    await byRegion();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('navigation', { name: 'Camino de exploración' });
+    await screen.findByRole('table', { name: 'Desglose' });
+    gone = true;
+    await step('La Paz', 'ventas.nota');
+    expect((await screen.findAllByRole('alert')).map((a) => a.textContent).join(' ')).toContain(
+      'ya no está disponible',
+    );
+    expect(screen.queryByRole('navigation', { name: 'Camino de exploración' })).toBeNull();
+  });
+
+  it('a late answer of a step left by Atrás is discarded', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    server(async (call) => {
+      if (call.url.endsWith('/catalog')) return catalog([drillModel()]);
+      // The step's reads arrive only after the person went back.
+      if (query(call).filter !== undefined) {
+        await held;
+        return run(query(call), [['Tarija', '999.99']]);
+      }
+      return run(query(call));
+    });
+    render(Page);
+    await byRegion();
+    await step('Norte', 'ventas.ciudad');
+    await waitFor(() => expect(screen.getByText('Consultando…')).toBeTruthy());
+    await fireEvent.click(path().getByRole('button', { name: 'Atrás' }));
+    await screen.findByRole('table', { name: 'Desglose' });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.body.textContent).not.toMatch(/999,99|Tarija/);
+    expect(cellButton('Norte')).toBeTruthy();
+  });
+
+  it('offers no step from an unfiltrable or instant cell, nor from a metric', async () => {
+    const fields = [
+      field('ventas.region', 'VARCHAR', { filter: false }),
+      field('ventas.ciudad'),
+      field('ventas.instante', 'TIMESTAMPTZ'),
+    ];
+    server((call) => {
+      if (call.url.endsWith('/catalog')) return catalog([drillModel(fields)]);
+      const q = query(call);
+      const dimensions = q.selections.filter((s) => s.kind === 'dimension');
+      return run(q, [
+        [
+          ...dimensions.map((d) =>
+            d.name === 'ventas.instante' ? '2026-01-01T00:00:00Z' : 'Norte',
+          ),
+          '1.00',
+        ],
+      ]);
+    });
+    render(Page);
+    await screen.findByTestId('kpi-m:importe_total');
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.region' }));
+    await fireEvent.click(screen.getByRole('checkbox', { name: 'ventas.instante' }));
+    const table = await screen.findByRole('table', { name: 'Desglose' });
+    await waitFor(() => expect(within(table).getAllByRole('columnheader')).toHaveLength(3));
+    // `region` may not be filtered, an instant has no literal, a metric is no origin.
+    expect(within(table).queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('another model starts without a path', async () => {
+    const other = { ...drillModel(), model: 'metrics/otro.yaml', name: 'otro' };
+    server(asking(() => [drillModel(), other]));
+    render(Page);
+    await byRegion();
+    await step('Norte', 'ventas.ciudad');
+    await screen.findByRole('navigation', { name: 'Camino de exploración' });
+    await fireEvent.change(screen.getByLabelText('Modelo'), {
+      target: { value: 'metrics/otro.yaml' },
+    });
+    expect(screen.queryByRole('navigation', { name: 'Camino de exploración' })).toBeNull();
+  });
+});

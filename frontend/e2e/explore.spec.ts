@@ -1309,3 +1309,177 @@ test('membership revoked before applying a metric filter: the neutral refusal, n
     writeFileSync(members, original);
   }
 });
+
+/** The breakdown's cell action of `value` in `dimension`, as a person names it. */
+const drillCell = (page: Page, value: string, dimension: string) =>
+  breakdown(page).getByRole('button', {
+    name: `${value} — explorar ${dimension} por otro campo`,
+    exact: true,
+  });
+const drillPath = (page: Page) => page.getByRole('navigation', { name: 'Camino de exploración' });
+
+/** One step from a cell, the target chosen and «Explorar» pressed by keyboard. */
+async function drillTo(page: Page, value: string, dimension: string, to: string) {
+  await drillCell(page, value, dimension).focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => focusedId(page)).toBe('drill-target');
+  await page.getByLabel('Desglosar por', { exact: true }).selectOption(to);
+  await page.getByRole('button', { name: 'Explorar', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => focusedId(page)).toBe('drill-current');
+}
+
+/** `ventas_notas` by region with `importe_total` alone: rows of two cells. */
+async function chooseNotesAs(page: Page, who: typeof NORTE) {
+  await page.getByLabel('Modelo').selectOption('metrics/ventas_notas.yaml');
+  await page.getByRole('checkbox', { name: 'importe_total', exact: true }).check();
+  await settled(page, 2);
+  await page.getByRole('checkbox', { name: 'filas', exact: true }).uncheck();
+  await settled(page, 1);
+  await page.getByRole('checkbox', { name: 'ventas.region', exact: true }).check();
+  await expect.poll(() => bodyRows(page)).toEqual([[who.region, who.shown]]);
+}
+
+test('drill and back: two steps, a NULL, Atrás and the first breadcrumb, by keyboard and axe', async ({
+  page,
+}) => {
+  // #143 on the real server: each step and each return asks again, with the
+  // filters of the question kept and the cell's value added at its type.
+  test.setTimeout(180_000);
+  const network = watch(page);
+  await signIn(page, NORTE.user, NORTE.name);
+  await openExplore(page);
+  await chooseNotesAs(page, NORTE);
+  // A filter after aggregating, kept by every step and return.
+  await page
+    .getByRole('region', { name: 'Filtros de métricas' })
+    .getByRole('button', { name: 'Añadir condición de métrica' })
+    .click();
+  await writeMetric(page, 'importe_total', '>', '0.00');
+  await applyFilters(page);
+  await expect.poll(() => bodyRows(page)).toEqual([[NORTE.region, NORTE.shown]]);
+
+  // Norte → by city: La Paz 100,10 and El Alto 0,20; the total stays 100,30.
+  await drillTo(page, 'Norte', 'ventas.region', 'ventas.ciudad');
+  await expect(drillPath(page)).toContainText('ventas.region = «Norte», por ventas.ciudad');
+  await expect
+    .poll(async () => sorted(await bodyRows(page)))
+    .toEqual([
+      ['El Alto', '0,20'],
+      ['La Paz', '100,10'],
+    ]);
+  await expect(kpi(page, 'importe_total')).toHaveText(NORTE.shown);
+  await expect(page.locator('#filters-applied')).toHaveText(
+    'Filtros aplicados: antes de agregar, ventas.region es igual a «Norte»; después de agregar, importe_total es mayor que 0.00.',
+  );
+
+  // La Paz → by observation: its row has none, a NULL of 100,10.
+  await drillTo(page, 'La Paz', 'ventas.ciudad', 'ventas.observacion');
+  await expect.poll(() => bodyRows(page)).toEqual([['Sin dato', '100,10']]);
+  // From the NULL cell: `is_null`, never the text the table shows.
+  await drillTo(page, 'Sin dato', 'ventas.observacion', 'ventas.ciudad');
+  await expect.poll(() => bodyRows(page)).toEqual([['La Paz', '100,10']]);
+  await expect(page.locator('#filters-applied')).toContainText(
+    'ventas.observacion no tiene valor (nulo)',
+  );
+  await axe(page);
+
+  // Atrás twice: by observation, then by city with región = Norte, each asked again.
+  await drillPath(page).getByRole('button', { name: 'Atrás' }).click();
+  await expect.poll(() => bodyRows(page)).toEqual([['Sin dato', '100,10']]);
+  await drillPath(page).getByRole('button', { name: 'Atrás' }).click();
+  await expect(drillPath(page)).toContainText('ventas.region = «Norte», por ventas.ciudad');
+  await expect.poll(async () => sorted(await bodyRows(page))).toHaveLength(2);
+  // The first breadcrumb: the original question, its own filters, no path.
+  await drillPath(page).getByRole('button', { name: 'Inicio: por ventas.region' }).click();
+  await expect.poll(() => bodyRows(page)).toEqual([[NORTE.region, NORTE.shown]]);
+  await expect(drillPath(page)).toHaveCount(0);
+  await expect(page.locator('#filters-applied')).toHaveText(
+    'Filtros aplicados: después de agregar, importe_total es mayor que 0.00.',
+  );
+
+  // A step and Atrás before it answers: only the question went back to is shown.
+  await drillCell(page, 'Norte', 'ventas.region').click();
+  await page.getByLabel('Desglosar por', { exact: true }).selectOption('ventas.ciudad');
+  await page.getByRole('button', { name: 'Explorar', exact: true }).click();
+  await drillPath(page).getByRole('button', { name: 'Atrás' }).click();
+  await expect.poll(() => bodyRows(page)).toEqual([[NORTE.region, NORTE.shown]]);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  expect(network.concurrent()).toEqual([]);
+  await noFiguresOf(page, SUR);
+  onlySemantic(network.sent);
+});
+
+test('drill under another session: Sur never reaches Norte, a forged step shows nothing, revocation retires the path', async ({
+  page,
+}) => {
+  test.setTimeout(150_000);
+  await signIn(page, SUR.user, SUR.name);
+  const origin = new URL(page.url()).origin;
+  // The question a step from Norte would ask: the row policy answers no row.
+  const step = await page.request.post('/api/v1/semantic/query', {
+    headers: { Origin: origin, Accept: 'application/json' },
+    data: {
+      model: 'metrics/ventas_notas.yaml',
+      query: {
+        selections: [
+          { id: 'd:ventas.ciudad', kind: 'dimension', name: 'ventas.ciudad' },
+          { id: metricId('importe_total'), kind: 'metric', name: 'importe_total' },
+        ],
+        filter: {
+          op: 'compare',
+          target: { kind: 'dimension', name: 'ventas.region' },
+          comparison: '=',
+          value: { type: 'text', value: 'Norte' },
+        },
+      },
+    },
+  });
+  expect(step.status()).toBe(200);
+  expect((await step.json()).result.blocks[0].rows).toEqual([]);
+  // A step to a restricted field: refused, nothing named.
+  const secret = await page.request.post('/api/v1/semantic/query', {
+    headers: { Origin: origin, Accept: 'application/json' },
+    data: {
+      model: 'metrics/ventas.yaml',
+      query: {
+        selections: [
+          { id: 'd:ventas.nota', kind: 'dimension', name: 'ventas.nota' },
+          { id: metricId('importe_total'), kind: 'metric', name: 'importe_total' },
+        ],
+      },
+    },
+  });
+  expect([403, 404]).toContain(secret.status());
+  expect(await secret.text()).not.toMatch(SENTINELS);
+
+  // Revoked between a step and Atrás: the current permissions answer, the path goes.
+  const members = fileURLToPath(
+    new URL('./semantic/project/policies/members.yaml', import.meta.url),
+  );
+  const original = readFileSync(members);
+  const revoked = original
+    .toString('utf8')
+    .replace(/^ {2}analysts: \[viewer\]$/m, '  catalog_authors: [viewer]');
+  try {
+    await openExplore(page);
+    await chooseNotesAs(page, SUR);
+    await drillTo(page, 'Sur', 'ventas.region', 'ventas.ciudad');
+    await expect
+      .poll(async () => sorted(await bodyRows(page)))
+      .toEqual([
+        ['Sucre', '-0,20'],
+        ['Tarija', '200,20'],
+      ]);
+    writeFileSync(members, revoked);
+    await drillPath(page).getByRole('button', { name: 'Atrás' }).click();
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'HTTP 404 · Código: model_not_found' }),
+    ).toBeVisible();
+    await expect(drillPath(page)).toHaveCount(0);
+    await expect(breakdown(page)).toHaveCount(0);
+    await noLeaks(page, NORTE);
+  } finally {
+    writeFileSync(members, original);
+  }
+});

@@ -69,7 +69,7 @@ const sameContext = (path: DrillPath, context: PathContext) =>
  * The literal of a raw cell for its column's type, exactly as the contract
  * carries it; `undefined` when the wire cannot carry it faithfully.
  */
-function literal(type: string, cell: unknown): SemanticValue | undefined {
+export function literal(type: string, cell: unknown): SemanticValue | undefined {
   if (type === 'BOOLEAN')
     return typeof cell === 'boolean' ? { type: 'boolean', value: cell } : undefined;
   if (typeof cell !== 'string') return undefined;
@@ -79,6 +79,23 @@ function literal(type: string, cell: unknown): SemanticValue | undefined {
   // TIMESTAMPTZ and anything else: no literal until its contract exists.
   return undefined;
 }
+
+/**
+ * The field of `current`'s dimension `name` when a step may start there: one
+ * the question breaks down by, whose values the session sees.
+ */
+export function origin(current: Choice, model: CatalogModel, name: string) {
+  const field = current.dimensions.includes(name)
+    ? model.fields.find((f) => f.name === name)
+    : undefined;
+  return field?.capabilities.select === 'values' ? field : undefined;
+}
+
+/** Where a step from `from` may go: fields the session may group by, not asked yet. */
+export const targets = (current: Choice, model: CatalogModel, from: string): string[] =>
+  groupable(model)
+    .map((field) => field.name)
+    .filter((name) => name !== from && !current.dimensions.includes(name));
 
 /**
  * The question one step below `current`, and the path that remembers it:
@@ -126,25 +143,13 @@ export function drill(
   // A dimension the question breaks down by, its value not withheld by the
   // answer nor by the catalog, and of its field's very type.
   const from = current.dimensions.find((name) => dimensionId(name) === cell.selection);
-  const field = model.fields.find((f) => f.name === from);
-  if (
-    from === undefined ||
-    !field ||
-    declared.kind !== 'dimension' ||
-    declared.masked ||
-    field.capabilities.select !== 'values'
-  ) {
+  const field = from === undefined ? undefined : origin(current, model, from);
+  if (from === undefined || !field || declared.kind !== 'dimension' || declared.masked) {
     return refuse({ reason: 'origin' });
   }
   if (declared.type !== field.type) return refuse({ reason: 'cell' });
   // A field of the same model the session may group by, not asked already.
-  if (
-    to === from ||
-    current.dimensions.includes(to) ||
-    !groupable(model).some((field) => field.name === to)
-  ) {
-    return refuse({ reason: 'target' });
-  }
+  if (!targets(current, model, from).includes(to)) return refuse({ reason: 'target' });
   const raw = row[column] ?? null;
   const value = raw === null ? null : literal(declared.type, raw);
   if (value === undefined) return refuse({ reason: 'value' });
