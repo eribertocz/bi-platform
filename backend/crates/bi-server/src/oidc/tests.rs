@@ -158,6 +158,13 @@ proptest! {
     }
 }
 
+// The real form's login, shared with the conformance target (#144). Declared
+// here, outside `real`: a path inside an inline module resolves through a
+// `tests/real/` directory that does not exist, which only Windows tolerates.
+#[cfg(feature = "postgres-tests")]
+#[path = "../../tests/common/keycloak.rs"]
+mod keycloak;
+
 #[cfg(feature = "postgres-tests")]
 mod real {
     use super::*;
@@ -182,55 +189,7 @@ mod real {
         authorize_as(url, "oidc-user").await
     }
 
-    /// The login of `username` (password `oidc-test-only`) at the real form.
-    async fn authorize_as(url: &str, username: &str) -> String {
-        let http = http_client().unwrap();
-        let response = http.get(url).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let cookies = response
-            .headers()
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .map(|value| {
-                value
-                    .to_str()
-                    .unwrap()
-                    .split(';')
-                    .next()
-                    .unwrap()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        let html = response.text().await.unwrap();
-        let form = html
-            .split("id=\"kc-form-login\"")
-            .nth(1)
-            .expect("real Keycloak login form");
-        let action = form
-            .split("action=\"")
-            .nth(1)
-            .unwrap()
-            .split('"')
-            .next()
-            .unwrap()
-            .replace("&amp;", "&");
-        let response = http
-            .post(action)
-            .header(header::COOKIE, cookies)
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(format!(
-                "username={username}&password=oidc-test-only&credentialId="
-            ))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FOUND);
-        response.headers()[header::LOCATION]
-            .to_str()
-            .unwrap()
-            .to_owned()
-    }
+    use super::keycloak::authorize_as;
 
     async fn tokens(
         config: &OidcConfig,
