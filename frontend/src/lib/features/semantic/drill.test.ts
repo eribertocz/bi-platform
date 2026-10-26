@@ -531,3 +531,88 @@ describe('properties', () => {
     );
   });
 });
+
+describe('found by the review before delivery', () => {
+  const q = ask(['ventas.region']);
+  const block = answer(q, [['Norte', '100.30']], ['VARCHAR']);
+  const step = (current: Choice, c: DrillCell, model = MODEL) =>
+    drill(current, startPath(A), A, model, c, 'ventas.ciudad');
+
+  it('a block that is not the answer to this question is refused, whatever it holds', () => {
+    // Another block with the same column id among others: not this question's.
+    const foreign = answer(
+      { ...q, dimensions: ['ventas.nota', 'ventas.region'], metrics: [] },
+      [['n', 'Sur']],
+      ['VARCHAR', 'VARCHAR'],
+    );
+    expect(step(q, cell(q, foreign, 0, 'ventas.region'))).toEqual({ ok: false, reason: 'cell' });
+    // Two columns of one selection: an ambiguous reference.
+    const twice = { ...block, columns: [block.columns[0]!, block.columns[0]!] };
+    expect(step(q, cell(q, twice, 0, 'ventas.region'))).toEqual({ ok: false, reason: 'cell' });
+    // A column whose type is not its field's: no literal by appearance.
+    const retyped = answer(q, [['5', '1.00']], ['INT64']);
+    expect(step(q, cell(q, retyped, 0, 'ventas.region'))).toEqual({ ok: false, reason: 'cell' });
+  });
+
+  it('an origin the catalog withholds is refused even if the answer shows it', () => {
+    const withheld: CatalogModel = {
+      ...MODEL,
+      fields: MODEL.fields.map((f) =>
+        f.name === 'ventas.region'
+          ? { ...f, capabilities: { ...f.capabilities, select: 'masked' } }
+          : f,
+      ),
+    };
+    expect(step(q, cell(q, block, 0, 'ventas.region'), withheld)).toEqual({
+      ok: false,
+      reason: 'origin',
+    });
+  });
+
+  it('a time dimension is not an origin', () => {
+    const timed = {
+      ...block,
+      columns: block.columns.map((c, i) =>
+        i === 0 ? { ...c, kind: 'time_dimension' as const } : c,
+      ),
+    };
+    // The question selects no time dimension: the block is not its answer.
+    expect(step(q, cell(q, timed, 0, 'ventas.region'))).toEqual({ ok: false, reason: 'cell' });
+  });
+
+  it('nothing is built on a question the page may not send', () => {
+    const empty = ask(['ventas.region'], { op: 'and', filters: [] });
+    const b = answer(empty, [['Norte', '1.00']], ['VARCHAR']);
+    expect(step(empty, cell(empty, b, 0, 'ventas.region'))).toEqual({
+      ok: false,
+      reason: 'unaskable',
+    });
+    const none = { ...ask(['ventas.region']), metrics: [] };
+    const b0 = answer(none, [['Norte']], ['VARCHAR']);
+    expect(step(none, cell(none, b0, 0, 'ventas.region'))).toEqual({
+      ok: false,
+      reason: 'unaskable',
+    });
+  });
+
+  it('the same question written with its keys in another order is the same', () => {
+    const reordered = {
+      filters: { having: HAVING, where: PRIOR },
+      dimensions: ['ventas.region'],
+      metrics: ['importe_total'],
+      model: MODEL.model,
+    } as Choice;
+    expect(step(q, cell(reordered, block, 0, 'ventas.region')).ok).toBe(true);
+  });
+
+  it('a step that reaches exactly the shared budget is taken', () => {
+    // 1 group + 253 conditions + `having` = 255 nodes; the step makes 256.
+    const many: SemanticFilter = {
+      op: 'and',
+      filters: Array.from({ length: 253 }, () => is('ventas.ciudad', text('x'))),
+    };
+    const full = ask(['ventas.region'], many);
+    const b = answer(full, [['Norte', '1.00']], ['VARCHAR']);
+    expect(step(full, cell(full, b, 0, 'ventas.region')).ok).toBe(true);
+  });
+});

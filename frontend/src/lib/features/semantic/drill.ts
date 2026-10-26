@@ -1,13 +1,15 @@
 import type { CatalogModel } from '#lib/api/semantic.ts';
 import { checkBlock, IncompatibleResult, type SemanticBlock } from './exact';
-import { groupable, questionProblems, withFilters, type Choice } from './explore';
+import { same } from './filterTree';
 import {
   dimensionId,
+  metricId,
   NO_FILTERS,
   type FilterProblem,
   type SemanticFilter,
   type SemanticValue,
 } from './filters';
+import { askable, groupable, questionProblems, withFilters, type Choice } from './question';
 
 /**
  * Whose questions a path holds: one principal, on one model. A path is
@@ -44,6 +46,7 @@ export type DrillCell = {
 export type DrillRefusal =
   | { reason: 'context' }
   | { reason: 'stale' }
+  | { reason: 'unaskable' }
   | { reason: 'cell' }
   | { reason: 'origin' }
   | { reason: 'target' }
@@ -59,8 +62,6 @@ export const startPath = (context: PathContext): DrillPath => ({ ...context, fra
 
 const refuse = (refusal: DrillRefusal): Drilled => ({ ok: false, ...refusal });
 const copy = <T>(value: T): T => structuredClone(value);
-/** Two questions are the same when they ask exactly the same, in the same order. */
-const same = (a: Choice, b: Choice) => JSON.stringify(a) === JSON.stringify(b);
 const sameContext = (path: DrillPath, context: PathContext) =>
   path.principal === context.principal && path.model === context.model;
 
@@ -100,6 +101,8 @@ export function drill(
     return refuse({ reason: 'context' });
   }
   if (model.model !== current.model) return refuse({ reason: 'context' });
+  // Only from a question the page may send: nothing invalid is built upon.
+  if (!askable(current, model)) return refuse({ reason: 'unaskable' });
   // Only a cell of the answer to this very question.
   if (!same(cell.asked, current)) return refuse({ reason: 'stale' });
   let block: SemanticBlock;
@@ -109,15 +112,31 @@ export function drill(
     if (error instanceof IncompatibleResult) return refuse({ reason: 'cell' });
     throw error;
   }
+  // The block answers this question: exactly its selections, each of its kind.
+  const selected = [
+    ...current.dimensions.map((name) => `dimension ${dimensionId(name)}`),
+    ...current.metrics.map((name) => `metric ${metricId(name)}`),
+  ].sort();
+  const columns = block.columns.map((c) => `${c.kind} ${c.selection_id}`).sort();
+  if (!same(columns, selected)) return refuse({ reason: 'cell' });
   const column = block.columns.findIndex((c) => c.selection_id === cell.selection);
   const row = block.rows[cell.row];
   if (column < 0 || !row) return refuse({ reason: 'cell' });
   const declared = block.columns[column]!;
-  // A dimension the question breaks down by, its value not withheld.
+  // A dimension the question breaks down by, its value not withheld by the
+  // answer nor by the catalog, and of its field's very type.
   const from = current.dimensions.find((name) => dimensionId(name) === cell.selection);
-  if (declared.kind !== 'dimension' || declared.masked || from === undefined) {
+  const field = model.fields.find((f) => f.name === from);
+  if (
+    from === undefined ||
+    !field ||
+    declared.kind !== 'dimension' ||
+    declared.masked ||
+    field.capabilities.select !== 'values'
+  ) {
     return refuse({ reason: 'origin' });
   }
+  if (declared.type !== field.type) return refuse({ reason: 'cell' });
   // A field of the same model the session may group by, not asked already.
   if (
     to === from ||
