@@ -18,7 +18,7 @@ postgres-tests = []
 
 [dependencies]
 axum.workspace = true
-base64 = "0.22.1"
+base64 = "0.23.1"
 bi-audit = { path = "../bi-audit" }
 bi-fixtures = { path = "../bi-fixtures" }
 bi-runtime = { path = "../bi-runtime", default-features = false }
